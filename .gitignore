@@ -1,0 +1,38 @@
+# Build artifacts
+build/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+eggs/
+*.egg
+
+# Runtime / data
+.blop/
+.vibetest/
+runs/
+
+# Auth session files
+auth_state*.json
+
+# Environment files
+.env
+.venv/
+venv/
+
+# QA test artifacts
+qa_artifacts/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
