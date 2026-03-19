@@ -8,7 +8,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+@pytest.fixture
+async def init_test_db():
+    from blop.storage.sqlite import init_db
+    await init_db()
+
+
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("init_test_db")
 async def test_discover_flows_returns_fallback_without_api_key():
     """Returns fallback flows when GOOGLE_API_KEY is not set."""
     from blop.engine.discovery import discover_flows
@@ -38,6 +45,7 @@ async def test_discover_flows_returns_fallback_without_api_key():
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("init_test_db")
 async def test_discover_flows_with_gemini_response():
     """Parses Gemini response into flow dicts."""
     from blop.engine.discovery import discover_flows
@@ -80,6 +88,7 @@ async def test_discover_flows_with_gemini_response():
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("init_test_db")
 async def test_discover_flows_count_clamped():
     """Result is always 3-8 flows."""
     from blop.engine.discovery import discover_flows
@@ -119,6 +128,7 @@ async def test_discover_flows_count_clamped():
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("init_test_db")
 async def test_discover_flows_includes_business_criticality():
     """Gemini response includes business_criticality → flows in result have it; missing field falls back to 'other'."""
     from blop.engine.discovery import discover_flows
@@ -178,6 +188,7 @@ async def test_discover_flows_includes_business_criticality():
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("init_test_db")
 async def test_discover_flows_with_repo_path(tmp_path):
     """Uses repo path when provided."""
     from blop.engine.discovery import discover_flows

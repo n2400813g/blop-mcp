@@ -8,7 +8,11 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from blop.config import BLOP_DISCOVERY_MAX_PAGES
+from blop.engine.logger import get_logger
+from blop.engine.secrets import mask_text
 from blop.schemas import SiteInventory
+
+_log = get_logger("discovery")
 
 
 def _url_priority(url: str, business_signals: list[str], auth_signals: list[str], hotspot_paths: set[str]) -> float:
@@ -40,8 +44,17 @@ def _adaptive_budget(base_max_pages: int, business_signals: list[str], auth_sign
 
 
 async def _resolve_profile_storage_state(profile_name: Optional[str]) -> Optional[str]:
-    """Resolve Playwright storage_state path from saved auth profile."""
+    """Resolve Playwright storage_state path from saved auth profile.
+
+    Falls back to env-var credentials (TEST_USERNAME / TEST_PASSWORD / LOGIN_URL)
+    when no profile_name is given, so crawls can reach auth-gated pages automatically.
+    """
     if not profile_name:
+        try:
+            from blop.engine.auth import auto_storage_state_from_env
+            return await auto_storage_state_from_env()
+        except Exception:
+            _log.debug("Failed to auto-resolve storage state from env", exc_info=True)
         return None
     try:
         from blop.storage.sqlite import get_auth_profile
@@ -51,52 +64,103 @@ async def _resolve_profile_storage_state(profile_name: Optional[str]) -> Optiona
         if profile:
             return await resolve_storage_state(profile)
     except Exception:
-        pass
+        _log.debug("Failed to resolve storage state from auth profile", exc_info=True)
     return None
 
 
-def _extract_interactive_nodes_flat(
-    node: dict,
-    max_nodes: int = 50,
-    _count: Optional[list[int]] = None,
-) -> list[dict]:
-    """Flatten an ARIA snapshot into compact interactive nodes."""
-    if _count is None:
-        _count = [0]
-    interactive_roles = {
-        "button", "link", "textbox", "checkbox", "radio", "combobox",
-        "listbox", "menuitem", "tab", "switch", "searchbox", "spinbutton",
-    }
-    role = node.get("role", "")
-    name = node.get("name", "")
-    results: list[dict] = []
-    if role in interactive_roles and name and _count[0] < max_nodes:
-        entry: dict = {"role": role, "name": name}
-        if node.get("disabled"):
-            entry["disabled"] = True
-        results.append(entry)
-        _count[0] += 1
-
-    for child in node.get("children", []):
-        if _count[0] >= max_nodes:
-            break
-        if isinstance(child, dict):
-            results.extend(_extract_interactive_nodes_flat(child, max_nodes=max_nodes, _count=_count))
-    return results
+from blop.engine.dom_utils import extract_interactive_nodes_flat as _extract_interactive_nodes_flat
 
 
 async def _capture_page_structure(page, max_nodes: int = 50) -> list[dict]:
-    """Capture compact interactive structure from Playwright accessibility tree."""
+    """Capture compact interactive structure. Uses ARIA tree first, falls back to DOM query."""
+    # Tier 1: accessibility API with interesting_only=True
     try:
         accessibility = getattr(page, "accessibility", None)
-        if not accessibility or not hasattr(accessibility, "snapshot"):
-            return []
-        snapshot = await accessibility.snapshot(interesting_only=True)
-        if not snapshot or not isinstance(snapshot, dict):
-            return []
-        return _extract_interactive_nodes_flat(snapshot, max_nodes=max_nodes)
+        if accessibility and hasattr(accessibility, "snapshot"):
+            snapshot = await accessibility.snapshot(interesting_only=True)
+            if snapshot and isinstance(snapshot, dict):
+                nodes = _extract_interactive_nodes_flat(snapshot, max_nodes=max_nodes)
+                if nodes:
+                    return nodes
+            # Tier 2: interesting_only=False catches shadow-DOM and non-semantic components
+            snapshot = await accessibility.snapshot(interesting_only=False)
+            if snapshot and isinstance(snapshot, dict):
+                nodes = _extract_interactive_nodes_flat(snapshot, max_nodes=max_nodes)
+                if nodes:
+                    return nodes
+    except Exception:
+        pass
+
+    # Tier 3: page.aria_snapshot() text format (Playwright ≥1.50)
+    try:
+        aria_text = await page.aria_snapshot()
+        if aria_text:
+            nodes = _parse_aria_snapshot_text(aria_text, max_nodes=max_nodes)
+            if nodes:
+                return nodes
+    except Exception:
+        pass
+
+    # Tier 4: DOM query — compute effective ARIA role from HTML semantics
+    try:
+        dom_nodes = await page.evaluate("""(maxNodes) => {
+            const TAG_ROLE = {a:'link',button:'button',select:'combobox',textarea:'textbox',h1:'heading',h2:'heading',h3:'heading'};
+            const INPUT_ROLE = {checkbox:'checkbox',radio:'radio',button:'button',submit:'button',reset:'button'};
+            const SELECTORS = ['a[href]','button','input:not([type="hidden"])','select','textarea','[role]','h1','h2','h3'];
+            const seen = new Set();
+            const results = [];
+            for (const sel of SELECTORS) {
+                if (results.length >= maxNodes) break;
+                for (const el of document.querySelectorAll(sel)) {
+                    if (results.length >= maxNodes) break;
+                    if (seen.has(el)) continue;
+                    seen.add(el);
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width === 0 && rect.height === 0) continue;
+                    const tag = el.tagName.toLowerCase();
+                    const explicitRole = el.getAttribute('role');
+                    let role = explicitRole;
+                    if (!role) {
+                        if (tag === 'input') role = INPUT_ROLE[el.type] || 'textbox';
+                        else role = TAG_ROLE[tag] || null;
+                    }
+                    if (!role) continue;
+                    const name = (
+                        el.getAttribute('aria-label') ||
+                        el.getAttribute('title') ||
+                        (el.textContent||'').trim().slice(0,80) ||
+                        el.getAttribute('placeholder') ||
+                        el.value || ''
+                    ).trim();
+                    if (!name) continue;
+                    results.push({role, name, disabled: el.disabled || el.getAttribute('disabled') !== null});
+                }
+            }
+            return results;
+        }""", max_nodes)
+        return dom_nodes or []
     except Exception:
         return []
+
+
+def _parse_aria_snapshot_text(aria_text: str, max_nodes: int = 50) -> list[dict]:
+    """Parse Playwright aria_snapshot() YAML-like text into role/name dicts."""
+    import re
+    _INTERACTIVE = {"button", "link", "textbox", "checkbox", "radio", "combobox",
+                    "listbox", "menuitem", "tab", "switch", "searchbox", "spinbutton"}
+    nodes = []
+    for line in aria_text.splitlines():
+        line = line.strip()
+        if not line.startswith("- "):
+            continue
+        m = re.match(r'^-\s+(\w[\w-]*)\s+"([^"]+)"', line)
+        if not m:
+            continue
+        role, name = m.group(1), m.group(2)
+        nodes.append({"role": role, "name": name[:80]})
+        if len(nodes) >= max_nodes:
+            break
+    return nodes
 
 
 async def inventory_site(
@@ -140,7 +204,7 @@ async def inventory_site(
                 if node.node_type == "route" and node.confidence >= 0.7:
                     hotspot_paths.add(node.label)
     except Exception:
-        pass
+        _log.debug("Failed to load previous context graph for hotspot paths", exc_info=True)
 
     storage_state = await _resolve_profile_storage_state(profile_name)
 
@@ -212,6 +276,10 @@ async def inventory_site(
                     page_nodes = await _capture_page_structure(page, max_nodes=50)
 
                     all_buttons.extend(page_buttons)
+                    source_path = urlparse(url).path or "/"
+                    for lnk in page_links:
+                        lnk["source_route"] = source_path
+                        lnk["source_url"] = url
                     all_links.extend(page_links)
                     all_forms.extend(page_forms)
                     all_headings.extend(page_headings)
@@ -268,12 +336,12 @@ async def inventory_site(
                         try:
                             await page.close()
                         except Exception:
-                            pass
+                            _log.debug("Failed to close page after crawl error", exc_info=True)
         finally:
             try:
                 await context.close()
             except Exception:
-                pass
+                _log.debug("Failed to close browser context", exc_info=True)
             await browser.close()
 
     return SiteInventory(
@@ -314,7 +382,7 @@ async def get_page_structure(
                 await page.goto(url, wait_until="networkidle", timeout=20000)
             except Exception:
                 await page.goto(url, timeout=20000)
-            await wait_for_spa_ready(page, settle_ms=1200, timeout_ms=12000)
+            await wait_for_spa_ready(page, settle_ms=2500, timeout_ms=15000)
             nodes = await _capture_page_structure(page, max_nodes=80)
             return {
                 "app_url": app_url,
@@ -354,7 +422,7 @@ async def plan_flows_from_inventory(
             from blop.engine.context_graph import detect_app_archetype
             archetype_str = detect_app_archetype(inventory)
         except Exception:
-            pass
+            _log.debug("Failed to detect app archetype for thinking budget", exc_info=True)
         if archetype_str in ("editor_heavy", "checkout_heavy") or len(inventory.routes) > 12:
             llm_kwargs["thinking_budget"] = thinking_budget
 
@@ -372,10 +440,13 @@ async def plan_flows_from_inventory(
         inventory_text=inventory_text,
         extra_context=extra_context,
     )
+    prompt = mask_text(prompt)
 
     try:
         response = await llm.ainvoke([make_message(prompt)])
         text = str(response.content) if hasattr(response, "content") else str(response)
+        # Strip markdown code fences before extracting JSON array
+        text = re.sub(r"```(?:json)?\s*", "", text).strip()
         m = re.search(r"\[.*\]", text, re.DOTALL)
         if m:
             flows = json.loads(m.group())
@@ -393,7 +464,7 @@ async def plan_flows_from_inventory(
             if valid_flows:
                 return valid_flows
     except Exception:
-        pass
+        _log.debug("LLM flow planning failed, using fallback flows", exc_info=True)
 
     return _fallback_flows(inventory.app_url)
 
@@ -457,7 +528,7 @@ async def discover_flows(
         from blop.storage.sqlite import save_site_inventory
         await save_site_inventory(app_url, inventory.to_dict())
     except Exception:
-        pass
+        _log.debug("Failed to save site inventory in discover_flows", exc_info=True)
 
     if repo_path:
         flows = await _flows_from_repo(repo_path, app_url, inventory, business_goal)
@@ -534,7 +605,7 @@ async def explore_site_inventory(
         from blop.storage.sqlite import save_site_inventory
         await save_site_inventory(app_url, inventory.to_dict())
     except Exception:
-        pass
+        _log.debug("Failed to save site inventory in explore_site_inventory", exc_info=True)
     return {
         "app_url": app_url,
         "inventory_summary": {
@@ -594,9 +665,12 @@ business_criticality must be one of: revenue, activation, retention, support, ot
 Return only a JSON array:
 [{{"flow_name": "...", "goal": "...", "starting_url": "...", "preconditions": [], "likely_assertions": ["..."], "severity_if_broken": "high", "confidence": 0.8, "business_criticality": "revenue"}}]"""
 
+    prompt = mask_text(prompt)
+
     try:
         response = await llm.ainvoke([make_message(prompt)])
         text = str(response.content) if hasattr(response, "content") else str(response)
+        text = re.sub(r"```(?:json)?\s*", "", text).strip()
         m = re.search(r"\[.*\]", text, re.DOTALL)
         if m:
             flows = json.loads(m.group())
@@ -613,7 +687,7 @@ Return only a JSON array:
             if valid:
                 return valid
     except Exception:
-        pass
+        _log.debug("LLM repo-based flow generation failed, falling back to inventory planning", exc_info=True)
 
     return await plan_flows_from_inventory(inventory, business_goal=business_goal)
 

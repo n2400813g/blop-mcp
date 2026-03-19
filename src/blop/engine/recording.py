@@ -12,7 +12,10 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from blop.config import BLOP_AGENT_MAX_ACTIONS_PER_STEP, BLOP_AGENT_MAX_FAILURES
+from blop.engine.logger import get_logger
 from blop.schemas import FlowStep, StructuredAssertion
+
+_log = get_logger("recording")
 
 # Shared agent instructions used by both recording and goal-fallback regression agents.
 # Kept here so both contexts stay in sync without duplication.
@@ -38,7 +41,7 @@ class BlopActions:
                         if not message_substring or message_substring.lower() in text.lower():
                             return "visible"
                 except Exception:
-                    pass
+                    _log.debug("query toast element for visibility check", exc_info=True)
             await _asyncio.sleep(0.5)
         return "not_found"
 
@@ -59,7 +62,7 @@ class BlopActions:
                     await el.click()
                     return "dismissed"
             except Exception:
-                pass
+                _log.debug("click modal close button", exc_info=True)
         return "no_modal"
 
 
@@ -130,7 +133,7 @@ async def record_flow(
                 goal=goal,
             )
         except Exception:
-            pass
+            _log.debug("resolve SPA entry URL for goal", exc_info=True)
     if entry_url_hint and entry_url_hint != app_url:
         steps.append(FlowStep(
             step_id=step_counter,
@@ -145,6 +148,20 @@ async def record_flow(
         task = f"Navigate to {entry_url_hint} then: {goal}"
     else:
         task = f"Navigate to {app_url} then: {goal}"
+
+    # Inject credentials so the agent can authenticate if it hits a login gate
+    # (covers both initial auth and mid-session expiry during recording).
+    from blop.config import LOGIN_URL, TEST_AUTH_URL, TEST_USERNAME, TEST_PASSWORD
+    _username = TEST_USERNAME
+    _password = TEST_PASSWORD
+    _login_url = LOGIN_URL or TEST_AUTH_URL
+    if _username and _password and _login_url:
+        task += (
+            f"\n\nIf you encounter a login page or are redirected to an auth page, "
+            f"use these credentials: email/username={_username} password={_password} "
+            f"(login URL: {_login_url}). "
+            f"Do NOT create a new account — log in with the provided credentials."
+        )
     step_screenshots: list[str] = []
     screenshot_task: Optional[asyncio.Task] = None
     step_idx_counter = [0]
@@ -162,7 +179,7 @@ async def record_flow(
             except asyncio.CancelledError:
                 break
             except Exception:
-                pass
+                _log.debug("poll screenshot capture", exc_info=True)
 
     try:
         agent_kwargs: dict = dict(
@@ -188,7 +205,7 @@ async def record_flow(
                 BlopActions.dismiss_modal,
             ]
         except Exception:
-            pass
+            _log.debug("attach BlopActions to agent", exc_info=True)
         agent = Agent(**agent_kwargs)
         screenshot_task = asyncio.create_task(_poll_screenshots())
 
@@ -208,7 +225,7 @@ async def record_flow(
             if ctx and ctx.pages:
                 page_ref = ctx.pages[0]
         except Exception:
-            pass
+            _log.debug("get page reference from browser session", exc_info=True)
 
         all_actions = history.model_actions() if hasattr(history, "model_actions") else []
         if os.getenv("BLOP_DEBUG"):
@@ -224,7 +241,7 @@ async def record_flow(
                         _dbg.write(f"  errors() failed: {_ee}\n")
                     _dbg.write(f"  history_len: {len(getattr(history, 'history', []))}\n")
             except Exception:
-                pass
+                _log.debug("debug log agent history", exc_info=True)
         if hasattr(history, "model_actions"):
             for i, action in enumerate(history.model_actions()):
                 selector: Optional[str] = None
@@ -265,11 +282,21 @@ async def record_flow(
                             if elem_text:
                                 target_text = elem_text[:100]
                         except Exception:
-                            pass
+                            _log.debug("extract interacted element xpath and text", exc_info=True)
 
                     desc = str(action)[:200]
                     if not target_text:
-                        target_text = _extract_target_text(desc)
+                        # Prefer meaningful param values over the raw dict repr (which would
+                        # produce the action key name, e.g. "write_file", as the target text).
+                        if isinstance(params, dict):
+                            param_text = (
+                                params.get("text") or params.get("description")
+                                or params.get("query") or params.get("value")
+                            )
+                            if param_text:
+                                target_text = str(param_text)[:100]
+                        if not target_text:
+                            target_text = _extract_target_text(desc)
                 else:
                     # Fallback for typed action objects (older browser-use versions)
                     action_name = type(action).__name__.lower() if action else "click"
@@ -301,13 +328,18 @@ async def record_flow(
                         page_ref, target_text
                     )
                     if interacted_xpath:
-                        testid_selector, label_text = await _capture_locator_attrs(
+                        testid_selector, label_text, dom_role, dom_name = await _capture_locator_attrs(
                             page_ref, interacted_xpath, mapped
                         )
                         if testid_selector:
                             selector = testid_selector
                         elif not selector:
                             selector = interacted_xpath
+                        # Use DOM-computed role/name as fallback when accessibility snapshot returned empty
+                        if not aria_role and dom_role:
+                            aria_role = dom_role
+                        if not aria_name and dom_name:
+                            aria_name = dom_name
 
                 if _is_brittle_selector(selector):
                     selector = None
@@ -356,15 +388,15 @@ async def record_flow(
                     ))
                     step_counter += 1
         except Exception:
-            pass
+            _log.debug("capture final screenshot and generate assertions", exc_info=True)
 
     except Exception:
-        pass
+        _log.debug("agent run or step capture", exc_info=True)
     finally:
         try:
             await browser_session.aclose()
         except Exception:
-            pass
+            _log.debug("close browser session", exc_info=True)
 
     # Guarantee at least a navigation + assertion
     if len(steps) <= 1:
@@ -421,6 +453,9 @@ Example:
   {{"type": "url_contains", "target": null, "expected": "/dashboard", "description": "URL contains /dashboard"}}
 ]
 """
+        from blop.engine.secrets import mask_text
+        prompt = mask_text(prompt)
+
         from langchain_core.messages import HumanMessage
         response = await llm.ainvoke([HumanMessage(content=[
             {"type": "text", "text": prompt},
@@ -449,7 +484,7 @@ Example:
                         results.append((desc, sa))
                 return results
     except Exception:
-        pass
+        _log.debug("generate assertions from screenshot", exc_info=True)
 
     return [(f"Page shows expected content for: {goal}", None)]
 
@@ -457,11 +492,13 @@ Example:
 async def _get_page_aria_context(page) -> str:
     """Return a compact ARIA tree string of the page's interactive elements (max 40 nodes)."""
     try:
+        from blop.engine.snapshots import format_snapshot_for_llm
+
         snapshot = await page.accessibility.snapshot(interesting_only=True)
         if not snapshot:
             return ""
         nodes = _extract_interactive_nodes(snapshot, max_nodes=40)
-        return json.dumps(nodes, separators=(",", ":"))
+        return format_snapshot_for_llm(nodes)
     except Exception:
         return ""
 
@@ -484,16 +521,18 @@ async def _capture_aria_for_element(
             sub = _serialize_aria_node(node, depth=0, max_depth=2)
             return role, name, json.dumps(sub, separators=(",", ":"))
     except Exception:
-        pass
+        _log.debug("capture ARIA for element", exc_info=True)
     return None, None, None
 
 
 async def _capture_locator_attrs(
     page, xpath: str, action: str
-) -> tuple[Optional[str], Optional[str]]:
-    """Extract data-testid and label text via JavaScript for stable locators."""
+) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """Extract data-testid, label text, DOM role, and DOM name via JavaScript for stable locators."""
     testid_selector: Optional[str] = None
     label_text: Optional[str] = None
+    dom_role: Optional[str] = None
+    dom_name: Optional[str] = None
     try:
         result = await page.evaluate(
             """(xpath) => {
@@ -515,7 +554,25 @@ async def _capture_locator_attrs(
                         const lbl = document.querySelector('label[for="' + el.id + '"]');
                         if (lbl) label = lbl.textContent.trim();
                     }
-                    return {testid: testid, label: label};
+                    // Compute effective ARIA role from tag+type
+                    const explicitRole = el.getAttribute('role');
+                    const tag = el.tagName.toLowerCase();
+                    const TAG_ROLE = {a:'link',button:'button',select:'combobox',textarea:'textbox',h1:'heading',h2:'heading',h3:'heading'};
+                    const INPUT_TYPE_ROLE = {checkbox:'checkbox',radio:'radio',button:'button',submit:'button',reset:'button'};
+                    let role = explicitRole;
+                    if (!role) {
+                        if (tag === 'input') role = INPUT_TYPE_ROLE[el.type] || 'textbox';
+                        else role = TAG_ROLE[tag] || null;
+                    }
+                    // Compute accessible name
+                    const domName = (
+                        el.getAttribute('aria-label') ||
+                        el.getAttribute('title') ||
+                        (el.textContent||'').trim().slice(0, 80) ||
+                        el.getAttribute('placeholder') ||
+                        el.value || ''
+                    ).trim() || null;
+                    return {testid: testid, label: label, role: role, name: domName};
                 } catch(e) { return null; }
             }""",
             xpath,
@@ -526,9 +583,11 @@ async def _capture_locator_attrs(
                 testid_selector = f"[data-testid='{testid_val}']"
             if action == "fill" and result.get("label"):
                 label_text = str(result["label"])[:100]
+            dom_role = result.get("role") or None
+            dom_name = (result.get("name") or "").strip() or None
     except Exception:
-        pass
-    return testid_selector, label_text
+        _log.debug("capture locator attributes (testid, label)", exc_info=True)
+    return testid_selector, label_text, dom_role, dom_name
 
 
 def _find_aria_node(node: dict, target_text: str) -> Optional[dict]:
@@ -615,7 +674,13 @@ def _is_brittle_selector(selector: Optional[str]) -> bool:
 def _map_action(action_name: str) -> Optional[str]:
     name = action_name.lower().replace("_", "")
     # Actions to skip (no browser interaction to replay)
-    skip = {"done", "extractpagecontent", "extract", "screenshot", "saveaspdf", "searchpage", "findelements", "scroll", "scrolldown", "scrollup", "scrolltoelement"}
+    skip = {
+        "done", "extractpagecontent", "extract", "screenshot", "saveaspdf",
+        "searchpage", "findelements", "scroll", "scrolldown", "scrollup", "scrolltoelement",
+        # browser-use internal actions with no UI replay equivalent
+        "goback", "writefile", "replacefile", "opentab", "closetab",
+        "cacheclickelement", "cachetype", "cacheextract",
+    }
     if name in skip:
         return None
     mapping = {
@@ -626,7 +691,6 @@ def _map_action(action_name: str) -> Optional[str]:
         "sendkeys": "fill",
         "navigate": "navigate",
         "gotourl": "navigate",
-        "goback": "navigate",
         "searchgoogle": "navigate",
         "selectdropdownoption": "select",
         "selectoption": "select",
@@ -768,7 +832,7 @@ async def _resolve_spa_entry_url(
                     continue
 
         except Exception:
-            pass
+            _log.debug("resolve SPA entry URL (strategy 3)", exc_info=True)
         finally:
             await browser.close()
 

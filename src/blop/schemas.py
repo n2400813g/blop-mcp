@@ -15,6 +15,7 @@ class StructuredAssertion(BaseModel):
         "page_title",       # document.title contains expected substring
         "count",            # element count equals expected (integer string)
         "semantic",         # requires LLM/vision evaluation
+        "visual_match",     # pixel-based + LLM visual comparison against golden baseline
     ]
     target: str | None = None      # CSS selector, ARIA role name, or URL substring
     expected: str | None = None    # expected text/value/count
@@ -280,6 +281,10 @@ class ReplayStepResult:
     aria_consistency: float = 0.0
     repair_confidence: float = 0.0
     failure_reason: str | None = None
+    healed_selector: str | None = None
+    healed_locator_type: str | None = None
+    healed_role: str | None = None
+    healed_name: str | None = None
 
 
 @dataclass
@@ -295,6 +300,18 @@ class ReplayTrace:
     screenshots: list[str] = field(default_factory=list)
     raw_result: str = ""
     trace_path: str | None = None
+    performance_metrics: list[dict] = field(default_factory=list)
+
+
+class HealedStep(BaseModel):
+    """Record of a step that was automatically healed during regression replay."""
+    step_id: int
+    original_selector: str | None = None
+    healed_selector: str | None = None
+    healed_locator_type: str | None = None  # css | role | label | text
+    healed_role: str | None = None
+    healed_name: str | None = None
+    repair_confidence: float = 0.0
 
 
 class FailureCase(BaseModel):
@@ -321,6 +338,9 @@ class FailureCase(BaseModel):
     repair_confidence: float = 0.0
     stability_fingerprints: list[StabilityFingerprint] = Field(default_factory=list)
     healing_decision: Literal["auto_heal", "propose_patch", "none"] = "none"
+    healed_steps: list[HealedStep] = Field(default_factory=list)
+    rerecorded: bool = False
+    performance_metrics: list[dict] = Field(default_factory=list)
 
 
 class DiscoverResult(BaseModel):

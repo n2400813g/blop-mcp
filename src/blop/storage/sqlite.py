@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import aiosqlite
 
 from blop.config import BLOP_DB_PATH
+from blop.engine.logger import get_logger
 from blop.schemas import (
     AuthProfile,
     FailureCase,
@@ -18,6 +19,8 @@ from blop.schemas import (
     SiteContextGraph,
     TelemetrySignal,
 )
+
+_log = get_logger("sqlite")
 
 
 def _db_path() -> str:
@@ -219,6 +222,10 @@ async def _migrate(db) -> None:
         (11, "auth_profiles", "user_data_dir", "TEXT"),
         (12, "context_graphs", "profile_name", "TEXT"),
         (13, "context_graphs", "archetype", "TEXT"),
+        (14, "run_cases", "healed_steps_json", "TEXT"),
+        (15, "run_cases", "rerecorded", "INTEGER DEFAULT 0"),
+        (16, "run_cases", "performance_metrics_json", "TEXT"),
+        (17, "runs", "next_actions_json", "TEXT"),
     ]
 
     current_version = await _get_schema_version(db)
@@ -251,6 +258,24 @@ async def save_auth_profile(profile: AuthProfile, storage_state_path: str | None
             ),
         )
         await db.commit()
+
+
+async def list_auth_profiles() -> list[dict]:
+    async with aiosqlite.connect(_db_path()) as db:
+        async with db.execute(
+            "SELECT profile_name, auth_type, storage_state_path, created_at, refreshed_at FROM auth_profiles ORDER BY created_at DESC"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [
+                {
+                    "profile_name": row[0],
+                    "auth_type": row[1],
+                    "storage_state_path": row[2],
+                    "created_at": row[3],
+                    "refreshed_at": row[4],
+                }
+                for row in rows
+            ]
 
 
 async def get_auth_profile(profile_name: str) -> AuthProfile | None:
@@ -325,13 +350,13 @@ async def get_flow(flow_id: str) -> RecordedFlow | None:
                     try:
                         assertions_json = json.loads(row[6])
                     except Exception:
-                        pass
+                        _log.debug("failed to parse assertions_json for flow", exc_info=True)
                 spa_hints = SpaHints()
                 if row[8]:
                     try:
                         spa_hints = SpaHints.model_validate_json(row[8])
                     except Exception:
-                        pass
+                        _log.debug("failed to parse spa_hints for flow", exc_info=True)
 
                 return RecordedFlow(
                     flow_id=row[0],
@@ -406,17 +431,24 @@ async def update_run_status(run_id: str, status: str) -> None:
         await db.commit()
 
 
-async def update_run(run_id: str, status: str, cases: list[FailureCase], completed_at: str | None = None) -> None:
+async def update_run(
+    run_id: str,
+    status: str,
+    cases: list[FailureCase],
+    completed_at: str | None = None,
+    next_actions: list[str] | None = None,
+) -> None:
     async with aiosqlite.connect(_db_path()) as db:
         await db.execute(
             """
-            UPDATE runs SET status = ?, cases_json = ?, completed_at = ?
+            UPDATE runs SET status = ?, cases_json = ?, completed_at = ?, next_actions_json = ?
             WHERE run_id = ?
             """,
             (
                 status,
                 json.dumps([c.model_dump() for c in cases]),
                 completed_at,
+                json.dumps(next_actions) if next_actions else None,
                 run_id,
             ),
         )
@@ -427,12 +459,19 @@ async def get_run(run_id: str) -> dict | None:
     async with aiosqlite.connect(_db_path()) as db:
         async with db.execute(
             """SELECT run_id, app_url, profile_name, flow_ids_json, status,
-                      started_at, completed_at, headless, artifacts_dir, cases_json, run_mode
+                      started_at, completed_at, headless, artifacts_dir, cases_json, run_mode,
+                      next_actions_json
                FROM runs WHERE run_id = ?""",
             (run_id,),
         ) as cursor:
             row = await cursor.fetchone()
             if row:
+                next_actions: list[str] = []
+                if row[11]:
+                    try:
+                        next_actions = json.loads(row[11])
+                    except Exception:
+                        _log.debug("failed to parse next_actions_json for run", exc_info=True)
                 return {
                     "run_id": row[0],
                     "app_url": row[1],
@@ -445,6 +484,7 @@ async def get_run(run_id: str) -> dict | None:
                     "artifacts_dir": row[8] or "",
                     "cases": json.loads(row[9]) if row[9] else [],
                     "run_mode": row[10] or "hybrid",
+                    "next_actions": next_actions,
                 }
     return None
 
@@ -491,8 +531,9 @@ async def save_case(case: FailureCase) -> None:
             """
             INSERT OR REPLACE INTO run_cases
             (case_id, run_id, flow_id, status, severity, result_json,
-             replay_mode, step_failure_index, assertion_failures_json, business_criticality)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             replay_mode, step_failure_index, assertion_failures_json, business_criticality,
+             healed_steps_json, rerecorded)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 case.case_id,
@@ -505,6 +546,8 @@ async def save_case(case: FailureCase) -> None:
                 case.step_failure_index,
                 json.dumps(case.assertion_failures),
                 case.business_criticality,
+                json.dumps([h.model_dump() for h in case.healed_steps]) if case.healed_steps else None,
+                1 if case.rerecorded else 0,
             ),
         )
         await db.commit()
@@ -522,7 +565,7 @@ async def list_cases_for_run(run_id: str) -> list[FailureCase]:
                 try:
                     cases.append(FailureCase.model_validate_json(row[0]))
                 except Exception:
-                    pass
+                    _log.debug("failed to parse result_json for run case", exc_info=True)
             return cases
 
 
@@ -617,6 +660,52 @@ async def list_artifacts_for_run(run_id: str) -> list[dict]:
             ]
 
 
+async def update_flow_step_selector(flow_id: str, step_id: int, updates: dict) -> bool:
+    """Persist healed selector fields back into a recorded flow's step.
+
+    ``updates`` may contain keys like ``selector``, ``aria_role``, ``aria_name``,
+    ``testid_selector``, ``label_text``, or ``target_text``.
+    Returns True if the flow was found and updated.
+    """
+    from blop.schemas import FlowStep, SpaHints
+
+    async with aiosqlite.connect(_db_path()) as db:
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            async with db.execute(
+                "SELECT steps_json FROM recorded_flows WHERE flow_id = ?",
+                (flow_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    await db.rollback()
+                    return False
+
+            steps_data = json.loads(row[0])
+            changed = False
+            for s in steps_data:
+                if s.get("step_id") == step_id:
+                    for key, val in updates.items():
+                        if val is not None:
+                            s[key] = val
+                            changed = True
+                    break
+
+            if not changed:
+                await db.rollback()
+                return False
+
+            await db.execute(
+                "UPDATE recorded_flows SET steps_json = ? WHERE flow_id = ?",
+                (json.dumps(steps_data), flow_id),
+            )
+            await db.commit()
+            return True
+        except Exception:
+            await db.rollback()
+            raise
+
+
 async def list_cases_for_flow(flow_id: str, limit: int = 50) -> list[FailureCase]:
     safe_limit = max(1, min(limit, 500))
     async with aiosqlite.connect(_db_path()) as db:
@@ -636,20 +725,8 @@ async def list_cases_for_flow(flow_id: str, limit: int = 50) -> list[FailureCase
                 try:
                     cases.append(FailureCase.model_validate_json(row[0]))
                 except Exception:
-                    pass
+                    _log.debug("failed to parse result_json for flow case", exc_info=True)
             return cases
-
-
-async def save_execution_plan(plan_id: str, intent_dict: dict) -> None:
-    async with aiosqlite.connect(_db_path()) as db:
-        await db.execute(
-            """
-            INSERT OR REPLACE INTO execution_plans (plan_id, intent_json)
-            VALUES (?, ?)
-            """,
-            (plan_id, json.dumps(intent_dict)),
-        )
-        await db.commit()
 
 
 async def save_context_graph(graph: SiteContextGraph) -> None:
@@ -904,7 +981,7 @@ async def list_open_incident_clusters(app_url: str, limit: int = 100) -> list[In
                 try:
                     clusters.append(IncidentCluster.model_validate_json(row[0]))
                 except Exception:
-                    pass
+                    _log.debug("failed to parse cluster_json for incident cluster", exc_info=True)
             return clusters
 
 
@@ -1057,7 +1134,7 @@ async def list_cases_for_flow_since(flow_id: str, since_iso: str, limit: int = 5
                 try:
                     cases.append(FailureCase.model_validate_json(row[0]))
                 except Exception:
-                    pass
+                    _log.debug("failed to parse result_json for flow case (since)", exc_info=True)
             return cases
 
 

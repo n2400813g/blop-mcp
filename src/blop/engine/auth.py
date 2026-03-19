@@ -57,7 +57,8 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
         password_env = profile.password_env or "TEST_PASSWORD"
         username = os.getenv(username_env)
         password = os.getenv(password_env)
-        login_url = profile.login_url or os.getenv("LOGIN_URL") or os.getenv("TEST_AUTH_URL")
+        from blop.config import LOGIN_URL, TEST_AUTH_URL
+        login_url = profile.login_url or LOGIN_URL or TEST_AUTH_URL
 
         # No credentials — fall back to existing state file if available
         if not (username and password and login_url):
@@ -210,6 +211,19 @@ async def validate_auth_session(
             return not any(pat in current_url for pat in auth_redirect_patterns)
     except Exception:
         return False
+
+
+async def auto_storage_state_from_env() -> Optional[str]:
+    """Resolve a storage state from TEST_USERNAME / TEST_PASSWORD / LOGIN_URL env vars.
+
+    Creates an ephemeral AuthProfile with profile_name '_auto_env' so the result lands
+    in the shared 1-hour in-memory cache. Returns None if any required credential is absent.
+    """
+    from blop.config import LOGIN_URL, TEST_AUTH_URL, TEST_USERNAME, TEST_PASSWORD
+    if not (TEST_USERNAME and TEST_PASSWORD and (LOGIN_URL or TEST_AUTH_URL)):
+        return None
+    profile = AuthProfile(profile_name="_auto_env", auth_type="env_login")
+    return await _env_login(profile)
 
 
 async def _cookie_json(profile: AuthProfile) -> Optional[str]:

@@ -73,7 +73,7 @@ The system follows a **discover → auth → record → run → results** pipeli
 
 12. **`storage/sqlite.py`** — aiosqlite. 15 tables including `auth_profiles`, `recorded_flows`, `runs`, `run_cases`, `artifacts`, `site_inventories`, `context_graphs`, `run_health_events`, `release_snapshots`, `incident_clusters`, `remediation_drafts`, `telemetry_signals`, `correlation_reports`, `schema_version`. `init_db()` creates/migrates on startup with versioned migrations.
 
-13. **`storage/files.py`** — Path helpers for `runs/screenshots/`, `runs/traces/`, `runs/console/`.
+13. **`storage/files.py`** — Path helpers for `runs/screenshots/`, `runs/traces/`, `runs/console/`, `runs/network/`.
 
 14. **`reporting/results.py`** — `build_report()` aggregates run+cases into structured response.
 
@@ -81,10 +81,13 @@ The system follows a **discover → auth → record → run → results** pipeli
 
 16. **`engine/context_graph.py`** — App archetype detection, site context graph builder, and graph diff for v2 surface tools.
 
-## Core MCP Tools (14)
+## Core MCP Tools (17)
 
 | Tool | Purpose |
 |------|---------|
+| `evaluate_web_task` | One-shot evaluator: URL + task → rich report with screenshots/console/network evidence |
+| `setup_browser_state` | Interactive login capture (alias for capture_auth_session, web-eval-agent compatible) |
+| `cancel_run` | Cancel a running/queued test and mark as cancelled |
 | `discover_test_flows` | Scan URL/repo → 3-8 candidate flows (with business_criticality) |
 | `explore_site_inventory` | Crawl-only inventory map (routes/forms/buttons/signals) without flow planning |
 | `get_page_structure` | Snapshot one page's compact ARIA interactive layout (role/name pairs) |

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -92,19 +93,28 @@ async def test_run_and_persist_transitions_to_completed():
     async def capture_update_status(run_id: str, status: str) -> None:
         status_transitions.append(status)
 
-    with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=flow):
-        with patch("blop.engine.regression.run_flows", new_callable=AsyncMock, return_value=[case]):
-            with patch("blop.engine.classifier.classify_case", new_callable=AsyncMock, return_value=case):
-                with patch("blop.storage.sqlite.save_case", new_callable=AsyncMock):
-                    with patch("blop.storage.sqlite.update_run", new_callable=AsyncMock):
-                        with patch("blop.storage.sqlite.update_run_status", side_effect=capture_update_status):
-                            await _run_and_persist(
-                                run_id="run1",
-                                flow_ids=["flow1"],
-                                app_url="https://example.com",
-                                storage_state=None,
-                                headless=True,
-                            )
+    with ExitStack() as stack:
+        stack.enter_context(patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=flow))
+        stack.enter_context(patch("blop.engine.regression.run_flows", new_callable=AsyncMock, return_value=[case]))
+        stack.enter_context(patch("blop.engine.classifier.classify_case", new_callable=AsyncMock, return_value=case))
+        stack.enter_context(
+            patch(
+                "blop.engine.classifier.classify_run",
+                new_callable=AsyncMock,
+                return_value={"next_actions": [], "severity_counts": {}, "failed_cases": []},
+            )
+        )
+        stack.enter_context(patch("blop.storage.sqlite.save_case", new_callable=AsyncMock))
+        stack.enter_context(patch("blop.storage.sqlite.update_run", new_callable=AsyncMock))
+        stack.enter_context(patch("blop.storage.sqlite.update_run_status", side_effect=capture_update_status))
+        stack.enter_context(patch("blop.storage.sqlite.save_run_health_event", new_callable=AsyncMock))
+        await _run_and_persist(
+            run_id="run1",
+            flow_ids=["flow1"],
+            app_url="https://example.com",
+            storage_state=None,
+            headless=True,
+        )
 
     assert "running" in status_transitions
     # completed is set via update_run, not update_run_status
@@ -120,17 +130,18 @@ async def test_run_and_persist_exception_transitions_to_failed():
     with patch("blop.storage.sqlite.get_flow", side_effect=Exception("DB corrupted")):
         with patch("blop.storage.sqlite.update_run_status", new_callable=AsyncMock):
             with patch("blop.storage.sqlite.update_run", mock_update_run):
-                await _run_and_persist(
-                    run_id="run1",
-                    flow_ids=["flow1"],
-                    app_url="https://example.com",
-                    storage_state=None,
-                    headless=True,
-                )
+                with patch("blop.storage.sqlite.save_run_health_event", new_callable=AsyncMock):
+                    await _run_and_persist(
+                        run_id="run1",
+                        flow_ids=["flow1"],
+                        app_url="https://example.com",
+                        storage_state=None,
+                        headless=True,
+                    )
 
     mock_update_run.assert_called_once()
     call_args = mock_update_run.call_args
-    assert call_args[0][1] == "failed"
+    assert call_args.kwargs["status"] == "failed"
 
 
 @pytest.mark.asyncio

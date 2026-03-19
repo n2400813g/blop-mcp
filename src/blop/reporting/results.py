@@ -13,6 +13,16 @@ def _severity_label(case: FailureCase) -> str:
     return sev
 
 
+def _enrich_case(c: FailureCase) -> dict:
+    """Return a case payload enriched with reporting metadata."""
+    d = c.model_dump()
+    d["artifact_paths"] = c.screenshots
+    d["severity_label"] = _severity_label(c)
+    d["healed_step_count"] = len(c.healed_steps or [])
+    d["was_rerecorded"] = c.rerecorded
+    return d
+
+
 async def build_report(run: dict, cases: list[FailureCase]) -> dict:
     severity_counts: dict[str, int] = {
         "blocker": 0, "high": 0, "medium": 0, "low": 0, "none": 0, "pass": 0, "error": 0
@@ -35,20 +45,9 @@ async def build_report(run: dict, cases: list[FailureCase]) -> dict:
             "Check save_auth_profile and ensure your credentials env vars are set, then retry."
         )
 
-    # Enrich case dicts with replay metadata and severity label
-    cases_out = []
-    for c in cases:
-        d = c.model_dump()
-        d["artifact_paths"] = c.screenshots
-        d["severity_label"] = _severity_label(c)
-        cases_out.append(d)
-
-    failed_out = []
-    for c in failed:
-        d = c.model_dump()
-        d["artifact_paths"] = c.screenshots
-        d["severity_label"] = _severity_label(c)
-        failed_out.append(d)
+    # Enrich case dicts with replay metadata, severity label, and healing info
+    cases_out = [_enrich_case(c) for c in cases]
+    failed_out = [_enrich_case(c) for c in failed]
 
     return {
         "run_id": run.get("run_id", ""),
@@ -60,6 +59,6 @@ async def build_report(run: dict, cases: list[FailureCase]) -> dict:
         "failed_cases": failed_out,
         "artifacts_dir": run.get("artifacts_dir", ""),
         "run_mode": run.get("run_mode", "hybrid"),
-        "next_actions": [],
+        "next_actions": run.get("next_actions", []),
         **extra,
     }

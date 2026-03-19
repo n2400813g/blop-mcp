@@ -54,11 +54,16 @@ async def get_artifact_index_resource(run_id: str) -> dict:
         return {"error": f"Run {run_id} not found"}
     artifacts = await sqlite.list_artifacts_for_run(run_id)
     cases = await sqlite.list_cases_for_run(run_id)
+    artifact_types: dict[str, int] = {}
+    for a in artifacts:
+        atype = a.get("artifact_type", "unknown") if isinstance(a, dict) else getattr(a, "artifact_type", "unknown")
+        artifact_types[atype] = artifact_types.get(atype, 0) + 1
     return {
         "run_id": run_id,
         "status": run.get("status", "unknown"),
         "artifacts_dir": run.get("artifacts_dir", ""),
         "artifact_count": len(artifacts),
+        "artifact_types": artifact_types,
         "artifacts": artifacts,
         "case_ids": [c.case_id for c in cases],
     }

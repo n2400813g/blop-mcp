@@ -17,6 +17,7 @@ async def run_regression_test(
     headless: bool = True,
     run_mode: str = "hybrid",
     command: Optional[str] = None,
+    auto_rerecord: bool = False,
 ) -> dict:
     from blop.engine.planner import normalize_run_mode
     from blop.config import check_llm_api_key, validate_app_url
@@ -84,13 +85,13 @@ async def run_regression_test(
 
     # Fire-and-forget; caller polls get_test_results
     task = asyncio.create_task(
-        _run_and_persist(run_id, flow_ids, app_url, storage_state, headless, run_mode)
+        _run_and_persist(run_id, flow_ids, app_url, storage_state, headless, run_mode, auto_rerecord, profile_name)
     )
 
     def _on_task_done(t: asyncio.Task) -> None:
         # If the task died before its own try/except could update the DB, mark it failed
         if not t.cancelled() and t.exception() is not None:
-            asyncio.create_task(sqlite.update_run(run_id, "failed", [], None))
+            asyncio.create_task(sqlite.update_run(run_id, "failed", [], None, []))
 
     task.add_done_callback(_on_task_done)
 
@@ -109,6 +110,8 @@ async def _run_and_persist(
     storage_state: Optional[str],
     headless: bool,
     run_mode: str = "hybrid",
+    auto_rerecord: bool = False,
+    profile_name: Optional[str] = None,
 ) -> None:
     from datetime import datetime, timezone
 
@@ -138,6 +141,8 @@ async def _run_and_persist(
             storage_state=storage_state,
             headless=headless,
             run_mode=run_mode,
+            auto_rerecord=auto_rerecord,
+            profile_name=profile_name,
         )
 
         # Attach business_criticality from source flow to each case, then classify
@@ -164,8 +169,11 @@ async def _run_and_persist(
                 },
             )
 
+        run_summary = await classifier.classify_run(classified, app_url)
+        next_actions = run_summary.get("next_actions", [])
+
         completed_at = datetime.now(timezone.utc).isoformat()
-        await sqlite.update_run(run_id, "completed", classified, completed_at)
+        await sqlite.update_run(run_id, "completed", classified, completed_at, next_actions)
         await sqlite.save_run_health_event(
             run_id,
             "run_completed",
@@ -176,7 +184,13 @@ async def _run_and_persist(
             },
         )
     except Exception:
-        await sqlite.update_run(run_id, "failed", [], None)
+        await sqlite.update_run(
+            run_id=run_id,
+            status="failed",
+            cases=[],
+            completed_at=None,
+            next_actions=[],
+        )
         await sqlite.save_run_health_event(
             run_id,
             "run_failed",

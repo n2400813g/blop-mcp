@@ -38,10 +38,15 @@ async def save_auth_profile(
         }
 
     storage_path: Optional[str] = None
+    auth_warning: Optional[str] = None
     try:
         storage_path = await auth_engine.resolve_storage_state(profile)
-    except Exception:
-        pass
+    except Exception as exc:
+        auth_warning = (
+            f"Auth profile saved but storage state could not be resolved: {exc}. "
+            "Runs using this profile may fail until the issue is fixed. "
+            "For SSO/OAuth, try capture_auth_session instead."
+        )
 
     await sqlite.save_auth_profile(profile, storage_path)
 
@@ -49,9 +54,15 @@ async def save_auth_profile(
     if auth_type != "env_login":
         note = f"Auth profile saved with type '{auth_type}'"
 
-    return AuthProfileResult(
+    result = AuthProfileResult(
         profile_name=profile_name,
         auth_type=auth_type,
         status="saved",
         note=note,
     ).model_dump()
+
+    if auth_warning:
+        result["warning"] = auth_warning
+        result["status"] = "saved_with_warning"
+
+    return result

@@ -803,6 +803,7 @@ Use this quick matrix to validate that the architecture stays generic while work
 | `BLOP_DB_PATH` | No | `.blop/runs.db` | Where blop stores its database |
 | `BLOP_HEADLESS` | No | `true` | `false` = show browser window during tests (useful for debugging) |
 | `BLOP_MAX_STEPS` | No | `50` | Max steps the AI agent takes per flow |
+| `BLOP_ALLOW_SCREENSHOT_LLM` | No | `false` | Privacy guard for visual-regression triage. When `false`, baseline/current screenshots are never base64-encoded or sent to external LLMs. |
 | `BLOP_EXPLORATION_PROFILE` | No | `default` | Tuning preset (`default` or `saas_marketing`) for discovery and replay behavior |
 | `BLOP_DISCOVERY_MAX_PAGES` | No | profile-driven | Default crawl page cap for discovery tools |
 | `BLOP_AGENT_MAX_FAILURES` | No | profile-driven | Max recoverable action failures before agent aborts recording |

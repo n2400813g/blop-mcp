@@ -9,6 +9,7 @@ from statistics import quantiles
 from urllib.parse import quote
 
 from blop.engine.context_graph import diff_context_graph
+from blop.engine.secrets import mask_text
 from blop.schemas import CorrelationMatch, IncidentCluster, JourneyHealth, ReleaseReference, ReleaseSnapshot, RemediationDraft, TelemetrySignal
 from blop.storage import sqlite
 
@@ -777,6 +778,7 @@ async def generate_remediation(
             network_errors = "\n".join(
                 [e for s in samples[:2] for e in (s.network_errors or [])[:2]]
             ) or "none"
+
             prompt = REMEDIATION_PROMPT.format(
                 title=cluster.title,
                 severity=cluster.severity,
@@ -786,6 +788,7 @@ async def generate_remediation(
                 console_errors=console_errors,
                 network_errors=network_errors,
             )
+            prompt = mask_text(prompt)
             response = await llm.ainvoke([make_message(prompt)])
             text = str(response.content) if hasattr(response, "content") else str(response)
             m = re.search(r"\{.*\}", text, re.DOTALL)

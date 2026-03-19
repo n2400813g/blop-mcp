@@ -89,6 +89,8 @@ async def _explain_failure(case: FailureCase, flow, url: str) -> str:
         from blop.engine.llm_factory import make_planning_llm, make_message
 
         llm = make_planning_llm(temperature=0.2, max_output_tokens=600)
+        from blop.engine.secrets import mask_text
+
         prompt = NEXT_ACTIONS_PROMPT.format(
             flow_name=case.flow_name,
             goal=flow.goal if flow else case.flow_name,
@@ -98,9 +100,11 @@ async def _explain_failure(case: FailureCase, flow, url: str) -> str:
             assertion_failures=", ".join(case.assertion_failures[:3]) or "none",
             console_errors=", ".join(case.console_errors[:3]) or "none",
         )
+        prompt = mask_text(prompt)
 
         response = await llm.ainvoke([make_message(prompt)])
         text = str(response.content) if hasattr(response, "content") else str(response)
+        text = re.sub(r"```(?:json)?\s*", "", text).strip()
         m = re.search(r"\{.*\}", text, re.DOTALL)
         if m:
             result = json.loads(m.group())

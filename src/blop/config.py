@@ -28,6 +28,14 @@ STORAGE_STATE_PATH: str = os.getenv("STORAGE_STATE_PATH", "")
 COOKIE_JSON_PATH: str = os.getenv("COOKIE_JSON_PATH", "")
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Parse common boolean env-var forms."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class ExplorationTuning(TypedDict):
     network_idle_wait_secs: float
     spa_settle_ms: int
@@ -97,6 +105,29 @@ BLOP_THINKING_BUDGET: int = int(os.getenv("BLOP_THINKING_BUDGET", "0"))
 # Storage archival thresholds (days)
 BLOP_ARCHIVE_RUNS_AFTER_DAYS: int = int(os.getenv("BLOP_ARCHIVE_RUNS_AFTER_DAYS", "30"))
 BLOP_ARCHIVE_TELEMETRY_AFTER_DAYS: int = int(os.getenv("BLOP_ARCHIVE_TELEMETRY_AFTER_DAYS", "90"))
+
+# Runs directory (screenshots, traces, console logs)
+BLOP_RUNS_DIR: str = os.getenv("BLOP_RUNS_DIR", "")
+
+# Privacy guard for screenshot-to-LLM visual triage uploads.
+# Keep this disabled unless your screenshots are safe to send externally.
+# Primary var takes precedence if set; otherwise fall back to legacy var.
+_primary_screenshot_llm = os.getenv("BLOP_ALLOW_SCREENSHOT_LLM")
+BLOP_ALLOW_SCREENSHOT_LLM: bool = (
+    _env_bool("BLOP_ALLOW_SCREENSHOT_LLM", False)
+    if _primary_screenshot_llm is not None
+    else _env_bool("ALLOW_SCREENSHOT_LLM", False)
+)
+
+# Auto-heal confidence thresholds for regression replay
+BLOP_AUTO_HEAL_MIN_CONFIDENCE: float = float(os.getenv("BLOP_AUTO_HEAL_MIN_CONFIDENCE", "0.78"))
+BLOP_AUTO_HEAL_MAX_BEHAVIOR_RISK: float = float(os.getenv("BLOP_AUTO_HEAL_MAX_BEHAVIOR_RISK", "0.25"))
+
+# Prompt overrides directory
+BLOP_PROMPTS_DIR: str = os.getenv("BLOP_PROMPTS_DIR", "")
+
+# Legacy auth URL env var (fallback for LOGIN_URL)
+TEST_AUTH_URL: str = os.getenv("TEST_AUTH_URL", "")
 
 
 def check_llm_api_key() -> tuple[bool, str]:

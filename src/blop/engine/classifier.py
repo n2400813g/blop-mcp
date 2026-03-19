@@ -6,6 +6,7 @@ import os
 import re
 from typing import Optional
 
+from blop.engine.secrets import mask_text
 from blop.schemas import FailureCase
 
 
@@ -214,6 +215,8 @@ Return JSON only:
   "summary": "one-line description"
 }}"""
 
+    prompt = mask_text(prompt)
+
     try:
         response = await llm.ainvoke([make_message(prompt)])
         text = str(response.content) if hasattr(response, "content") else str(response)
@@ -236,7 +239,9 @@ async def classify_run(cases: list[FailureCase], url: str) -> dict:
     failed = [c for c in cases if c.status in ("fail", "error", "blocked")]
     next_actions: list[str] = []
 
-    if failed and os.getenv("GOOGLE_API_KEY"):
+    from blop.config import check_llm_api_key
+    has_key, _ = check_llm_api_key()
+    if failed and has_key:
         next_actions = await _generate_next_actions(failed, url)
 
     severity_counts: dict[str, int] = {
@@ -283,6 +288,8 @@ async def _generate_next_actions(failed_cases: list[FailureCase], url: str) -> l
 
 List 3 concrete fix actions. Return only a JSON array:
 ["Fix action 1", "Fix action 2", "Fix action 3"]"""
+
+    prompt = mask_text(prompt)
 
     try:
         response = await llm.ainvoke([make_message(prompt)])

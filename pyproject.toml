@@ -5,8 +5,6 @@ description = "AI-powered QA testing via MCP"
 requires-python = ">=3.11"
 readme = "README.md"
 
-[project.urls]
-Repository = "https://github.com/n2400813g/blop-mcp"
 dependencies = [
   "mcp[cli]>=1.0.0",
   "browser-use",
@@ -16,7 +14,12 @@ dependencies = [
   "pydantic>=2.0",
   "screeninfo",
   "aiosqlite>=0.19.0",
+  "python-dotenv>=1.0.0",
+  "Pillow>=10.0.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/n2400813g/blop-mcp"
 
 [project.optional-dependencies]
 dev = [

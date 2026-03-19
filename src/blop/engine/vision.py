@@ -1,4 +1,4 @@
-"""Gemini vision fallback for when selectors fail."""
+"""Vision fallback for when selectors fail — uses the configured LLM provider."""
 from __future__ import annotations
 
 import base64
@@ -11,14 +11,9 @@ if TYPE_CHECKING:
     from playwright.async_api import Page
 
 
-def _llm():
-    from browser_use.llm import ChatGoogle
-    return ChatGoogle(
-        model="gemini-2.5-flash",
-        temperature=0.1,
-        api_key=os.getenv("GOOGLE_API_KEY", ""),
-        max_output_tokens=256,
-    )
+def _llm(max_output_tokens: int = 256):
+    from blop.engine.llm_factory import make_planning_llm
+    return make_planning_llm(temperature=0.1, max_output_tokens=max_output_tokens)
 
 
 async def _screenshot_b64(page: "Page") -> str:
@@ -27,14 +22,38 @@ async def _screenshot_b64(page: "Page") -> str:
     return base64.b64encode(img_bytes).decode()
 
 
+def _check_llm_api_key() -> bool:
+    """Return True if at least one supported LLM API key is configured."""
+    provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
+    if provider == "anthropic":
+        return bool(os.getenv("ANTHROPIC_API_KEY"))
+    if provider == "openai":
+        return bool(os.getenv("OPENAI_API_KEY"))
+    return bool(os.getenv("GOOGLE_API_KEY"))
+
+
+def _make_vision_message(text: str, image_b64: str):
+    """Create a message with text + image appropriate for the configured provider."""
+    provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
+    if provider in ("anthropic", "openai"):
+        from langchain_core.messages import HumanMessage
+        return HumanMessage(content=[
+            {"type": "text", "text": text},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+        ])
+    from browser_use.llm.messages import UserMessage
+    return UserMessage(content=[
+        {"type": "text", "text": text},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+    ])
+
+
 async def find_element_coords(page: "Page", description: str) -> tuple[int, int] | None:
-    """Take a screenshot and ask Gemini where an element is. Returns (x, y) or None."""
-    if not os.getenv("GOOGLE_API_KEY"):
+    """Take a screenshot and ask the LLM where an element is. Returns (x, y) or None."""
+    if not _check_llm_api_key():
         return None
 
     try:
-        from browser_use.llm.messages import UserMessage
-
         b64 = await _screenshot_b64(page)
         size = await page.evaluate("() => ({w: window.innerWidth, h: window.innerHeight})")
         width = size.get("w", 1280)
@@ -47,10 +66,8 @@ Return ONLY a JSON object with the pixel coordinates of its center:
 If not found, return {{"x": null, "y": null}}"""
 
         llm = _llm()
-        response = await llm.ainvoke([UserMessage(content=[
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-        ])])
+        msg = _make_vision_message(prompt, b64)
+        response = await llm.ainvoke([msg])
         text = str(response.content) if hasattr(response, "content") else str(response)
         m = re.search(r'\{"x":\s*(\d+|null),\s*"y":\s*(\d+|null)\}', text)
         if m and m.group(1) != "null":
@@ -82,14 +99,11 @@ async def assert_by_vision(page: "Page", assertion: str) -> bool:
 
 
 async def assert_all_by_vision(page: "Page", assertions: list[str]) -> list[bool]:
-    """Evaluate multiple assertions in a single Gemini call (one screenshot, one LLM call)."""
-    if not os.getenv("GOOGLE_API_KEY") or not assertions:
+    """Evaluate multiple assertions in a single LLM call (one screenshot, one call)."""
+    if not _check_llm_api_key() or not assertions:
         return [False] * len(assertions)
 
     try:
-        from browser_use.llm import ChatGoogle
-        from browser_use.llm.messages import UserMessage
-
         b64 = await _screenshot_b64(page)
         numbered = "\n".join(f'{i + 1}. "{a}"' for i, a in enumerate(assertions))
         prompt = f"""Look at this screenshot. For each assertion, return true or false.
@@ -99,16 +113,9 @@ Assertions:
 
 Return ONLY a JSON array of booleans in the same order (e.g. [true, false, true]):"""
 
-        llm = ChatGoogle(
-            model="gemini-2.5-flash",
-            temperature=0.1,
-            api_key=os.getenv("GOOGLE_API_KEY", ""),
-            max_output_tokens=64,
-        )
-        response = await llm.ainvoke([UserMessage(content=[
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-        ])])
+        llm = _llm(max_output_tokens=64)
+        msg = _make_vision_message(prompt, b64)
+        response = await llm.ainvoke([msg])
         text = str(response.content) if hasattr(response, "content") else str(response)
         m = re.search(r"\[.*?\]", text, re.DOTALL)
         if m:

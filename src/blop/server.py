@@ -12,8 +12,13 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
 from blop.config import BLOP_DISCOVERY_MAX_PAGES
+from blop.storage import sqlite
 from blop.storage.sqlite import init_db
-from blop.tools import auth, capture_auth, debug, discover, record, regression, results, v2_surface, validate
+from blop.tools import assertions as assertions_tools
+from blop.tools import auth, capture_auth, debug, discover, evaluate as evaluate_tools
+from blop.tools import network as network_tools
+from blop.tools import record, regression, results, security as security_tools
+from blop.tools import storage as storage_tools, v2_surface, validate
 
 mcp = FastMCP("blop")
 
@@ -207,6 +212,130 @@ async def capture_auth_session(
 
 
 @mcp.tool()
+async def list_auth_profiles() -> dict:
+    """List all saved auth profiles.
+
+    Returns:
+        dict with profiles list (profile_name, auth_type, storage_state_path, created_at, refreshed_at)
+    """
+    try:
+        from blop.storage import sqlite
+        profiles = await sqlite.list_auth_profiles()
+        return {"profiles": profiles, "total": len(profiles)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def evaluate_web_task(
+    app_url: str,
+    task: str,
+    profile_name: Optional[str] = None,
+    headless: bool = False,
+    max_steps: int = 25,
+    capture: Optional[list[str]] = None,
+    format: str = "markdown",
+    save_as_recorded_flow: bool = False,
+    flow_name: Optional[str] = None,
+) -> dict:
+    """Run a browser agent for a natural-language task and return a rich evaluation report.
+
+    One-shot evaluator — give it a URL and a task, get back a structured report with
+    screenshots, console errors, network failures, and an agent step timeline. No need
+    to discover/record/replay first.
+
+    Args:
+        app_url: The website URL to evaluate
+        task: Natural-language description of what to test (e.g. "Try the signup flow and note UX issues")
+        profile_name: Optional auth profile name for authenticated pages
+        headless: Run browser in headless mode (default: False — shows the browser)
+        max_steps: Maximum agent steps (default: 25)
+        capture: Evidence to capture: "screenshots", "console", "network", "trace" (default: all four)
+        format: Report format: "markdown" (default), "text", or "json"
+        save_as_recorded_flow: If True, promote the evaluation into a recorded flow for regression
+        flow_name: Flow name to use when saving as recorded flow (auto-generated if omitted)
+
+    Returns:
+        dict with summary, agent_steps, evidence (console_errors, network_failures,
+        screenshots, trace_path), pass_fail, run_id, and formatted_report
+    """
+    try:
+        return await evaluate_tools.evaluate_web_task(
+            app_url=app_url,
+            task=task,
+            profile_name=profile_name,
+            headless=headless,
+            max_steps=max_steps,
+            capture=capture,
+            format=format,
+            save_as_recorded_flow=save_as_recorded_flow,
+            flow_name=flow_name,
+        )
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def setup_browser_state(
+    login_url: str,
+    profile_name: str = "default",
+    success_url_pattern: Optional[str] = None,
+    timeout_secs: int = 120,
+    user_data_dir: Optional[str] = None,
+) -> dict:
+    """Open an interactive browser for manual login, then save the session for reuse.
+
+    Convenience alias for capture_auth_session. Opens a visible browser window at
+    login_url — complete OAuth, MFA, or any login flow manually. The session state
+    (cookies + localStorage) is saved automatically and reused by evaluate_web_task
+    and other tools.
+
+    Args:
+        login_url: URL of the login page to open
+        profile_name: Name to save the auth profile under (default: "default")
+        success_url_pattern: URL substring that indicates login succeeded (e.g. "/dashboard")
+        timeout_secs: Max seconds to wait for login (default: 120)
+        user_data_dir: Optional persistent Chromium profile dir (for anti-bot OAuth)
+
+    Returns:
+        dict with profile_name, status ("captured" | "timeout"), storage_state_path, note
+    """
+    try:
+        return await capture_auth.capture_auth_session(
+            profile_name=profile_name,
+            login_url=login_url,
+            success_url_pattern=success_url_pattern,
+            timeout_secs=timeout_secs,
+            user_data_dir=user_data_dir,
+        )
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def cancel_run(run_id: str) -> dict:
+    """Cancel a running test and mark it as cancelled.
+
+    Args:
+        run_id: The run_id to cancel
+
+    Returns:
+        dict with run_id, previous_status, new_status
+    """
+    try:
+        run = await sqlite.get_run(run_id)
+        if not run:
+            return {"error": f"Run {run_id} not found"}
+        prev_status = run.get("status", "unknown")
+        if prev_status in ("completed", "failed", "cancelled"):
+            return {"run_id": run_id, "previous_status": prev_status, "note": "Run already terminated"}
+        await sqlite.update_run_status(run_id, "cancelled")
+        return {"run_id": run_id, "previous_status": prev_status, "new_status": "cancelled"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
 async def record_test_flow(
     app_url: str,
     flow_name: str,
@@ -252,11 +381,16 @@ async def run_regression_test(
     headless: bool = True,
     run_mode: str = "hybrid",
     command: Optional[str] = None,
+    auto_rerecord: bool = False,
 ) -> dict:
     """Run regression tests against recorded flows. Returns immediately; poll get_test_results for status.
 
     Uses hybrid step-by-step replay by default: tries saved selectors first, falls back
-    to text-based lookup, then repairs individual broken steps via Gemini vision.
+    to text-based lookup, then repairs individual broken steps via vision LLM.
+
+    Self-healing: When steps are repaired successfully, healed selectors are persisted
+    back into the recorded flow for future runs. When auto_rerecord is True and a flow
+    fails completely, blop will attempt to re-record the flow from its original goal.
 
     Args:
         app_url: The website URL to test against
@@ -265,6 +399,7 @@ async def run_regression_test(
         headless: Run browsers headlessly (default: True)
         run_mode: "hybrid" (default), "strict_steps", or "goal_fallback" (accepts legacy alias "strict")
         command: Optional natural language command for additional context
+        auto_rerecord: If True, attempt to re-record flows that fail completely (hard heal)
 
     Returns:
         dict with run_id, status ("running"), flow_count, artifacts_dir
@@ -277,7 +412,29 @@ async def run_regression_test(
             headless=headless,
             run_mode=run_mode,
             command=command,
+            auto_rerecord=auto_rerecord,
         )
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def compare_visual_baseline(
+    flow_id: str,
+    step_index: Optional[int] = None,
+) -> dict:
+    """Compare visual baseline screenshots for a recorded flow.
+
+    Args:
+        flow_id: The flow_id to check baselines for
+        step_index: Optional specific step index to check (returns all if omitted)
+
+    Returns:
+        dict with baseline info or error
+    """
+    try:
+        from blop.engine.visual_regression import compare_visual_baseline as _compare
+        return await _compare(flow_id, step_index)
     except Exception as e:
         return {"error": str(e)}
 
@@ -390,6 +547,299 @@ async def validate_setup(
             app_url=app_url,
             profile_name=profile_name,
         )
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Structured Assertion Tools — lightweight standalone verifications
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def verify_element_visible(
+    app_url: str,
+    role: str,
+    accessible_name: str,
+    profile_name: Optional[str] = None,
+) -> dict:
+    """Verify that an ARIA element with the given role and accessible name is visible.
+
+    Args:
+        app_url: The URL to navigate to
+        role: ARIA role (e.g. "button", "link", "textbox")
+        accessible_name: The accessible name of the element
+        profile_name: Optional auth profile for protected pages
+    """
+    try:
+        return await assertions_tools.verify_element_visible(app_url, role, accessible_name, profile_name)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def verify_text_visible(
+    app_url: str,
+    text: str,
+    profile_name: Optional[str] = None,
+) -> dict:
+    """Verify that specific text content is present on a page.
+
+    Args:
+        app_url: The URL to navigate to
+        text: The text to look for
+        profile_name: Optional auth profile for protected pages
+    """
+    try:
+        return await assertions_tools.verify_text_visible(app_url, text, profile_name)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def verify_value(
+    app_url: str,
+    selector: str,
+    expected_value: str,
+    profile_name: Optional[str] = None,
+) -> dict:
+    """Verify that a form field has the expected value.
+
+    Args:
+        app_url: The URL to navigate to
+        selector: CSS selector of the form field
+        expected_value: Expected input value
+        profile_name: Optional auth profile for protected pages
+    """
+    try:
+        return await assertions_tools.verify_value(app_url, selector, expected_value, profile_name)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def verify_visual_state(
+    app_url: str,
+    description: str,
+    profile_name: Optional[str] = None,
+) -> dict:
+    """Verify a visual condition on a page using vision LLM analysis.
+
+    Args:
+        app_url: The URL to navigate to
+        description: Natural-language description of the expected visual state
+        profile_name: Optional auth profile for protected pages
+    """
+    try:
+        return await assertions_tools.verify_visual_state(app_url, description, profile_name)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def export_test_report(
+    run_id: str,
+    format: str = "markdown",
+) -> dict:
+    """Export a test run report in markdown, HTML, or JSON format.
+
+    Args:
+        run_id: The run_id to export
+        format: "markdown" (default), "html", or "json"
+
+    Returns:
+        dict with format, path, case_count
+    """
+    try:
+        from blop.reporting.export import export_test_report as _export
+        return await _export(run_id, format)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Security Scanning Tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def security_scan(
+    repo_path: str,
+    scan_type: str = "semgrep",
+    ruleset: str = "p/default",
+    severity_filter: Optional[str] = None,
+) -> dict:
+    """Run a static security scan (SAST) on a codebase using Semgrep.
+
+    Semgrep must be installed separately (pip install semgrep).
+
+    Args:
+        repo_path: Path to the directory to scan
+        scan_type: "semgrep" (only supported type currently)
+        ruleset: Semgrep ruleset to use (default: "p/default")
+        severity_filter: Optional filter: "ERROR", "WARNING", or "INFO"
+
+    Returns:
+        dict with findings, each containing rule_id, severity, file, line, CWE, fix suggestion
+    """
+    try:
+        return await security_tools.security_scan(repo_path, scan_type, ruleset, severity_filter)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def security_scan_url(
+    app_url: str,
+    scan_type: str = "headers",
+) -> dict:
+    """Analyze HTTP security headers for a live URL.
+
+    Checks for HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, etc.
+
+    Args:
+        app_url: The URL to scan
+        scan_type: "headers" (only supported type currently)
+
+    Returns:
+        dict with security_score (0-1), headers present/missing, and recommendations
+    """
+    try:
+        return await security_tools.security_scan_url(app_url, scan_type)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Network Mocking Tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def mock_network_route(
+    pattern: str,
+    status: int = 200,
+    body: Optional[str] = None,
+    content_type: str = "application/json",
+) -> dict:
+    """Register a network route mock for use during regression test runs.
+
+    Intercepted requests matching the pattern will receive the mocked response.
+    Useful for testing error states, slow loading, and API contract changes.
+
+    Args:
+        pattern: URL pattern to intercept (glob or regex)
+        status: HTTP status code to respond with (default: 200)
+        body: Response body string
+        content_type: Response content type (default: "application/json")
+    """
+    try:
+        return await network_tools.mock_network_route(pattern, status, body, content_type)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def clear_network_routes() -> dict:
+    """Remove all registered network route mocks."""
+    try:
+        return await network_tools.clear_network_routes()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Code Generation Tool
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def export_flow_as_code(
+    flow_id: str,
+    language: str = "python",
+) -> dict:
+    """Export a recorded test flow as a standalone Playwright test script.
+
+    Converts the recorded FlowSteps into runnable code using semantic locators
+    (ARIA role+name, testid, label) captured at record time.
+
+    Args:
+        flow_id: The flow_id to export
+        language: "python" (default) or "typescript"
+
+    Returns:
+        dict with flow_id, language, path to generated file, step_count
+    """
+    try:
+        from blop.engine.codegen import export_flow_as_code as _export
+        return await _export(flow_id, language)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Storage State Management Tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def get_browser_cookies(
+    app_url: str,
+    profile_name: Optional[str] = None,
+) -> dict:
+    """List all cookies for an app URL.
+
+    Args:
+        app_url: The URL to navigate to and read cookies from
+        profile_name: Optional auth profile for authenticated pages
+    """
+    try:
+        return await storage_tools.get_browser_cookies(app_url, profile_name)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def set_browser_cookie(
+    app_url: str,
+    name: str,
+    value: str,
+    domain: Optional[str] = None,
+    path: str = "/",
+    secure: bool = False,
+    http_only: bool = False,
+    profile_name: Optional[str] = None,
+) -> dict:
+    """Set a specific cookie in a browser context.
+
+    Args:
+        app_url: The URL context for the cookie
+        name: Cookie name
+        value: Cookie value
+        domain: Cookie domain (defaults to URL hostname)
+        path: Cookie path (default: "/")
+        secure: Secure flag
+        http_only: HttpOnly flag
+        profile_name: Optional auth profile
+    """
+    try:
+        return await storage_tools.set_browser_cookie(
+            app_url, name, value, domain, path, secure, http_only, profile_name
+        )
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def save_browser_state(
+    app_url: str,
+    profile_name: Optional[str] = None,
+    filename: Optional[str] = None,
+) -> dict:
+    """Save the full browser storage state (cookies + localStorage) to a JSON file.
+
+    Args:
+        app_url: The URL to capture state from
+        profile_name: Optional auth profile
+        filename: Optional output file path (defaults to .blop/states/)
+    """
+    try:
+        return await storage_tools.save_browser_state(app_url, profile_name, filename)
     except Exception as e:
         return {"error": str(e)}
 
@@ -693,6 +1143,28 @@ async def flow_stability_profile_resource(flow_id: str) -> dict:
     return await results.get_flow_stability_profile_resource(flow_id)
 
 
+@mcp.resource("blop://prompts/list")
+async def prompts_list_resource() -> dict:
+    """List all available prompt templates with previews."""
+    from blop.prompts import list_available_prompts
+    return list_available_prompts()
+
+
+@mcp.resource("blop://prompts/{name}")
+async def prompt_resource(name: str) -> dict:
+    """Read a specific prompt template by name (discover, repair, remediation, next_actions)."""
+    from blop.prompts import get_prompt, DISCOVER_PROMPT, REPAIR_STEP_PROMPT, REMEDIATION_PROMPT, NEXT_ACTIONS_PROMPT
+    defaults = {
+        "discover": DISCOVER_PROMPT,
+        "repair": REPAIR_STEP_PROMPT,
+        "remediation": REMEDIATION_PROMPT,
+        "next_actions": NEXT_ACTIONS_PROMPT,
+    }
+    default = defaults.get(name, "")
+    prompt = get_prompt(name, default)
+    return {"name": name, "prompt": prompt, "is_override": prompt != default}
+
+
 @mcp.resource("blop://v2/contracts/tools")
 async def v2_contracts_resource() -> dict:
     """V2 MCP tool contracts: request/response schemas + examples."""
@@ -981,6 +1453,38 @@ def observability_control_plane() -> str:
    - top flaky step keys
    - top failing transitions
 """
+
+
+@mcp.prompt()
+def quick_web_eval() -> str:
+    return """Quickly evaluate a web app with a single tool call:
+
+1. (Optional) If auth is required, save a session first:
+   setup_browser_state(
+     login_url="https://your-app.com/login",
+     profile_name="myapp",
+     success_url_pattern="/dashboard"
+   )
+
+2. Evaluate the app with a natural-language task:
+   evaluate_web_task(
+     app_url="https://your-app.com",
+     task="Try the full signup flow and report any UX issues",
+     profile_name="myapp"  # optional
+   )
+
+   This returns a complete report with screenshots, console errors, network
+   failures, and agent step timeline — no need to discover or record flows first.
+
+3. If the evaluation looks good, promote it to a regression test:
+   evaluate_web_task(
+     app_url="https://your-app.com",
+     task="Complete checkout with a test product",
+     save_as_recorded_flow=True,
+     flow_name="checkout_flow"
+   )
+
+   The recorded flow can then be replayed with run_regression_test."""
 
 
 def run() -> int:

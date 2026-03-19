@@ -1,0 +1,184 @@
+"""Export test reports in markdown, HTML, or JSON format."""
+from __future__ import annotations
+
+import html
+import json
+from datetime import datetime, timezone
+from typing import Literal
+
+from blop.schemas import FailureCase
+from blop.storage.files import report_path
+
+
+def _severity_emoji(sev: str) -> str:
+    return {"blocker": "!!!", "high": "!!", "medium": "!", "low": "~", "none": "-"}.get(sev, "-")
+
+
+def _status_badge(status: str) -> str:
+    return {"pass": "PASS", "fail": "FAIL", "error": "ERROR", "blocked": "BLOCKED"}.get(status, status.upper())
+
+
+def generate_markdown_report(
+    run: dict,
+    cases: list[FailureCase],
+) -> str:
+    """Generate a markdown test report."""
+    lines: list[str] = []
+    lines.append(f"# Test Run Report: {run.get('run_id', 'unknown')}")
+    lines.append("")
+    lines.append(f"**Status:** {run.get('status', 'unknown')}")
+    lines.append(f"**Started:** {run.get('started_at', 'N/A')}")
+    lines.append(f"**Completed:** {run.get('completed_at', 'N/A')}")
+    lines.append(f"**Run Mode:** {run.get('run_mode', 'hybrid')}")
+    lines.append(f"**App URL:** {run.get('app_url', 'N/A')}")
+    lines.append("")
+
+    passed = sum(1 for c in cases if c.status == "pass")
+    failed = sum(1 for c in cases if c.status == "fail")
+    errors = sum(1 for c in cases if c.status in ("error", "blocked"))
+    healed = sum(1 for c in cases if c.healed_steps)
+    rerecorded = sum(1 for c in cases if c.rerecorded)
+
+    lines.append("## Summary")
+    lines.append("")
+    lines.append(f"| Metric | Count |")
+    lines.append(f"|--------|-------|")
+    lines.append(f"| Total cases | {len(cases)} |")
+    lines.append(f"| Passed | {passed} |")
+    lines.append(f"| Failed | {failed} |")
+    lines.append(f"| Errors/Blocked | {errors} |")
+    lines.append(f"| Self-healed | {healed} |")
+    lines.append(f"| Re-recorded | {rerecorded} |")
+    lines.append("")
+
+    sev_counts: dict[str, int] = {}
+    for c in cases:
+        if c.status != "pass":
+            sev_counts[c.severity] = sev_counts.get(c.severity, 0) + 1
+    if sev_counts:
+        lines.append("### Severity Distribution")
+        lines.append("")
+        for sev in ("blocker", "high", "medium", "low", "none"):
+            if sev in sev_counts:
+                lines.append(f"- **{sev.upper()}**: {sev_counts[sev]}")
+        lines.append("")
+
+    lines.append("## Results")
+    lines.append("")
+    lines.append("| Flow | Status | Severity | Mode | Criticality | Healed |")
+    lines.append("|------|--------|----------|------|-------------|--------|")
+    for c in cases:
+        heal_info = f"{len(c.healed_steps)} steps" if c.healed_steps else ("re-recorded" if c.rerecorded else "-")
+        lines.append(
+            f"| {c.flow_name} | {_status_badge(c.status)} | "
+            f"{_severity_emoji(c.severity)} {c.severity} | {c.replay_mode} | "
+            f"{c.business_criticality} | {heal_info} |"
+        )
+    lines.append("")
+
+    failed_cases = [c for c in cases if c.status in ("fail", "error", "blocked")]
+    if failed_cases:
+        lines.append("## Failed Cases")
+        lines.append("")
+        for c in failed_cases:
+            lines.append(f"### {c.flow_name} ({_status_badge(c.status)})")
+            lines.append("")
+            lines.append(f"- **Case ID:** `{c.case_id}`")
+            lines.append(f"- **Severity:** {c.severity}")
+            lines.append(f"- **Replay Mode:** {c.replay_mode}")
+            if c.step_failure_index is not None:
+                lines.append(f"- **Failed at step:** {c.step_failure_index}")
+            if c.failure_reason_codes:
+                lines.append(f"- **Reason codes:** {', '.join(c.failure_reason_codes)}")
+            if c.assertion_failures:
+                lines.append(f"- **Assertion failures:**")
+                for af in c.assertion_failures:
+                    lines.append(f"  - {af}")
+            if c.repro_steps:
+                lines.append(f"- **Repro steps:**")
+                for rs in c.repro_steps:
+                    lines.append(f"  1. {rs}")
+            if c.screenshots:
+                lines.append(f"- **Screenshots:** {len(c.screenshots)} captured")
+            lines.append("")
+
+    lines.append("## Next Actions")
+    lines.append("")
+    if failed_cases:
+        lines.append("1. Debug the highest-severity failures with `debug_test_case()`")
+        blockers = [c for c in failed_cases if c.severity == "blocker"]
+        if blockers:
+            lines.append(f"2. **{len(blockers)} blocker(s)** require immediate attention")
+        revenue_fails = [c for c in failed_cases if c.business_criticality == "revenue"]
+        if revenue_fails:
+            lines.append(f"3. **{len(revenue_fails)} revenue-critical** flow(s) are failing")
+    else:
+        lines.append("All tests passed! Consider adding more flows with `record_test_flow()`.")
+    lines.append("")
+
+    lines.append(f"---\n*Generated by blop at {datetime.now(timezone.utc).isoformat()}*")
+    return "\n".join(lines)
+
+
+def generate_html_report(run: dict, cases: list[FailureCase]) -> str:
+    """Generate a simple styled HTML report wrapping the markdown content."""
+    md = generate_markdown_report(run, cases)
+    escaped_md = html.escape(md)
+    html_lines: list[str] = [
+        "<!DOCTYPE html>",
+        "<html><head>",
+        "<meta charset='utf-8'>",
+        f"<title>Test Report — {run.get('run_id', '')}</title>",
+        "<style>",
+        "body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }",
+        "table { border-collapse: collapse; width: 100%; margin: 1rem 0; }",
+        "th, td { border: 1px solid #ddd; padding: 0.5rem; text-align: left; }",
+        "th { background: #f5f5f5; }",
+        ".pass { color: #16a34a; } .fail { color: #dc2626; } .error { color: #ea580c; }",
+        "h1,h2,h3 { color: #1e293b; }",
+        "pre { background: #f8fafc; padding: 1rem; border-radius: 4px; overflow-x: auto; }",
+        "</style>",
+        "</head><body>",
+        f"<pre>{escaped_md}</pre>",
+        "</body></html>",
+    ]
+    return "\n".join(html_lines)
+
+
+async def export_test_report(
+    run_id: str,
+    format: Literal["markdown", "json", "html"] = "markdown",
+) -> dict:
+    """Export a test report for a run in the requested format."""
+    from blop.storage.sqlite import get_run, list_cases_for_run
+
+    run = await get_run(run_id)
+    if not run:
+        return {"error": f"Run {run_id} not found"}
+
+    cases = await list_cases_for_run(run_id)
+
+    if format == "json":
+        data = {
+            "run_id": run_id,
+            "status": run.get("status"),
+            "cases": [c.model_dump() for c in cases],
+        }
+        path = report_path(run_id, "json")
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+        return {"format": "json", "path": path, "case_count": len(cases)}
+
+    if format == "html":
+        content = generate_html_report(run, cases)
+        path = report_path(run_id, "html")
+        with open(path, "w") as f:
+            f.write(content)
+        return {"format": "html", "path": path, "case_count": len(cases)}
+
+    # Default: markdown
+    content = generate_markdown_report(run, cases)
+    path = report_path(run_id, "md")
+    with open(path, "w") as f:
+        f.write(content)
+    return {"format": "markdown", "path": path, "case_count": len(cases)}

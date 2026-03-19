@@ -1,5 +1,66 @@
-"""Centralised prompt templates for all LLM calls."""
+"""Centralised prompt templates for all LLM calls.
+
+Prompts can be overridden by placing files in .blop/prompts/ (or BLOP_PROMPTS_DIR).
+File names map to variable names: e.g. .blop/prompts/discover.txt overrides DISCOVER_PROMPT.
+"""
 from __future__ import annotations
+
+import os
+from pathlib import Path
+
+
+def _load_prompt_override(name: str) -> str | None:
+    """Load a prompt override from the prompts directory if it exists."""
+    from blop.config import BLOP_PROMPTS_DIR
+
+    # Reject path traversal and nested-path names up front.
+    if not name or ".." in name or Path(name).name != name:
+        return None
+    if os.sep in name or (os.altsep and os.altsep in name):
+        return None
+
+    prompts_dir = BLOP_PROMPTS_DIR
+    if not prompts_dir:
+        repo_root = Path(__file__).parent.parent.parent
+        prompts_dir = str(repo_root / ".blop" / "prompts")
+
+    prompts_root = Path(prompts_dir).resolve()
+    target = (Path(prompts_dir) / f"{name}.txt").resolve()
+    try:
+        target.relative_to(prompts_root)
+    except ValueError:
+        return None
+
+    if target.exists():
+        return target.read_text(encoding="utf-8").strip()
+    return None
+
+
+def get_prompt(name: str, default: str) -> str:
+    """Return the prompt for *name*, checking overrides first."""
+    override = _load_prompt_override(name)
+    return override if override else default
+
+
+def list_available_prompts() -> dict[str, str]:
+    """Return a map of prompt name -> first 100 chars for resource listing."""
+    prompts = {
+        "discover": DISCOVER_PROMPT[:100],
+        "repair": REPAIR_STEP_PROMPT[:100],
+        "remediation": REMEDIATION_PROMPT[:100],
+        "next_actions": NEXT_ACTIONS_PROMPT[:100],
+    }
+    from blop.config import BLOP_PROMPTS_DIR
+    prompts_dir = BLOP_PROMPTS_DIR
+    if not prompts_dir:
+        repo_root = Path(__file__).parent.parent.parent
+        prompts_dir = str(repo_root / ".blop" / "prompts")
+    d = Path(prompts_dir)
+    if d.exists():
+        for f in d.glob("*.txt"):
+            name = f.stem
+            prompts[name] = f.read_text(encoding="utf-8")[:100]
+    return prompts
 
 DISCOVER_PROMPT = """You are a senior QA engineer generating browser test flows for a web application.
 

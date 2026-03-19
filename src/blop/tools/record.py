@@ -40,6 +40,8 @@ async def record_test_flow(
     storage_state: Optional[str] = None
     if profile:
         storage_state = await auth_engine.resolve_storage_state(profile)
+    if storage_state is None:
+        storage_state = await auth_engine.auto_storage_state_from_env()
 
     import uuid
     run_id = uuid.uuid4().hex

@@ -3,6 +3,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
+from blop.engine.logger import get_logger
+
+_log = get_logger("interaction")
+
 if TYPE_CHECKING:
     from playwright.async_api import Locator, Page
 
@@ -27,7 +31,7 @@ async def wait_for_spa_ready(
             await page.wait_for_selector(wait_for_selector, state="visible", timeout=timeout_ms)
             return
         except Exception:
-            pass  # Fall through to generic checks
+            _log.debug("wait_for_selector failed, falling through to generic checks", exc_info=True)
 
     # 2. Shadow DOM ready selector (web components / StencilJS / LitElement)
     if wait_for_shadow_selector:
@@ -48,7 +52,7 @@ async def wait_for_spa_ready(
             )
             return
         except Exception:
-            pass
+            _log.debug("shadow DOM ready selector wait failed", exc_info=True)
 
     # 3. Generic loading-indicator disappearance check
     try:
@@ -65,7 +69,7 @@ async def wait_for_spa_ready(
             timeout=min(settle_ms * 3, 8000),
         )
     except Exception:
-        pass
+        _log.debug("generic loading-indicator check failed", exc_info=True)
 
     # 4. Unconditional settle pause
     if settle_ms > 0:
@@ -100,7 +104,7 @@ async def wait_for_editor_ready(
             await page.wait_for_function(editor_ready_js, timeout=timeout_ms)
             return
         except Exception:
-            pass
+            _log.debug("editor_ready_js wait failed", exc_info=True)
 
     # Phase 2: DOM selector for a known landmark element (toolbar, menu bar, etc.)
     if editor_ready_selector:
@@ -108,7 +112,7 @@ async def wait_for_editor_ready(
             await page.wait_for_selector(editor_ready_selector, state="visible", timeout=timeout_ms)
             return
         except Exception:
-            pass
+            _log.debug("editor_ready_selector wait failed", exc_info=True)
 
     # Phase 3: Canvas presence + non-zero dimensions + pixel content
     try:
@@ -136,7 +140,7 @@ async def wait_for_editor_ready(
             await page.wait_for_timeout(min(editor_settle_ms, 3000))
             return
     except Exception:
-        pass
+        _log.debug("canvas presence check failed", exc_info=True)
 
     # Phase 4: Generic loading overlay disappearance
     try:
@@ -153,7 +157,7 @@ async def wait_for_editor_ready(
             timeout=min(editor_settle_ms * 2, 20000),
         )
     except Exception:
-        pass
+        _log.debug("editor generic loading overlay check failed", exc_info=True)
 
     # Phase 5: Unconditional extended settle
     await page.wait_for_timeout(editor_settle_ms)
@@ -190,7 +194,7 @@ async def scroll_into_view(page: "Page", selector: str) -> None:
     try:
         await page.locator(selector).scroll_into_view_if_needed(timeout=3000)
     except Exception:
-        pass
+        _log.debug("scroll_into_view failed for selector %r", selector, exc_info=True)
 
 
 async def wait_for_stable(page: "Page", selector: str, timeout: int = 3000) -> None:
@@ -198,7 +202,7 @@ async def wait_for_stable(page: "Page", selector: str, timeout: int = 3000) -> N
         loc = page.locator(selector)
         await loc.wait_for(state="visible", timeout=timeout)
     except Exception:
-        pass
+        _log.debug("wait_for_stable failed for selector %r", selector, exc_info=True)
 
 
 async def click_locator(
@@ -210,7 +214,7 @@ async def click_locator(
     try:
         await locator.scroll_into_view_if_needed(timeout=min(timeout, 3000))
     except Exception:
-        pass
+        _log.debug("click_locator scroll_into_view failed", exc_info=True)
 
     try:
         await locator.click(timeout=timeout)
@@ -246,7 +250,7 @@ async def fill_locator(
     try:
         await locator.scroll_into_view_if_needed(timeout=min(timeout, 3000))
     except Exception:
-        pass
+        _log.debug("fill_locator scroll_into_view failed", exc_info=True)
 
     try:
         await locator.fill(value, timeout=timeout)
@@ -266,14 +270,14 @@ async def safe_click(
         await page.locator(selector).click(timeout=timeout)
         return True
     except Exception:
-        pass
+        _log.debug("safe_click locator failed for selector %r", selector, exc_info=True)
 
     # Try text match fallback
     try:
         await page.get_by_text(selector).first.click(timeout=timeout)
         return True
     except Exception:
-        pass
+        _log.debug("safe_click text match failed for selector %r", selector, exc_info=True)
 
     if fallback_vision:
         from blop.engine.vision import click_by_vision
@@ -281,7 +285,7 @@ async def safe_click(
             await click_by_vision(page, selector)
             return True
         except Exception:
-            pass
+            _log.debug("safe_click vision fallback failed for selector %r", selector, exc_info=True)
 
     return False
 
@@ -298,7 +302,7 @@ async def safe_fill(
         await page.locator(selector).fill(value, timeout=timeout)
         return True
     except Exception:
-        pass
+        _log.debug("safe_fill locator failed for selector %r", selector, exc_info=True)
 
     if fallback_vision:
         from blop.engine.vision import find_element_coords
@@ -309,7 +313,7 @@ async def safe_fill(
                 await page.keyboard.type(value)
                 return True
         except Exception:
-            pass
+            _log.debug("safe_fill vision fallback failed for selector %r", selector, exc_info=True)
 
     return False
 
@@ -320,7 +324,7 @@ async def drag_and_drop(page: "Page", source: str, target: str) -> bool:
         await page.drag_and_drop(source, target)
         return True
     except Exception:
-        pass
+        _log.debug("drag_and_drop native failed for %r -> %r", source, target, exc_info=True)
 
     try:
         src = page.locator(source)
@@ -334,6 +338,6 @@ async def drag_and_drop(page: "Page", source: str, target: str) -> bool:
             await page.mouse.up()
             return True
     except Exception:
-        pass
+        _log.debug("drag_and_drop mouse fallback failed for %r -> %r", source, target, exc_info=True)
 
     return False
