@@ -4,10 +4,11 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 from blop.config import BLOP_DISCOVERY_MAX_PAGES
+from blop.engine.auth import resolve_storage_state_for_profile
 from blop.engine.logger import get_logger
 from blop.engine.secrets import mask_text
 from blop.schemas import SiteInventory
@@ -41,31 +42,6 @@ def _adaptive_budget(base_max_pages: int, business_signals: list[str], auth_sign
     if signal_count >= 4:
         return min(30, base_max_pages + 6)
     return base_max_pages
-
-
-async def _resolve_profile_storage_state(profile_name: Optional[str]) -> Optional[str]:
-    """Resolve Playwright storage_state path from saved auth profile.
-
-    Falls back to env-var credentials (TEST_USERNAME / TEST_PASSWORD / LOGIN_URL)
-    when no profile_name is given, so crawls can reach auth-gated pages automatically.
-    """
-    if not profile_name:
-        try:
-            from blop.engine.auth import auto_storage_state_from_env
-            return await auto_storage_state_from_env()
-        except Exception:
-            _log.debug("Failed to auto-resolve storage state from env", exc_info=True)
-        return None
-    try:
-        from blop.storage.sqlite import get_auth_profile
-        from blop.engine.auth import resolve_storage_state
-
-        profile = await get_auth_profile(profile_name)
-        if profile:
-            return await resolve_storage_state(profile)
-    except Exception:
-        _log.debug("Failed to resolve storage state from auth profile", exc_info=True)
-    return None
 
 
 from blop.engine.dom_utils import extract_interactive_nodes_flat as _extract_interactive_nodes_flat
@@ -206,7 +182,7 @@ async def inventory_site(
     except Exception:
         _log.debug("Failed to load previous context graph for hotspot paths", exc_info=True)
 
-    storage_state = await _resolve_profile_storage_state(profile_name)
+    storage_state = await resolve_storage_state_for_profile(profile_name, allow_auto_env=False)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -234,10 +210,18 @@ async def inventory_site(
                     page = await context.new_page()
                     try:
                         await page.goto(url, wait_until="networkidle", timeout=15000)
-                    except Exception:
+                    except Exception as first_error:
                         try:
                             await page.goto(url, timeout=15000)
-                        except Exception:
+                        except Exception as second_error:
+                            _log.debug(
+                                "crawl_page_failed event=crawl_page_failed url=%s error_type=%s error_message=%s fallback_error_type=%s fallback_error_message=%s",
+                                url,
+                                type(first_error).__name__,
+                                str(first_error)[:160],
+                                type(second_error).__name__,
+                                str(second_error)[:160],
+                            )
                             await page.close()
                             page = None
                             continue
@@ -331,7 +315,14 @@ async def inventory_site(
 
                     await page.close()
                     page = None
-                except Exception:
+                except Exception as e:
+                    _log.debug(
+                        "crawl_page_failed event=crawl_page_failed url=%s error_type=%s error_message=%s",
+                        url,
+                        type(e).__name__,
+                        str(e)[:200],
+                        exc_info=True,
+                    )
                     if page:
                         try:
                             await page.close()
@@ -367,7 +358,7 @@ async def get_page_structure(
     from playwright.async_api import async_playwright
     from blop.engine.interaction import wait_for_spa_ready
 
-    storage_state = await _resolve_profile_storage_state(profile_name)
+    storage_state = await resolve_storage_state_for_profile(profile_name, allow_auto_env=False)
     url = target_url or app_url
 
     async with async_playwright() as p:
@@ -400,18 +391,35 @@ async def plan_flows_from_inventory(
     inventory: SiteInventory,
     repo_context: Optional[str] = None,
     business_goal: Optional[str] = None,
-) -> list[dict]:
+    include_meta: bool = False,
+) -> list[dict] | tuple[list[dict], dict]:
     """Send inventory to LLM with DISCOVER_PROMPT and return typed flows."""
     from blop.prompts import DISCOVER_PROMPT
     from blop.engine.llm_factory import make_planning_llm, make_message
 
     provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
+    fallback_meta = {"planning_fallback": False, "planning_error": None}
     if provider == "google" and not os.getenv("GOOGLE_API_KEY"):
-        return _fallback_flows(inventory.app_url)
+        fallback_meta = {
+            "planning_fallback": True,
+            "planning_error": "GOOGLE_API_KEY is not set",
+        }
+        flows = _fallback_flows(inventory.app_url)
+        return (flows, fallback_meta) if include_meta else flows
     if provider == "anthropic" and not os.getenv("ANTHROPIC_API_KEY"):
-        return _fallback_flows(inventory.app_url)
+        fallback_meta = {
+            "planning_fallback": True,
+            "planning_error": "ANTHROPIC_API_KEY is not set",
+        }
+        flows = _fallback_flows(inventory.app_url)
+        return (flows, fallback_meta) if include_meta else flows
     if provider == "openai" and not os.getenv("OPENAI_API_KEY"):
-        return _fallback_flows(inventory.app_url)
+        fallback_meta = {
+            "planning_fallback": True,
+            "planning_error": "OPENAI_API_KEY is not set",
+        }
+        flows = _fallback_flows(inventory.app_url)
+        return (flows, fallback_meta) if include_meta else flows
 
     llm_kwargs: dict = {"temperature": 0.7, "max_output_tokens": 2000}
     # Extended thinking: enable for complex apps or when budget set
@@ -462,11 +470,16 @@ async def plan_flows_from_inventory(
                     f.setdefault("business_criticality", "other")
                     valid_flows.append(f)
             if valid_flows:
-                return valid_flows
-    except Exception:
+                return (valid_flows, fallback_meta) if include_meta else valid_flows
+    except Exception as e:
         _log.debug("LLM flow planning failed, using fallback flows", exc_info=True)
+        fallback_meta = {
+            "planning_fallback": True,
+            "planning_error": f"{type(e).__name__}: {str(e)[:200]}",
+        }
 
-    return _fallback_flows(inventory.app_url)
+    flows = _fallback_flows(inventory.app_url)
+    return (flows, fallback_meta) if include_meta else flows
 
 
 def quality_gate_flows(inventory: SiteInventory, flows: list[dict]) -> tuple[bool, list[str]]:
@@ -530,10 +543,15 @@ async def discover_flows(
     except Exception:
         _log.debug("Failed to save site inventory in discover_flows", exc_info=True)
 
+    planning_meta: dict[str, Any] = {}
     if repo_path:
         flows = await _flows_from_repo(repo_path, app_url, inventory, business_goal)
     else:
-        flows = await plan_flows_from_inventory(inventory, business_goal=business_goal)
+        flows, planning_meta = await plan_flows_from_inventory(
+            inventory,
+            business_goal=business_goal,
+            include_meta=True,
+        )
 
     # Clamp to 3-8 flows
     flows = flows[:8]
@@ -566,7 +584,12 @@ async def discover_flows(
         },
         "flows": flows,
         "flow_count": len(flows),
-        "quality": {"passed": passed, "warnings": warnings},
+        "quality": {
+            "passed": passed,
+            "warnings": warnings,
+            "planning_fallback": planning_meta.get("planning_fallback", False) if not repo_path else False,
+            "planning_error": planning_meta.get("planning_error") if not repo_path else None,
+        },
         "context_graph": {
             "graph_id": current_graph.graph_id,
             "node_count": len(current_graph.nodes),

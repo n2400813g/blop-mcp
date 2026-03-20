@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Optional
 from urllib.parse import quote
 
@@ -23,6 +24,12 @@ async def discover_test_flows(
     url_err = validate_app_url(app_url)
     if url_err:
         return {"error": url_err}
+    for param_name, pattern in [("include_url_pattern", include_url_pattern), ("exclude_url_pattern", exclude_url_pattern)]:
+        if pattern:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                return {"error": f"Invalid {param_name}: {exc}"}
     # If command is provided, parse it for intent/priorities
     if command:
         from blop.engine.planner import parse_command
@@ -54,6 +61,16 @@ async def discover_test_flows(
         f"blop://v2/context/{encoded_app}/history/20",
         "blop://v2/contracts/tools",
     ]
+    flow_count = result.get("flow_count", 0)
+    if flow_count > 0:
+        result["workflow_hint"] = (
+            f"Found {flow_count} flows. Next: record_test_flow for each — "
+            "prioritize business_criticality='revenue' and 'activation' flows first."
+        )
+    else:
+        result["workflow_hint"] = (
+            "No flows planned. Try passing business_goal='...' or increasing max_pages."
+        )
     return result
 
 

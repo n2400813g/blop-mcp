@@ -6,7 +6,11 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from blop.config import validate_app_url
+from blop.engine.path_safety import resolve_within_base, sanitize_component
+
 _BLOP_DIR: str = str(Path(__file__).parent.parent.parent.parent / ".blop")
+_REPO_ROOT = Path(__file__).parent.parent.parent.parent.resolve()
 
 
 async def capture_auth_session(
@@ -24,6 +28,14 @@ async def capture_auth_session(
 
     On success, saves Playwright storage state and upserts an auth profile in SQLite.
     """
+    try:
+        safe_profile_name = sanitize_component(profile_name, field_name="profile_name")
+    except ValueError as exc:
+        return {"status": "error", "profile_name": profile_name, "note": str(exc)}
+    url_err = validate_app_url(login_url)
+    if url_err:
+        return {"status": "error", "profile_name": profile_name, "note": url_err}
+
     from playwright.async_api import async_playwright
     from blop.schemas import AuthProfile
     from blop.storage import sqlite
@@ -31,16 +43,27 @@ async def capture_auth_session(
     from urllib.parse import urlparse
 
     os.makedirs(_BLOP_DIR, exist_ok=True)
-    state_path = os.path.join(_BLOP_DIR, f"auth_state_{profile_name}.json")
+    state_path = os.path.join(_BLOP_DIR, f"auth_state_{safe_profile_name}.json")
     login_domain = urlparse(login_url).netloc  # e.g. "app.rendley.com"
 
     captured = False
 
     async with async_playwright() as p:
         if user_data_dir:
-            os.makedirs(user_data_dir, exist_ok=True)
-            context = await p.chromium.launch_persistent_context(
+            resolved_user_data_dir = resolve_within_base(
                 user_data_dir,
+                base_dir=_REPO_ROOT,
+                must_exist=False,
+            )
+            if resolved_user_data_dir is None:
+                return {
+                    "status": "error",
+                    "profile_name": profile_name,
+                    "note": "user_data_dir must resolve within the repository root",
+                }
+            os.makedirs(resolved_user_data_dir, exist_ok=True)
+            context = await p.chromium.launch_persistent_context(
+                str(resolved_user_data_dir),
                 headless=False,
             )
             browser = None
@@ -122,16 +145,16 @@ async def capture_auth_session(
 
     # Upsert auth profile in SQLite as storage_state type
     profile = AuthProfile(
-        profile_name=profile_name,
+        profile_name=safe_profile_name,
         auth_type="storage_state",
         storage_state_path=state_path,
-        user_data_dir=user_data_dir,
+        user_data_dir=str(resolved_user_data_dir) if user_data_dir else None,
     )
     await sqlite.save_auth_profile(profile, state_path)
 
     return {
         "status": "captured",
-        "profile_name": profile_name,
+        "profile_name": safe_profile_name,
         "storage_state_path": state_path,
         "note": "Auth state saved. Pass profile_name to record_test_flow and run_regression_test.",
     }

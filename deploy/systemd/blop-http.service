@@ -1,0 +1,21 @@
+[Unit]
+Description=blop HTTP SSE sidecar
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/blop-mcp
+EnvironmentFile=/etc/blop/prod.env
+ExecStart=/opt/blop-mcp/.venv/bin/blop-http
+Restart=on-failure
+RestartSec=5
+User=blop
+Group=blop
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/blop /var/log/blop
+
+[Install]
+WantedBy=multi-user.target

@@ -1,7 +1,7 @@
 [project]
 name = "blop"
 version = "0.3.0"
-description = "AI-powered QA testing via MCP"
+description = "MCP-native release confidence control plane for web apps"
 requires-python = ">=3.11"
 readme = "README.md"
 
@@ -54,6 +54,11 @@ include = ["blop*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+  "happy_path: end-to-end release confidence workflow tests",
+  "slow: slower browser or network-backed tests",
+  "integration: tests that require external services or a real browser runtime",
+]
 
 [project.scripts]
 blop = "blop.server:run"

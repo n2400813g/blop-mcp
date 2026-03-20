@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 import uuid
 
 
@@ -22,6 +22,24 @@ class StructuredAssertion(BaseModel):
     description: str = ""          # original natural-language form (always kept)
     negated: bool = False          # if True, assert that condition does NOT hold
 
+    @model_validator(mode="after")
+    def _validate_shape(self) -> "StructuredAssertion":
+        kind = self.assertion_type
+        if kind in {"text_present", "url_contains", "page_title"} and not self.expected:
+            raise ValueError(f"{kind} requires expected")
+        if kind in {"element_visible", "count"} and not self.target:
+            raise ValueError(f"{kind} requires target")
+        if kind == "count":
+            if self.expected is None:
+                raise ValueError("count requires expected")
+            try:
+                int(self.expected)
+            except ValueError as exc:
+                raise ValueError("count expected must be an integer string") from exc
+        if kind in {"semantic", "visual_match"} and not (self.description or self.target or self.expected):
+            raise ValueError(f"{kind} requires description, target, or expected")
+        return self
+
 
 class AuthProfile(BaseModel):
     profile_name: str
@@ -32,6 +50,30 @@ class AuthProfile(BaseModel):
     storage_state_path: str | None = None
     cookie_json_path: str | None = None
     user_data_dir: str | None = None  # Persistent Chromium profile dir (for anti-bot OAuth)
+
+    @model_validator(mode="after")
+    def _validate_auth_mode(self) -> "AuthProfile":
+        if self.auth_type == "env_login":
+            if not self.login_url:
+                raise ValueError("login_url is required for auth_type=env_login")
+            if not self.username_env or not self.password_env:
+                raise ValueError("username_env and password_env are required for auth_type=env_login")
+            return self
+
+        if self.auth_type == "storage_state":
+            if not self.storage_state_path:
+                raise ValueError("storage_state_path is required for auth_type=storage_state")
+            if self.cookie_json_path:
+                raise ValueError("cookie_json_path cannot be set when auth_type=storage_state")
+            return self
+
+        if self.auth_type == "cookie_json":
+            if not self.cookie_json_path:
+                raise ValueError("cookie_json_path is required for auth_type=cookie_json")
+            if self.storage_state_path:
+                raise ValueError("storage_state_path cannot be set when auth_type=cookie_json")
+
+        return self
 
 
 class SpaHints(BaseModel):
@@ -174,6 +216,16 @@ class ContextGraphVersion(BaseModel):
 class ReleaseReference(BaseModel):
     graph_id: str | None = None
     run_id: str | None = None
+
+
+class TelemetrySignalInput(BaseModel):
+    ts: str
+    signal_type: Literal["error_rate", "latency_p95", "conversion", "custom"] = "custom"
+    value: float
+    journey_key: str | None = None
+    route: str | None = None
+    unit: str | None = None
+    tags: dict[str, str] = Field(default_factory=dict)
 
 
 class ReleaseSnapshot(BaseModel):
@@ -403,3 +455,79 @@ class DebugResult(BaseModel):
     replay_mode: str = ""
     assertion_failures: list[str] = []
     why_failed: str = ""
+
+
+class ReleaseRecommendation(BaseModel):
+    """Authoritative schema for the release_recommendation field returned by build_report and evaluate_web_task."""
+    decision: Literal["SHIP", "INVESTIGATE", "BLOCK"]
+    confidence: Literal["high", "medium", "low"]
+    rationale: str
+    blocker_count: int = 0
+    critical_journey_failures: int = 0
+
+
+# ── MVP canonical models ──────────────────────────────────────────────────────
+
+class ActionItem(BaseModel):
+    priority: int  # 1 = highest
+    action: str
+    owner_hint: str | None = None
+    evidence_ref: str | None = None  # run_id or case_id
+
+
+class RiskScore(BaseModel):
+    value: int  # 0-100
+    level: Literal["low", "medium", "high", "blocker"]
+
+
+class ConfidenceScore(BaseModel):
+    value: float  # 0.0-1.0
+    label: Literal["high", "medium", "low"]
+
+
+class CriticalJourney(BaseModel):
+    journey_id: str
+    journey_name: str
+    why_it_matters: str
+    criticality_class: Literal["revenue", "activation", "retention", "support", "other"]
+    auth_required: bool
+    confidence: float
+    include_in_release_gating: bool
+    flow_id: str | None = None  # set if a RecordedFlow exists
+
+
+class ReleaseCheckResult(BaseModel):
+    release_id: str
+    run_id: str
+    status: str  # same as RunStatus
+    risk: RiskScore
+    confidence: ConfidenceScore
+    decision: Literal["SHIP", "INVESTIGATE", "BLOCK"]
+    blocker_journeys: list[str]
+    business_impact: str
+    prioritized_actions: list[ActionItem]
+    resource_links: dict[str, str]  # "brief" → "blop://release/{id}/brief", etc.
+
+
+class ReleaseBrief(BaseModel):
+    release_id: str
+    run_id: str
+    app_url: str
+    created_at: str
+    decision: Literal["SHIP", "INVESTIGATE", "BLOCK"]
+    risk: RiskScore
+    confidence: ConfidenceScore
+    blocker_count: int
+    blocker_journey_names: list[str]
+    critical_journey_failures: int
+    top_actions: list[ActionItem]
+
+
+class BlockerTriage(BaseModel):
+    subject_id: str  # run_id, journey_id, or cluster_id
+    likely_cause: str
+    evidence_summary: str
+    user_business_impact: str
+    recommended_action: str
+    suggested_owner: str | None = None
+    linked_artifacts: list[str]

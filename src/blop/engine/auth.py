@@ -8,20 +8,37 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from blop.config import (
+    APP_BASE_URL,
+    BLOP_AUTH_LOGIN_POLL_INTERVAL_MS,
+    BLOP_AUTH_LOGIN_POLL_STEPS,
+    BLOP_AUTH_NETWORKIDLE_TIMEOUT_MS,
+    BLOP_VALIDATE_AUTH_CACHE,
+)
+from blop.engine.logger import get_logger
+from blop.engine.path_safety import resolve_within_base, sanitize_component
 from blop.schemas import AuthProfile
 
 # Anchor .blop/ to the repo root so paths work regardless of the server's CWD.
 # auth.py lives at src/blop/engine/auth.py → 4 levels up = repo root.
 _BLOP_DIR: str = str(Path(__file__).parent.parent.parent.parent / ".blop")
+_REPO_ROOT = Path(__file__).parent.parent.parent.parent.resolve()
 
 _auth_cache: dict[str, dict] = {}
 # Per-profile lock to prevent concurrent logins racing each other
 _login_locks: dict[str, asyncio.Lock] = {}
+_lock_creation_lock = asyncio.Lock()
+_log = get_logger("auth")
+
+# Set to True to allow absolute paths outside the repo root for auth files
+_ALLOW_ABSOLUTE_AUTH_PATHS: bool = os.getenv("BLOP_ALLOW_ABSOLUTE_AUTH_PATHS", "").lower() in ("1", "true", "yes")
 
 
-def _get_lock(key: str) -> asyncio.Lock:
+async def _get_lock(key: str) -> asyncio.Lock:
     if key not in _login_locks:
-        _login_locks[key] = asyncio.Lock()
+        async with _lock_creation_lock:
+            if key not in _login_locks:
+                _login_locks[key] = asyncio.Lock()
     return _login_locks[key]
 
 
@@ -36,22 +53,88 @@ async def resolve_storage_state(profile: AuthProfile) -> Optional[str]:
     return None
 
 
+async def resolve_storage_state_for_profile(
+    profile_name: Optional[str],
+    *,
+    allow_auto_env: bool = True,
+    profile: Optional[AuthProfile] = None,
+) -> Optional[str]:
+    """Resolve storage state by profile name with optional auto-env fallback.
+
+    This is the canonical helper for tool/orchestration layers so they do not
+    duplicate `get_auth_profile` + `resolve_storage_state` + auto-env logic.
+    """
+    if profile is not None:
+        resolved = await resolve_storage_state(profile)
+        if resolved is None and allow_auto_env:
+            return await auto_storage_state_from_env()
+        return resolved
+
+    if not profile_name:
+        return await auto_storage_state_from_env() if allow_auto_env else None
+
+    try:
+        from blop.storage.sqlite import get_auth_profile
+
+        loaded_profile = await get_auth_profile(profile_name)
+        if loaded_profile is None:
+            return await auto_storage_state_from_env() if allow_auto_env else None
+        resolved = await resolve_storage_state(loaded_profile)
+        if resolved is None and allow_auto_env:
+            return await auto_storage_state_from_env()
+        return resolved
+    except Exception as e:
+        _log.warning(
+            (
+                "auth_resolve_failed event=auth_resolve_failed profile_name=%s "
+                "allow_auto_env=%s fallback=%s error_type=%s error_message=%s"
+            ),
+            profile_name,
+            allow_auto_env,
+            "auto_storage_state_from_env" if allow_auto_env else "none",
+            type(e).__name__,
+            str(e)[:200],
+            exc_info=True,
+        )
+        return await auto_storage_state_from_env() if allow_auto_env else None
+
+
 async def _env_login(profile: AuthProfile) -> Optional[str]:
     cache_key = profile.profile_name
     os.makedirs(_BLOP_DIR, exist_ok=True)
-    state_path = os.path.join(_BLOP_DIR, f"auth_state_{cache_key}.json")
+    try:
+        safe_cache_key = sanitize_component(cache_key, field_name="profile_name")
+    except ValueError:
+        return None
+    state_path = os.path.join(_BLOP_DIR, f"auth_state_{safe_cache_key}.json")
+
+    async def _cached_state_is_usable(path: str) -> bool:
+        if not BLOP_VALIDATE_AUTH_CACHE:
+            return True
+        if not APP_BASE_URL:
+            return True
+        try:
+            return await validate_auth_session(path, APP_BASE_URL)
+        except Exception:
+            return False
 
     # Fast path: in-memory cache hit
     entry = _auth_cache.get(cache_key)
     if entry and time.time() < entry["expires"] and os.path.exists(entry["path"]):
-        return entry["path"]
+        if await _cached_state_is_usable(entry["path"]):
+            return entry["path"]
+        _log.debug("auth_cache_invalidated profile=%s reason=session_invalid", cache_key)
+        _auth_cache.pop(cache_key, None)
 
     # Serialize concurrent callers — only one login per profile at a time
-    async with _get_lock(cache_key):
+    async with await _get_lock(cache_key):
         # Re-check after acquiring lock (another coroutine may have just finished)
         entry = _auth_cache.get(cache_key)
         if entry and time.time() < entry["expires"] and os.path.exists(entry["path"]):
-            return entry["path"]
+            if await _cached_state_is_usable(entry["path"]):
+                return entry["path"]
+            _log.debug("auth_cache_invalidated profile=%s reason=session_invalid_locked", cache_key)
+            _auth_cache.pop(cache_key, None)
 
         username_env = profile.username_env or "TEST_USERNAME"
         password_env = profile.password_env or "TEST_PASSWORD"
@@ -87,7 +170,14 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
                     if el:
                         await el.fill(value)
                         return sel
-                except Exception:
+                except Exception as e:
+                    _log.debug(
+                        "auth_selector_fill_failed profile=%s selector=%s error_type=%s error_message=%s",
+                        cache_key,
+                        sel,
+                        type(e).__name__,
+                        str(e)[:160],
+                    )
                     continue
             raise RuntimeError(f"Could not find input with any of: {selectors}")
 
@@ -97,9 +187,16 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
                 # OAuth providers (Google, GitHub) from detecting a fresh browser context
                 # as a bot and blocking automated login.
                 if profile.user_data_dir:
-                    os.makedirs(profile.user_data_dir, exist_ok=True)
+                    user_data_dir = resolve_within_base(
+                        profile.user_data_dir,
+                        base_dir=_REPO_ROOT,
+                        must_exist=False,
+                    )
+                    if user_data_dir is None:
+                        raise RuntimeError("user_data_dir must resolve within the repository root")
+                    os.makedirs(user_data_dir, exist_ok=True)
                     context = await p.chromium.launch_persistent_context(
-                        profile.user_data_dir, headless=True,
+                        str(user_data_dir), headless=True,
                     )
                     browser = None
                 else:
@@ -117,15 +214,19 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
                     # Using a URL-polling loop handles multi-step OAuth redirects
                     # (login → IdP → MFA → callback → app) that fool networkidle.
                     _login_path_kws = ("login", "signin", "sign-in", "oauth", "auth/")
-                    for _ in range(40):  # up to 20 seconds in 500ms steps
-                        await asyncio.sleep(0.5)
+                    poll_interval_s = max(BLOP_AUTH_LOGIN_POLL_INTERVAL_MS, 50) / 1000.0
+                    for _ in range(max(BLOP_AUTH_LOGIN_POLL_STEPS, 1)):
+                        await asyncio.sleep(poll_interval_s)
                         current_url = page.url.lower()
                         if not any(kw in current_url for kw in _login_path_kws):
                             break
                     else:
                         # Fallback: just wait for network to settle
                         try:
-                            await page.wait_for_load_state("networkidle", timeout=8000)
+                            await page.wait_for_load_state(
+                                "networkidle",
+                                timeout=max(BLOP_AUTH_NETWORKIDLE_TIMEOUT_MS, 1000),
+                            )
                         except Exception:
                             pass
 
@@ -171,7 +272,14 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
             _auth_cache[cache_key] = {"path": state_path, "expires": time.time() + 3600}
             return state_path
 
-        except Exception:
+        except Exception as e:
+            _log.debug(
+                "env_login_failed event=env_login_failed profile=%s error_type=%s error_message=%s",
+                cache_key,
+                type(e).__name__,
+                str(e)[:200],
+                exc_info=True,
+            )
             # Login threw — fall back to existing state file if available
             if os.path.exists(state_path):
                 return state_path
@@ -180,15 +288,13 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
 
 def _storage_state(profile: AuthProfile) -> Optional[str]:
     path = profile.storage_state_path or os.getenv("STORAGE_STATE_PATH")
-    if not path:
-        return None
-    # Resolve relative paths against the repo root (where .blop/ lives),
-    # not the server process's CWD.
-    if not os.path.isabs(path):
-        path = str(Path(_BLOP_DIR).parent / path)
-    if os.path.exists(path):
-        return path
-    return None
+    resolved = resolve_within_base(
+        path or "",
+        base_dir=_REPO_ROOT,
+        must_exist=True,
+        allow_absolute_outside_base=_ALLOW_ABSOLUTE_AUTH_PATHS,
+    )
+    return str(resolved) if resolved else None
 
 
 async def validate_auth_session(
@@ -209,7 +315,14 @@ async def validate_auth_session(
             await context.close()
             await browser.close()
             return not any(pat in current_url for pat in auth_redirect_patterns)
-    except Exception:
+    except Exception as e:
+        _log.debug(
+            "validate_auth_failed event=validate_auth_failed app_url=%s error_type=%s error_message=%s",
+            app_url[:200],
+            type(e).__name__,
+            str(e)[:200],
+            exc_info=True,
+        )
         return False
 
 
@@ -222,22 +335,36 @@ async def auto_storage_state_from_env() -> Optional[str]:
     from blop.config import LOGIN_URL, TEST_AUTH_URL, TEST_USERNAME, TEST_PASSWORD
     if not (TEST_USERNAME and TEST_PASSWORD and (LOGIN_URL or TEST_AUTH_URL)):
         return None
-    profile = AuthProfile(profile_name="_auto_env", auth_type="env_login")
+    profile = AuthProfile(
+        profile_name="_auto_env",
+        auth_type="env_login",
+        login_url=LOGIN_URL or TEST_AUTH_URL,
+    )
     return await _env_login(profile)
 
 
 async def _cookie_json(profile: AuthProfile) -> Optional[str]:
     cookie_path = profile.cookie_json_path or os.getenv("COOKIE_JSON_PATH")
-    if not cookie_path or not os.path.exists(cookie_path):
+    resolved_cookie_path = resolve_within_base(
+        cookie_path or "",
+        base_dir=_REPO_ROOT,
+        must_exist=True,
+        allow_absolute_outside_base=_ALLOW_ABSOLUTE_AUTH_PATHS,
+    )
+    if not resolved_cookie_path:
         return None
 
     from playwright.async_api import async_playwright
 
-    with open(cookie_path) as f:
+    with open(resolved_cookie_path) as f:
         cookies = json.load(f)
 
     os.makedirs(_BLOP_DIR, exist_ok=True)
-    state_path = os.path.join(_BLOP_DIR, f"auth_state_{profile.profile_name}.json")
+    try:
+        safe_profile_name = sanitize_component(profile.profile_name, field_name="profile_name")
+    except ValueError:
+        return None
+    state_path = os.path.join(_BLOP_DIR, f"auth_state_{safe_profile_name}.json")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -246,5 +373,5 @@ async def _cookie_json(profile: AuthProfile) -> Optional[str]:
         await context.storage_state(path=state_path)
         await browser.close()
 
-    _auth_cache[profile.profile_name] = {"path": state_path, "expires": time.time() + 3600}
+    _auth_cache[safe_profile_name] = {"path": state_path, "expires": time.time() + 3600}
     return state_path

@@ -1,5 +1,6 @@
 import logging
 import os
+from pathlib import Path
 from urllib.parse import unquote
 
 # Must happen before any other imports to prevent JSON-RPC interference
@@ -7,20 +8,115 @@ logging.disable(logging.CRITICAL)
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
 os.environ.setdefault("BROWSER_USE_LOGGING_LEVEL", "CRITICAL")
 
-from typing import Optional
+# blop logger bypasses logging.disable via explicit _logger.disabled = False
+from blop.engine.logger import get_logger as _get_blop_logger  # noqa: E402
+_log = _get_blop_logger("server")
+
+from typing import Literal, Optional
 
 from mcp.server.fastmcp import FastMCP
 
+from blop import capabilities as capability_flags
 from blop.config import BLOP_DISCOVERY_MAX_PAGES
+from blop.schemas import ReleaseReference, TelemetrySignalInput
 from blop.storage import sqlite
 from blop.storage.sqlite import init_db
 from blop.tools import assertions as assertions_tools
 from blop.tools import auth, capture_auth, debug, discover, evaluate as evaluate_tools
+from blop.tools import browser_compat
 from blop.tools import network as network_tools
 from blop.tools import record, regression, results, security as security_tools
 from blop.tools import storage as storage_tools, v2_surface, validate
 
 mcp = FastMCP("blop")
+
+
+def _ensure_compat_enabled(tool_name: str) -> Optional[dict]:
+    if capability_flags.is_tool_enabled(tool_name):
+        return None
+    return {
+        "error": (
+            f"Tool '{tool_name}' is disabled by capabilities. "
+            "Enable BLOP_CAPABILITIES=...,compat_browser to use Playwright-compatible browser_* tools."
+        )
+    }
+
+
+async def _safe_call(handler, /, tool_name: Optional[str] = None, **kwargs) -> dict:
+    """Standardized error envelope for MCP tool handlers."""
+    try:
+        return await handler(**kwargs)
+    except Exception as e:
+        _tool = tool_name or getattr(handler, "__qualname__", str(handler))
+        _log.error(
+            "tool_exception tool=%s error_type=%s",
+            _tool,
+            type(e).__name__,
+            extra={
+                "error": str(e),
+                "run_id": kwargs.get("run_id"),
+                "flow_id": kwargs.get("flow_id"),
+                "case_id": kwargs.get("case_id"),
+                "profile_name": kwargs.get("profile_name"),
+            },
+            exc_info=True,
+        )
+        payload = {
+            "error": (
+                f"Tool '{_tool}' encountered an internal error. "
+                "Check the configured BLOP_DEBUG_LOG for details."
+            ),
+            "error_type": type(e).__name__,
+            "tool": _tool,
+        }
+        for key in ("run_id", "flow_id", "case_id"):
+            value = kwargs.get(key)
+            if isinstance(value, str) and value:
+                payload[key] = value
+        return payload
+
+
+async def _safe_compat_call(tool_name: str, handler, /, **kwargs) -> dict:
+    blocked = _ensure_compat_enabled(tool_name)
+    if blocked:
+        return blocked
+    return await _safe_call(handler, tool_name=tool_name, **kwargs)
+
+
+def _add_deprecation_notice(
+    payload: dict,
+    *,
+    replacement_tool: str,
+    replacement_payload: dict,
+    message: str = "This tool is deprecated.",
+    removal_phase: str = "after_one_stable_release",
+) -> dict:
+    enriched = dict(payload)
+    enriched["deprecation_notice"] = {
+        "message": message,
+        "replacement_tool": replacement_tool,
+        "replacement_payload": replacement_payload,
+        "removal_phase": removal_phase,
+    }
+    return enriched
+
+
+def _compat_tools_enabled() -> bool:
+    """Return True when BLOP_ENABLE_COMPAT_TOOLS=true.
+
+    Controls whether legacy/compat tools are registered in the MCP surface.
+    Default is False — only the 4 canonical release-confidence tools are visible.
+    Set BLOP_ENABLE_COMPAT_TOOLS=true to restore the full 87-tool surface.
+    """
+    from blop.config import BLOP_ENABLE_COMPAT_TOOLS
+    return BLOP_ENABLE_COMPAT_TOOLS
+
+
+def _if_compat(fn):
+    """Decorator: register fn as an MCP tool only when BLOP_ENABLE_COMPAT_TOOLS=true."""
+    if _compat_tools_enabled():
+        return mcp.tool()(fn)
+    return fn
 
 
 @mcp.tool()
@@ -37,7 +133,7 @@ async def discover_test_flows(
     exclude_url_pattern: Optional[str] = None,
     return_inventory: bool = False,
 ) -> dict:
-    """Discover test flows for an application by scanning its pages or source code.
+    """[DEPRECATED — use discover_critical_journeys] Discover test flows for an application by scanning its pages or source code.
 
     Uses a BFS crawl to extract page signals (CTAs, auth routes, forms, headings),
     then sends them to Gemini to generate 5-8 meaningful test flows with severity hints.
@@ -58,25 +154,23 @@ async def discover_test_flows(
     Returns:
         dict with app_url, inventory_summary, flows, flow_count, quality (+inventory when requested)
     """
-    try:
-        return await discover.discover_test_flows(
-            app_url=app_url,
-            repo_path=repo_path,
-            profile_name=profile_name,
-            business_goal=business_goal,
-            command=command,
-            max_depth=max_depth,
-            max_pages=max_pages,
-            seed_urls=seed_urls,
-            include_url_pattern=include_url_pattern,
-            exclude_url_pattern=exclude_url_pattern,
-            return_inventory=return_inventory,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(
+        discover.discover_test_flows,
+        app_url=app_url,
+        repo_path=repo_path,
+        profile_name=profile_name,
+        business_goal=business_goal,
+        command=command,
+        max_depth=max_depth,
+        max_pages=max_pages,
+        seed_urls=seed_urls,
+        include_url_pattern=include_url_pattern,
+        exclude_url_pattern=exclude_url_pattern,
+        return_inventory=return_inventory,
+    )
 
 
-@mcp.tool()
+@_if_compat
 async def explore_site_inventory(
     app_url: str,
     profile_name: Optional[str] = None,
@@ -93,21 +187,19 @@ async def explore_site_inventory(
     Useful when you want to inspect site topology first, then call discover_test_flows
     with tighter scope.
     """
-    try:
-        return await discover.explore_site_inventory(
-            app_url=app_url,
-            profile_name=profile_name,
-            max_depth=max_depth,
-            max_pages=max_pages,
-            seed_urls=seed_urls,
-            include_url_pattern=include_url_pattern,
-            exclude_url_pattern=exclude_url_pattern,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(
+        discover.explore_site_inventory,
+        app_url=app_url,
+        profile_name=profile_name,
+        max_depth=max_depth,
+        max_pages=max_pages,
+        seed_urls=seed_urls,
+        include_url_pattern=include_url_pattern,
+        exclude_url_pattern=exclude_url_pattern,
+    )
 
 
-@mcp.tool()
+@_if_compat
 async def get_page_structure(
     app_url: str,
     url: Optional[str] = None,
@@ -123,20 +215,18 @@ async def get_page_structure(
         url: Optional target URL to inspect (defaults to app_url)
         profile_name: Optional auth profile for protected pages
     """
-    try:
-        return await discover.get_page_structure(
-            app_url=app_url,
-            url=url,
-            profile_name=profile_name,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(
+        discover.get_page_structure,
+        app_url=app_url,
+        url=url,
+        profile_name=profile_name,
+    )
 
 
 @mcp.tool()
 async def save_auth_profile(
     profile_name: str,
-    auth_type: str,
+    auth_type: Literal["env_login", "storage_state", "cookie_json"],
     login_url: Optional[str] = None,
     username_env: Optional[str] = "TEST_USERNAME",
     password_env: Optional[str] = "TEST_PASSWORD",
@@ -159,19 +249,17 @@ async def save_auth_profile(
     Returns:
         dict with profile_name, auth_type, status, note
     """
-    try:
-        return await auth.save_auth_profile(
-            profile_name=profile_name,
-            auth_type=auth_type,
-            login_url=login_url,
-            username_env=username_env,
-            password_env=password_env,
-            storage_state_path=storage_state_path,
-            cookie_json_path=cookie_json_path,
-            user_data_dir=user_data_dir,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(
+        auth.save_auth_profile,
+        profile_name=profile_name,
+        auth_type=auth_type,
+        login_url=login_url,
+        username_env=username_env,
+        password_env=password_env,
+        storage_state_path=storage_state_path,
+        cookie_json_path=cookie_json_path,
+        user_data_dir=user_data_dir,
+    )
 
 
 @mcp.tool()
@@ -199,19 +287,17 @@ async def capture_auth_session(
     Returns:
         dict with profile_name, status ("captured" | "timeout"), storage_state_path, note
     """
-    try:
-        return await capture_auth.capture_auth_session(
-            profile_name=profile_name,
-            login_url=login_url,
-            success_url_pattern=success_url_pattern,
-            timeout_secs=timeout_secs,
-            user_data_dir=user_data_dir,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(
+        capture_auth.capture_auth_session,
+        profile_name=profile_name,
+        login_url=login_url,
+        success_url_pattern=success_url_pattern,
+        timeout_secs=timeout_secs,
+        user_data_dir=user_data_dir,
+    )
 
 
-@mcp.tool()
+@_if_compat
 async def list_auth_profiles() -> dict:
     """List all saved auth profiles.
 
@@ -259,57 +345,673 @@ async def evaluate_web_task(
         dict with summary, agent_steps, evidence (console_errors, network_failures,
         screenshots, trace_path), pass_fail, run_id, and formatted_report
     """
-    try:
-        return await evaluate_tools.evaluate_web_task(
-            app_url=app_url,
-            task=task,
-            profile_name=profile_name,
-            headless=headless,
-            max_steps=max_steps,
-            capture=capture,
-            format=format,
-            save_as_recorded_flow=save_as_recorded_flow,
-            flow_name=flow_name,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(
+        evaluate_tools.evaluate_web_task,
+        app_url=app_url,
+        task=task,
+        profile_name=profile_name,
+        headless=headless,
+        max_steps=max_steps,
+        capture=capture,
+        format=format,
+        save_as_recorded_flow=save_as_recorded_flow,
+        flow_name=flow_name,
+    )
 
 
-@mcp.tool()
-async def setup_browser_state(
-    login_url: str,
-    profile_name: str = "default",
-    success_url_pattern: Optional[str] = None,
-    timeout_secs: int = 120,
-    user_data_dir: Optional[str] = None,
+# ---------------------------------------------------------------------------
+# Playwright-MCP compatibility tools (capability-gated via compat_browser)
+# ---------------------------------------------------------------------------
+
+@_if_compat
+async def browser_navigate(url: str, profile_name: Optional[str] = None) -> dict:
+    """Navigate the shared compat browser session to a URL."""
+    return await _safe_compat_call(
+        "browser_navigate",
+        browser_compat.browser_navigate,
+        url=url,
+        profile_name=profile_name,
+    )
+
+
+@_if_compat
+async def browser_navigate_back() -> dict:
+    """Navigate the shared compat browser session back one page."""
+    return await _safe_compat_call("browser_navigate_back", browser_compat.browser_navigate_back)
+
+
+@_if_compat
+async def browser_snapshot(filename: Optional[str] = None, selector: Optional[str] = None) -> dict:
+    """Capture a page snapshot from the shared compat browser session."""
+    return await _safe_compat_call(
+        "browser_snapshot",
+        browser_compat.browser_snapshot,
+        filename=filename,
+        selector=selector,
+    )
+
+
+@_if_compat
+async def browser_click(
+    ref: Optional[str] = None,
+    selector: Optional[str] = None,
+    double_click: bool = False,
 ) -> dict:
-    """Open an interactive browser for manual login, then save the session for reuse.
+    """Click an element in the shared compat browser session."""
+    return await _safe_compat_call(
+        "browser_click",
+        browser_compat.browser_click,
+        ref=ref,
+        selector=selector,
+        double_click=double_click,
+    )
 
-    Convenience alias for capture_auth_session. Opens a visible browser window at
-    login_url — complete OAuth, MFA, or any login flow manually. The session state
-    (cookies + localStorage) is saved automatically and reused by evaluate_web_task
-    and other tools.
 
-    Args:
-        login_url: URL of the login page to open
-        profile_name: Name to save the auth profile under (default: "default")
-        success_url_pattern: URL substring that indicates login succeeded (e.g. "/dashboard")
-        timeout_secs: Max seconds to wait for login (default: 120)
-        user_data_dir: Optional persistent Chromium profile dir (for anti-bot OAuth)
+@_if_compat
+async def browser_type(
+    text: str,
+    ref: Optional[str] = None,
+    selector: Optional[str] = None,
+    submit: bool = False,
+    slowly: bool = False,
+) -> dict:
+    """Type text into an element in the shared compat browser session."""
+    return await _safe_compat_call(
+        "browser_type",
+        browser_compat.browser_type,
+        text=text,
+        ref=ref,
+        selector=selector,
+        submit=submit,
+        slowly=slowly,
+    )
 
-    Returns:
-        dict with profile_name, status ("captured" | "timeout"), storage_state_path, note
-    """
-    try:
-        return await capture_auth.capture_auth_session(
-            profile_name=profile_name,
-            login_url=login_url,
-            success_url_pattern=success_url_pattern,
-            timeout_secs=timeout_secs,
-            user_data_dir=user_data_dir,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+
+@_if_compat
+async def browser_hover(ref: Optional[str] = None, selector: Optional[str] = None) -> dict:
+    """Hover an element in the shared compat browser session."""
+    return await _safe_compat_call(
+        "browser_hover",
+        browser_compat.browser_hover,
+        ref=ref,
+        selector=selector,
+    )
+
+
+@_if_compat
+async def browser_select_option(
+    values: list[str],
+    ref: Optional[str] = None,
+    selector: Optional[str] = None,
+) -> dict:
+    """Select one or more options in the shared compat browser session."""
+    return await _safe_compat_call(
+        "browser_select_option",
+        browser_compat.browser_select_option,
+        values=values,
+        ref=ref,
+        selector=selector,
+    )
+
+
+@_if_compat
+async def browser_file_upload(paths: Optional[list[str]] = None) -> dict:
+    """Upload files through the currently focused file input in shared compat session."""
+    return await _safe_compat_call(
+        "browser_file_upload",
+        browser_compat.browser_file_upload,
+        paths=paths,
+    )
+
+
+@_if_compat
+async def browser_tabs(action: str, index: Optional[int] = None) -> dict:
+    """Manage tabs in the shared compat browser session."""
+    return await _safe_compat_call(
+        "browser_tabs",
+        browser_compat.browser_tabs,
+        action=action,
+        index=index,
+    )
+
+
+@_if_compat
+async def browser_close() -> dict:
+    """Close the shared compat browser session."""
+    return await _safe_compat_call("browser_close", browser_compat.browser_close)
+
+
+@_if_compat
+async def browser_console_messages(
+    level: str = "info",
+    all_messages: bool = False,
+    all_compat: Optional[bool] = None,
+) -> dict:
+    """Read console messages captured in the shared compat browser session."""
+    if all_compat is not None:
+        all_messages = all_compat
+    return await _safe_compat_call(
+        "browser_console_messages",
+        browser_compat.browser_console_messages,
+        level=level,
+        all_messages=all_messages,
+    )
+
+
+@_if_compat
+async def browser_network_requests(
+    include_static: bool = False,
+    includeStatic: Optional[bool] = None,
+) -> dict:
+    """List network requests captured in the shared compat browser session."""
+    if includeStatic is not None:
+        include_static = includeStatic
+    return await _safe_compat_call(
+        "browser_network_requests",
+        browser_compat.browser_network_requests,
+        include_static=include_static,
+    )
+
+
+@_if_compat
+async def browser_take_screenshot(
+    filename: Optional[str] = None,
+    full_page: bool = False,
+    ref: Optional[str] = None,
+    selector: Optional[str] = None,
+    image_type: str = "png",
+    fullPage: Optional[bool] = None,
+    img_type: Optional[str] = None,
+    type: Optional[str] = None,
+) -> dict:
+    """Take a screenshot from the shared compat browser session."""
+    if fullPage is not None:
+        full_page = fullPage
+    if img_type is not None:
+        image_type = img_type
+    if type is not None:
+        image_type = type
+    return await _safe_compat_call(
+        "browser_take_screenshot",
+        browser_compat.browser_take_screenshot,
+        filename=filename,
+        full_page=full_page,
+        ref=ref,
+        selector=selector,
+        img_type=image_type,
+    )
+
+
+@_if_compat
+async def browser_wait_for(
+    time: Optional[float] = None,
+    text: Optional[str] = None,
+    text_gone: Optional[str] = None,
+    textGone: Optional[str] = None,
+) -> dict:
+    """Wait for a condition (time/text/text_gone) in shared compat browser session."""
+    if textGone is not None:
+        text_gone = textGone
+    return await _safe_compat_call(
+        "browser_wait_for",
+        browser_compat.browser_wait_for,
+        time_secs=time,
+        text=text,
+        text_gone=text_gone,
+    )
+
+
+@_if_compat
+async def browser_press_key(key: str) -> dict:
+    """Send a keyboard key press in the shared compat browser session."""
+    return await _safe_compat_call("browser_press_key", browser_compat.browser_press_key, key=key)
+
+
+@_if_compat
+async def browser_resize(width: int, height: int) -> dict:
+    """Resize the shared compat browser viewport."""
+    return await _safe_compat_call("browser_resize", browser_compat.browser_resize, width=width, height=height)
+
+
+@_if_compat
+async def browser_handle_dialog(
+    accept: bool = True,
+    prompt_text: Optional[str] = None,
+    promptText: Optional[str] = None,
+) -> dict:
+    """Configure how the next JS dialog (alert/confirm/prompt) is handled."""
+    if promptText is not None:
+        prompt_text = promptText
+    return await _safe_compat_call(
+        "browser_handle_dialog",
+        browser_compat.browser_handle_dialog,
+        accept=accept,
+        prompt_text=prompt_text,
+    )
+
+
+@_if_compat
+async def browser_route(
+    pattern: str,
+    status: int = 200,
+    body: Optional[str] = None,
+    content_type: Optional[str] = None,
+    headers: Optional[list[str]] = None,
+    contentType: Optional[str] = None,
+) -> dict:
+    """Mock network routes in the shared compat browser session (not regression mocks)."""
+    if contentType is not None:
+        content_type = contentType
+    payload = await _safe_compat_call(
+        "browser_route",
+        browser_compat.browser_route,
+        pattern=pattern,
+        status=status,
+        body=body,
+        content_type=content_type,
+        headers=headers,
+    )
+    headers_dict = {}
+    for item in headers or []:
+        if ":" not in item:
+            continue
+        k, v = item.split(":", 1)
+        headers_dict[k.strip()] = v.strip()
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="route_register",
+        replacement_payload={
+            "scope": "compat_session",
+            "pattern": pattern,
+            "action": "fulfill",
+            "status": status,
+            "body": body,
+            "content_type": content_type,
+            "headers": headers_dict or None,
+        },
+    )
+
+
+@_if_compat
+async def browser_unroute(pattern: Optional[str] = None) -> dict:
+    """Remove one route mock (or all) from the shared compat browser session."""
+    payload = await _safe_compat_call(
+        "browser_unroute",
+        browser_compat.browser_unroute,
+        pattern=pattern,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="route_clear",
+        replacement_payload={
+            "scope": "compat_session",
+            "pattern": pattern,
+        },
+    )
+
+
+@_if_compat
+async def browser_route_list() -> dict:
+    """List active network route mocks in the shared compat browser session."""
+    payload = await _safe_compat_call("browser_route_list", browser_compat.browser_route_list)
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="route_list",
+        replacement_payload={"scope": "compat_session"},
+    )
+
+
+@_if_compat
+async def browser_network_state_set(state: str) -> dict:
+    """Set emulated network condition for the shared compat browser session."""
+    return await _safe_compat_call(
+        "browser_network_state_set",
+        browser_compat.browser_network_state_set,
+        state=state,
+    )
+
+
+@_if_compat
+async def browser_cookie_list(domain: Optional[str] = None, path: Optional[str] = None) -> dict:
+    """List cookies from the shared compat browser session."""
+    payload = await _safe_compat_call(
+        "browser_cookie_list",
+        browser_compat.browser_cookie_list,
+        domain=domain,
+        path=path,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_get",
+        replacement_payload={
+            "scope": "compat_session",
+            "resource": "cookies",
+            "domain": domain,
+            "path": path,
+            "include_values": True,
+        },
+    )
+
+
+@_if_compat
+async def browser_cookie_get(name: str) -> dict:
+    """Get a single cookie by name from the shared compat browser session."""
+    payload = await _safe_compat_call(
+        "browser_cookie_get",
+        browser_compat.browser_cookie_get,
+        name=name,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_get",
+        replacement_payload={
+            "scope": "compat_session",
+            "resource": "cookies",
+            "name": name,
+            "include_values": True,
+        },
+    )
+
+
+@_if_compat
+async def browser_cookie_set(
+    name: str,
+    value: str,
+    domain: Optional[str] = None,
+    path: str = "/",
+    expires: Optional[float] = None,
+    http_only: bool = True,
+    secure: bool = True,
+    same_site: Optional[str] = None,
+    httpOnly: Optional[bool] = None,
+    sameSite: Optional[str] = None,
+) -> dict:
+    """Set a cookie in the shared compat browser session."""
+    if httpOnly is not None:
+        http_only = httpOnly
+    if sameSite is not None:
+        same_site = sameSite
+    payload = await _safe_compat_call(
+        "browser_cookie_set",
+        browser_compat.browser_cookie_set,
+        name=name,
+        value=value,
+        domain=domain,
+        path=path,
+        expires=expires,
+        http_only=http_only,
+        secure=secure,
+        same_site=same_site,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_set",
+        replacement_payload={
+            "scope": "compat_session",
+            "resource": "cookies",
+            "operation": "upsert",
+            "cookie": {
+                "name": name,
+                "value": value,
+                "domain": domain,
+                "path": path,
+                "expires": expires,
+                "httpOnly": http_only,
+                "secure": secure,
+                "sameSite": same_site,
+            },
+        },
+    )
+
+
+@_if_compat
+async def browser_cookie_delete(name: str) -> dict:
+    """Delete a cookie by name in the shared compat browser session."""
+    payload = await _safe_compat_call(
+        "browser_cookie_delete",
+        browser_compat.browser_cookie_delete,
+        name=name,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_set",
+        replacement_payload={
+            "scope": "compat_session",
+            "resource": "cookies",
+            "operation": "delete",
+            "name": name,
+        },
+    )
+
+
+@_if_compat
+async def browser_cookie_clear() -> dict:
+    """Clear all cookies in the shared compat browser session."""
+    payload = await _safe_compat_call("browser_cookie_clear", browser_compat.browser_cookie_clear)
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_set",
+        replacement_payload={
+            "scope": "compat_session",
+            "resource": "cookies",
+            "operation": "clear",
+        },
+    )
+
+
+@_if_compat
+async def browser_storage_state(filename: Optional[str] = None) -> dict:
+    """Save storage state for the shared compat browser session."""
+    payload = await _safe_compat_call(
+        "browser_storage_state",
+        browser_compat.browser_storage_state,
+        filename=filename,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_export",
+        replacement_payload={
+            "scope": "compat_session",
+            "filename": filename,
+        },
+    )
+
+
+@_if_compat
+async def browser_set_storage_state(filename: str) -> dict:
+    """Restore storage state into the shared compat browser session."""
+    payload = await _safe_compat_call(
+        "browser_set_storage_state",
+        browser_compat.browser_set_storage_state,
+        filename=filename,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_import",
+        replacement_payload={
+            "scope": "compat_session",
+            "filename": filename,
+            "merge": False,
+        },
+    )
+
+
+@_if_compat
+async def browser_localstorage_list() -> dict:
+    """List localStorage entries in the shared compat browser session."""
+    payload = await _safe_compat_call(
+        "browser_localstorage_list",
+        browser_compat.browser_localstorage_list,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_get",
+        replacement_payload={"scope": "compat_session", "resource": "local_storage"},
+    )
+
+
+@_if_compat
+async def browser_localstorage_get(key: str) -> dict:
+    """Get one localStorage value in the shared compat browser session."""
+    payload = await _safe_compat_call(
+        "browser_localstorage_get",
+        browser_compat.browser_localstorage_get,
+        key=key,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_get",
+        replacement_payload={"scope": "compat_session", "resource": "local_storage", "key": key},
+    )
+
+
+@_if_compat
+async def browser_localstorage_set(key: str, value: str) -> dict:
+    """Set one localStorage value in the shared compat browser session."""
+    payload = await _safe_compat_call(
+        "browser_localstorage_set",
+        browser_compat.browser_localstorage_set,
+        key=key,
+        value=value,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_set",
+        replacement_payload={
+            "scope": "compat_session",
+            "resource": "local_storage",
+            "operation": "upsert",
+            "key": key,
+            "value": value,
+        },
+    )
+
+
+@_if_compat
+async def browser_localstorage_delete(key: str) -> dict:
+    """Delete one localStorage value in the shared compat browser session."""
+    payload = await _safe_compat_call(
+        "browser_localstorage_delete",
+        browser_compat.browser_localstorage_delete,
+        key=key,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_set",
+        replacement_payload={
+            "scope": "compat_session",
+            "resource": "local_storage",
+            "operation": "delete",
+            "key": key,
+        },
+    )
+
+
+@_if_compat
+async def browser_localstorage_clear() -> dict:
+    """Clear localStorage in the shared compat browser session."""
+    payload = await _safe_compat_call(
+        "browser_localstorage_clear",
+        browser_compat.browser_localstorage_clear,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_set",
+        replacement_payload={
+            "scope": "compat_session",
+            "resource": "local_storage",
+            "operation": "clear",
+        },
+    )
+
+
+@_if_compat
+async def browser_sessionstorage_list() -> dict:
+    """List sessionStorage entries in the shared compat browser session."""
+    payload = await _safe_compat_call(
+        "browser_sessionstorage_list",
+        browser_compat.browser_sessionstorage_list,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_get",
+        replacement_payload={"scope": "compat_session", "resource": "session_storage"},
+    )
+
+
+@_if_compat
+async def browser_sessionstorage_get(key: str) -> dict:
+    """Get one sessionStorage value in the shared compat browser session."""
+    payload = await _safe_compat_call(
+        "browser_sessionstorage_get",
+        browser_compat.browser_sessionstorage_get,
+        key=key,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_get",
+        replacement_payload={"scope": "compat_session", "resource": "session_storage", "key": key},
+    )
+
+
+@_if_compat
+async def browser_sessionstorage_set(key: str, value: str) -> dict:
+    """Set one sessionStorage value in the shared compat browser session."""
+    payload = await _safe_compat_call(
+        "browser_sessionstorage_set",
+        browser_compat.browser_sessionstorage_set,
+        key=key,
+        value=value,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_set",
+        replacement_payload={
+            "scope": "compat_session",
+            "resource": "session_storage",
+            "operation": "upsert",
+            "key": key,
+            "value": value,
+        },
+    )
+
+
+@_if_compat
+async def browser_sessionstorage_delete(key: str) -> dict:
+    """Delete one sessionStorage value in the shared compat browser session."""
+    payload = await _safe_compat_call(
+        "browser_sessionstorage_delete",
+        browser_compat.browser_sessionstorage_delete,
+        key=key,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_set",
+        replacement_payload={
+            "scope": "compat_session",
+            "resource": "session_storage",
+            "operation": "delete",
+            "key": key,
+        },
+    )
+
+
+@_if_compat
+async def browser_sessionstorage_clear() -> dict:
+    """Clear sessionStorage in the shared compat browser session."""
+    payload = await _safe_compat_call(
+        "browser_sessionstorage_clear",
+        browser_compat.browser_sessionstorage_clear,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_set",
+        replacement_payload={
+            "scope": "compat_session",
+            "resource": "session_storage",
+            "operation": "clear",
+        },
+    )
 
 
 @mcp.tool()
@@ -322,17 +1024,29 @@ async def cancel_run(run_id: str) -> dict:
     Returns:
         dict with run_id, previous_status, new_status
     """
-    try:
+    async def _cancel_handler() -> dict:
         run = await sqlite.get_run(run_id)
         if not run:
             return {"error": f"Run {run_id} not found"}
         prev_status = run.get("status", "unknown")
         if prev_status in ("completed", "failed", "cancelled"):
-            return {"run_id": run_id, "previous_status": prev_status, "note": "Run already terminated"}
+            return {
+                "run_id": run_id,
+                "previous_status": prev_status,
+                "new_status": prev_status,
+                "task_cancelled": False,
+                "note": "Run already terminated",
+            }
+        task_cancelled = regression.cancel_run_task(run_id)
         await sqlite.update_run_status(run_id, "cancelled")
-        return {"run_id": run_id, "previous_status": prev_status, "new_status": "cancelled"}
-    except Exception as e:
-        return {"error": str(e)}
+        return {
+            "run_id": run_id,
+            "previous_status": prev_status,
+            "new_status": "cancelled",
+            "task_cancelled": task_cancelled,
+        }
+
+    return await _safe_call(_cancel_handler)
 
 
 @mcp.tool()
@@ -360,30 +1074,28 @@ async def record_test_flow(
     Returns:
         dict with flow_id, flow_name, step_count, status, artifacts_dir
     """
-    try:
-        return await record.record_test_flow(
-            app_url=app_url,
-            flow_name=flow_name,
-            goal=goal,
-            profile_name=profile_name,
-            command=command,
-            business_criticality=business_criticality or "other",
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(
+        record.record_test_flow,
+        app_url=app_url,
+        flow_name=flow_name,
+        goal=goal,
+        profile_name=profile_name,
+        command=command,
+        business_criticality=business_criticality or "other",
+    )
 
 
 @mcp.tool()
 async def run_regression_test(
     app_url: str,
-    flow_ids: list,
+    flow_ids: list[str],
     profile_name: Optional[str] = None,
     headless: bool = True,
     run_mode: str = "hybrid",
     command: Optional[str] = None,
     auto_rerecord: bool = False,
 ) -> dict:
-    """Run regression tests against recorded flows. Returns immediately; poll get_test_results for status.
+    """[DEPRECATED — use run_release_check] Run regression tests against recorded flows. Returns immediately; poll get_test_results for status.
 
     Uses hybrid step-by-step replay by default: tries saved selectors first, falls back
     to text-based lookup, then repairs individual broken steps via vision LLM.
@@ -404,21 +1116,19 @@ async def run_regression_test(
     Returns:
         dict with run_id, status ("running"), flow_count, artifacts_dir
     """
-    try:
-        return await regression.run_regression_test(
-            app_url=app_url,
-            flow_ids=flow_ids,
-            profile_name=profile_name,
-            headless=headless,
-            run_mode=run_mode,
-            command=command,
-            auto_rerecord=auto_rerecord,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(
+        regression.run_regression_test,
+        app_url=app_url,
+        flow_ids=flow_ids,
+        profile_name=profile_name,
+        headless=headless,
+        run_mode=run_mode,
+        command=command,
+        auto_rerecord=auto_rerecord,
+    )
 
 
-@mcp.tool()
+@_if_compat
 async def compare_visual_baseline(
     flow_id: str,
     step_index: Optional[int] = None,
@@ -450,13 +1160,10 @@ async def get_test_results(run_id: str) -> dict:
         dict with run_id, status, cases (with assertion_results, replay_mode_used,
         step_failure_index, artifact_paths), severity_counts, failed_cases, next_actions
     """
-    try:
-        return await results.get_test_results(run_id)
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(results.get_test_results, run_id=run_id)
 
 
-@mcp.tool()
+@_if_compat
 async def list_runs(limit: int = 20, status: Optional[str] = None) -> dict:
     """List recent regression runs, optionally filtered by status.
 
@@ -464,33 +1171,24 @@ async def list_runs(limit: int = 20, status: Optional[str] = None) -> dict:
         limit: Number of runs to return (default 20, max 200)
         status: Optional status filter ("queued", "running", "waiting_auth", "completed", "failed", "cancelled")
     """
-    try:
-        return await results.list_runs(limit=limit, status=status)
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(results.list_runs, limit=limit, status=status)
 
 
-@mcp.tool()
+@_if_compat
 async def get_run_health_stream(run_id: str, limit: int = 500) -> dict:
     """Get control-plane health events for a run (queue/start/case/complete/fail)."""
-    try:
-        return await results.get_run_health_stream(run_id=run_id, limit=limit)
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(results.get_run_health_stream, run_id=run_id, limit=limit)
 
 
-@mcp.tool()
+@_if_compat
 async def get_risk_analytics(limit_runs: int = 30) -> dict:
-    """Aggregate flaky-step, transition-failure, and business-critical risk analytics."""
-    try:
-        return await results.get_risk_analytics(limit_runs=limit_runs)
-    except Exception as e:
-        return {"error": str(e)}
+    """[DEPRECATED — use blop://release/{id}/incidents resource] Aggregate flaky-step, transition-failure, and business-critical risk analytics."""
+    return await _safe_call(results.get_risk_analytics, limit_runs=limit_runs)
 
 
-@mcp.tool()
+@_if_compat
 async def list_recorded_tests() -> dict:
-    """List all recorded test flows.
+    """[DEPRECATED — use blop://journeys resource] List all recorded test flows.
 
     Returns:
         dict with flows (list of {flow_id, flow_name, app_url, goal, created_at}), total
@@ -530,7 +1228,7 @@ async def validate_setup(
     app_url: Optional[str] = None,
     profile_name: Optional[str] = None,
 ) -> dict:
-    """Check all preconditions before running tests.
+    """[DEPRECATED — use validate_release_setup] Check all preconditions before running tests.
 
     Verifies: GOOGLE_API_KEY, Chromium installation, SQLite DB access,
     optional app_url reachability, and optional auth profile validity.
@@ -555,7 +1253,7 @@ async def validate_setup(
 # Structured Assertion Tools — lightweight standalone verifications
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@_if_compat
 async def verify_element_visible(
     app_url: str,
     role: str,
@@ -576,7 +1274,7 @@ async def verify_element_visible(
         return {"error": str(e)}
 
 
-@mcp.tool()
+@_if_compat
 async def verify_text_visible(
     app_url: str,
     text: str,
@@ -595,7 +1293,7 @@ async def verify_text_visible(
         return {"error": str(e)}
 
 
-@mcp.tool()
+@_if_compat
 async def verify_value(
     app_url: str,
     selector: str,
@@ -616,7 +1314,7 @@ async def verify_value(
         return {"error": str(e)}
 
 
-@mcp.tool()
+@_if_compat
 async def verify_visual_state(
     app_url: str,
     description: str,
@@ -635,7 +1333,7 @@ async def verify_visual_state(
         return {"error": str(e)}
 
 
-@mcp.tool()
+@_if_compat
 async def export_test_report(
     run_id: str,
     format: str = "markdown",
@@ -660,7 +1358,7 @@ async def export_test_report(
 # Security Scanning Tools
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@_if_compat
 async def security_scan(
     repo_path: str,
     scan_type: str = "semgrep",
@@ -686,7 +1384,7 @@ async def security_scan(
         return {"error": str(e)}
 
 
-@mcp.tool()
+@_if_compat
 async def security_scan_url(
     app_url: str,
     scan_type: str = "headers",
@@ -709,47 +1407,114 @@ async def security_scan_url(
 
 
 # ---------------------------------------------------------------------------
-# Network Mocking Tools
+# Canonical Routing + Legacy Network Mocking Tools
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@_if_compat
+async def route_register(
+    scope: Literal["compat_session", "regression_replay"],
+    pattern: str,
+    action: Literal["fulfill", "abort", "continue"] = "fulfill",
+    status: int = 200,
+    body: Optional[str] = None,
+    content_type: str = "application/json",
+    headers: Optional[dict[str, str]] = None,
+    times: Optional[int] = None,
+    name: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> dict:
+    """Register a scoped network route mock."""
+    return await _safe_call(
+        network_tools.route_register,
+        scope=scope,
+        pattern=pattern,
+        action=action,
+        status=status,
+        body=body,
+        content_type=content_type,
+        headers=headers,
+        times=times,
+        name=name,
+        run_id=run_id,
+    )
+
+
+@_if_compat
+async def route_list(
+    scope: Literal["compat_session", "regression_replay"],
+    run_id: Optional[str] = None,
+) -> dict:
+    """List active route mocks for a scope."""
+    return await _safe_call(network_tools.route_list, scope=scope, run_id=run_id)
+
+
+@_if_compat
+async def route_clear(
+    scope: Literal["compat_session", "regression_replay"],
+    pattern: Optional[str] = None,
+    name: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> dict:
+    """Clear active route mocks for a scope."""
+    return await _safe_call(
+        network_tools.route_clear,
+        scope=scope,
+        pattern=pattern,
+        name=name,
+        run_id=run_id,
+    )
+
+
+@_if_compat
 async def mock_network_route(
     pattern: str,
     status: int = 200,
     body: Optional[str] = None,
     content_type: str = "application/json",
 ) -> dict:
-    """Register a network route mock for use during regression test runs.
+    """Deprecated wrapper for regression replay route mocks."""
+    payload = await _safe_call(
+        network_tools.route_register,
+        scope="regression_replay",
+        pattern=pattern,
+        action="fulfill",
+        status=status,
+        body=body,
+        content_type=content_type,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="route_register",
+        replacement_payload={
+            "scope": "regression_replay",
+            "pattern": pattern,
+            "action": "fulfill",
+            "status": status,
+            "body": body,
+            "content_type": content_type,
+        },
+    )
 
-    Intercepted requests matching the pattern will receive the mocked response.
-    Useful for testing error states, slow loading, and API contract changes.
 
-    Args:
-        pattern: URL pattern to intercept (glob or regex)
-        status: HTTP status code to respond with (default: 200)
-        body: Response body string
-        content_type: Response content type (default: "application/json")
-    """
-    try:
-        return await network_tools.mock_network_route(pattern, status, body, content_type)
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
+@_if_compat
 async def clear_network_routes() -> dict:
-    """Remove all registered network route mocks."""
-    try:
-        return await network_tools.clear_network_routes()
-    except Exception as e:
-        return {"error": str(e)}
+    """Deprecated wrapper for clearing regression replay route mocks."""
+    payload = await _safe_call(
+        network_tools.route_clear,
+        scope="regression_replay",
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="route_clear",
+        replacement_payload={"scope": "regression_replay"},
+    )
 
 
 # ---------------------------------------------------------------------------
 # Code Generation Tool
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@_if_compat
 async def export_flow_as_code(
     flow_id: str,
     language: str = "python",
@@ -766,35 +1531,151 @@ async def export_flow_as_code(
     Returns:
         dict with flow_id, language, path to generated file, step_count
     """
-    try:
-        from blop.engine.codegen import export_flow_as_code as _export
-        return await _export(flow_id, language)
-    except Exception as e:
-        return {"error": str(e)}
+    from blop.engine.codegen import export_flow_as_code as _export
+    return await _safe_call(_export, flow_id=flow_id, language=language)
 
 
 # ---------------------------------------------------------------------------
-# Storage State Management Tools
+# Canonical Storage + Legacy Storage State Management Tools
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@_if_compat
+async def storage_get(
+    scope: Literal["profile_url", "compat_session", "regression_replay"],
+    resource: Literal["cookies", "local_storage", "session_storage", "all"] = "cookies",
+    app_url: Optional[str] = None,
+    profile_name: Optional[str] = None,
+    run_id: Optional[str] = None,
+    name: Optional[str] = None,
+    key: Optional[str] = None,
+    domain: Optional[str] = None,
+    path: Optional[str] = None,
+    include_values: bool = False,
+) -> dict:
+    """Read scoped browser cookies/localStorage/sessionStorage."""
+    return await _safe_call(
+        storage_tools.storage_get,
+        scope=scope,
+        resource=resource,
+        app_url=app_url,
+        profile_name=profile_name,
+        run_id=run_id,
+        name=name,
+        key=key,
+        domain=domain,
+        path=path,
+        include_values=include_values,
+    )
+
+
+@_if_compat
+async def storage_set(
+    scope: Literal["profile_url", "compat_session", "regression_replay"],
+    resource: Literal["cookies", "local_storage", "session_storage", "all"] = "cookies",
+    operation: Literal["upsert", "delete", "clear"] = "upsert",
+    app_url: Optional[str] = None,
+    profile_name: Optional[str] = None,
+    run_id: Optional[str] = None,
+    cookie: Optional[dict] = None,
+    key: Optional[str] = None,
+    value: Optional[str] = None,
+    name: Optional[str] = None,
+    domain: Optional[str] = None,
+    path: str = "/",
+    persist: bool = True,
+) -> dict:
+    """Mutate scoped browser cookies/localStorage/sessionStorage."""
+    return await _safe_call(
+        storage_tools.storage_set,
+        scope=scope,
+        resource=resource,
+        operation=operation,
+        app_url=app_url,
+        profile_name=profile_name,
+        run_id=run_id,
+        cookie=cookie,
+        key=key,
+        value=value,
+        name=name,
+        domain=domain,
+        path=path,
+        persist=persist,
+    )
+
+
+@_if_compat
+async def storage_export(
+    scope: Literal["profile_url", "compat_session", "regression_replay"],
+    app_url: Optional[str] = None,
+    profile_name: Optional[str] = None,
+    run_id: Optional[str] = None,
+    filename: Optional[str] = None,
+    include_cookies: bool = True,
+    include_local_storage: bool = True,
+    include_session_storage: bool = True,
+) -> dict:
+    """Export scoped browser storage state."""
+    return await _safe_call(
+        storage_tools.storage_export,
+        scope=scope,
+        app_url=app_url,
+        profile_name=profile_name,
+        run_id=run_id,
+        filename=filename,
+        include_cookies=include_cookies,
+        include_local_storage=include_local_storage,
+        include_session_storage=include_session_storage,
+    )
+
+
+@_if_compat
+async def storage_import(
+    scope: Literal["profile_url", "compat_session", "regression_replay"],
+    filename: str,
+    app_url: Optional[str] = None,
+    profile_name: Optional[str] = None,
+    run_id: Optional[str] = None,
+    merge: bool = False,
+) -> dict:
+    """Import scoped browser storage state."""
+    return await _safe_call(
+        storage_tools.storage_import,
+        scope=scope,
+        filename=filename,
+        app_url=app_url,
+        profile_name=profile_name,
+        run_id=run_id,
+        merge=merge,
+    )
+
+
+@_if_compat
 async def get_browser_cookies(
     app_url: str,
     profile_name: Optional[str] = None,
 ) -> dict:
-    """List all cookies for an app URL.
+    """Deprecated wrapper for URL-scoped cookie listing."""
+    payload = await _safe_call(
+        storage_tools.storage_get,
+        scope="profile_url",
+        resource="cookies",
+        app_url=app_url,
+        profile_name=profile_name,
+        include_values=False,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_get",
+        replacement_payload={
+            "scope": "profile_url",
+            "resource": "cookies",
+            "app_url": app_url,
+            "profile_name": profile_name,
+        },
+    )
 
-    Args:
-        app_url: The URL to navigate to and read cookies from
-        profile_name: Optional auth profile for authenticated pages
-    """
-    try:
-        return await storage_tools.get_browser_cookies(app_url, profile_name)
-    except Exception as e:
-        return {"error": str(e)}
 
-
-@mcp.tool()
+@_if_compat
 async def set_browser_cookie(
     app_url: str,
     name: str,
@@ -805,59 +1686,83 @@ async def set_browser_cookie(
     http_only: bool = False,
     profile_name: Optional[str] = None,
 ) -> dict:
-    """Set a specific cookie in a browser context.
+    """Deprecated wrapper for URL-scoped cookie writes."""
+    payload = await _safe_call(
+        storage_tools.storage_set,
+        scope="profile_url",
+        resource="cookies",
+        operation="upsert",
+        app_url=app_url,
+        profile_name=profile_name,
+        cookie={
+            "name": name,
+            "value": value,
+            "domain": domain,
+            "path": path,
+            "secure": secure,
+            "httpOnly": http_only,
+        },
+        persist=True,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_set",
+        replacement_payload={
+            "scope": "profile_url",
+            "resource": "cookies",
+            "operation": "upsert",
+            "app_url": app_url,
+            "profile_name": profile_name,
+            "cookie": {
+                "name": name,
+                "value": value,
+                "domain": domain,
+                "path": path,
+                "secure": secure,
+                "httpOnly": http_only,
+            },
+            "persist": True,
+        },
+    )
 
-    Args:
-        app_url: The URL context for the cookie
-        name: Cookie name
-        value: Cookie value
-        domain: Cookie domain (defaults to URL hostname)
-        path: Cookie path (default: "/")
-        secure: Secure flag
-        http_only: HttpOnly flag
-        profile_name: Optional auth profile
-    """
-    try:
-        return await storage_tools.set_browser_cookie(
-            app_url, name, value, domain, path, secure, http_only, profile_name
-        )
-    except Exception as e:
-        return {"error": str(e)}
 
-
-@mcp.tool()
+@_if_compat
 async def save_browser_state(
     app_url: str,
     profile_name: Optional[str] = None,
     filename: Optional[str] = None,
 ) -> dict:
-    """Save the full browser storage state (cookies + localStorage) to a JSON file.
-
-    Args:
-        app_url: The URL to capture state from
-        profile_name: Optional auth profile
-        filename: Optional output file path (defaults to .blop/states/)
-    """
-    try:
-        return await storage_tools.save_browser_state(app_url, profile_name, filename)
-    except Exception as e:
-        return {"error": str(e)}
+    """Deprecated wrapper for URL-scoped storage export."""
+    payload = await _safe_call(
+        storage_tools.storage_export,
+        scope="profile_url",
+        app_url=app_url,
+        profile_name=profile_name,
+        filename=filename,
+    )
+    return _add_deprecation_notice(
+        payload,
+        replacement_tool="storage_export",
+        replacement_payload={
+            "scope": "profile_url",
+            "app_url": app_url,
+            "profile_name": profile_name,
+            "filename": filename,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
 # MCP v2 Tools — change intelligence + reliability control plane
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@_if_compat
 async def blop_v2_get_surface_contract() -> dict:
     """Get v2 MCP tool schemas and request examples."""
-    try:
-        return await v2_surface.get_surface_contract()
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(v2_surface.get_surface_contract)
 
 
-@mcp.tool()
+@_if_compat
 async def blop_v2_capture_context(
     app_url: str,
     profile_name: Optional[str] = None,
@@ -870,23 +1775,21 @@ async def blop_v2_capture_context(
     intent_focus: Optional[list[str]] = None,
 ) -> dict:
     """Capture/persist a context graph snapshot with diff summary."""
-    try:
-        return await v2_surface.capture_context(
-            app_url=app_url,
-            profile_name=profile_name,
-            repo_path=repo_path,
-            max_depth=max_depth,
-            max_pages=max_pages,
-            seed_urls=seed_urls,
-            include_url_pattern=include_url_pattern,
-            exclude_url_pattern=exclude_url_pattern,
-            intent_focus=intent_focus,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(
+        v2_surface.capture_context,
+        app_url=app_url,
+        profile_name=profile_name,
+        repo_path=repo_path,
+        max_depth=max_depth,
+        max_pages=max_pages,
+        seed_urls=seed_urls,
+        include_url_pattern=include_url_pattern,
+        exclude_url_pattern=exclude_url_pattern,
+        intent_focus=intent_focus,
+    )
 
 
-@mcp.tool()
+@_if_compat
 async def blop_v2_compare_context(
     app_url: str,
     baseline_graph_id: str,
@@ -894,39 +1797,35 @@ async def blop_v2_compare_context(
     impact_lens: Optional[list[str]] = None,
 ) -> dict:
     """Compare two context graph versions and return impact summary."""
-    try:
-        return await v2_surface.compare_context(
-            app_url=app_url,
-            baseline_graph_id=baseline_graph_id,
-            candidate_graph_id=candidate_graph_id,
-            impact_lens=impact_lens,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(
+        v2_surface.compare_context,
+        app_url=app_url,
+        baseline_graph_id=baseline_graph_id,
+        candidate_graph_id=candidate_graph_id,
+        impact_lens=impact_lens,
+    )
 
 
-@mcp.tool()
+@_if_compat
 async def blop_v2_assess_release_risk(
     app_url: str,
     release_id: Optional[str] = None,
-    baseline_ref: Optional[dict] = None,
-    candidate_ref: Optional[dict] = None,
+    baseline_ref: Optional[ReleaseReference | dict] = None,
+    candidate_ref: Optional[ReleaseReference | dict] = None,
     criticality_weights: Optional[dict] = None,
 ) -> dict:
     """Assess release risk from context diff + run outcomes."""
-    try:
-        return await v2_surface.assess_release_risk(
-            app_url=app_url,
-            release_id=release_id,
-            baseline_ref=baseline_ref,
-            candidate_ref=candidate_ref,
-            criticality_weights=criticality_weights,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(
+        v2_surface.assess_release_risk,
+        app_url=app_url,
+        release_id=release_id,
+        baseline_ref=baseline_ref,
+        candidate_ref=candidate_ref,
+        criticality_weights=criticality_weights,
+    )
 
 
-@mcp.tool()
+@_if_compat
 async def blop_v2_get_journey_health(
     app_url: str,
     window: str = "7d",
@@ -934,18 +1833,16 @@ async def blop_v2_get_journey_health(
     criticality_filter: Optional[list[str]] = None,
 ) -> dict:
     """Get SLO-like health for key journeys across a time window."""
-    try:
-        return await v2_surface.get_journey_health(
-            app_url=app_url,
-            window=window,
-            journey_filter=journey_filter,
-            criticality_filter=criticality_filter,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(
+        v2_surface.get_journey_health,
+        app_url=app_url,
+        window=window,
+        journey_filter=journey_filter,
+        criticality_filter=criticality_filter,
+    )
 
 
-@mcp.tool()
+@_if_compat
 async def blop_v2_cluster_incidents(
     app_url: str,
     run_ids: Optional[list[str]] = None,
@@ -953,18 +1850,16 @@ async def blop_v2_cluster_incidents(
     min_cluster_size: int = 2,
 ) -> dict:
     """Cluster failures into deduplicated incidents with blast radius."""
-    try:
-        return await v2_surface.cluster_incidents(
-            app_url=app_url,
-            run_ids=run_ids,
-            window=window,
-            min_cluster_size=min_cluster_size,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(
+        v2_surface.cluster_incidents,
+        app_url=app_url,
+        run_ids=run_ids,
+        window=window,
+        min_cluster_size=min_cluster_size,
+    )
 
 
-@mcp.tool()
+@_if_compat
 async def blop_v2_generate_remediation(
     cluster_id: str,
     format: str = "markdown",
@@ -972,52 +1867,46 @@ async def blop_v2_generate_remediation(
     include_fix_hypotheses: bool = True,
 ) -> dict:
     """Generate an action-ready remediation draft for an incident cluster."""
-    try:
-        return await v2_surface.generate_remediation(
-            cluster_id=cluster_id,
-            format=format,
-            include_owner_hints=include_owner_hints,
-            include_fix_hypotheses=include_fix_hypotheses,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(
+        v2_surface.generate_remediation,
+        cluster_id=cluster_id,
+        format=format,
+        include_owner_hints=include_owner_hints,
+        include_fix_hypotheses=include_fix_hypotheses,
+    )
 
 
-@mcp.tool()
+@_if_compat
 async def blop_v2_ingest_telemetry_signals(
     app_url: str,
-    signals: list[dict],
+    signals: list[TelemetrySignalInput | dict],
     source: str = "custom",
 ) -> dict:
     """Ingest external telemetry for correlation against incidents."""
-    try:
-        return await v2_surface.ingest_telemetry_signals(
-            app_url=app_url,
-            signals=signals,
-            source=source,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(
+        v2_surface.ingest_telemetry_signals,
+        app_url=app_url,
+        signals=signals,
+        source=source,
+    )
 
 
-@mcp.tool()
+@_if_compat
 async def blop_v2_get_correlation_report(
     app_url: str,
     window: str = "7d",
     min_confidence: float = 0.6,
 ) -> dict:
     """Correlate incident clusters with telemetry signals."""
-    try:
-        return await v2_surface.get_correlation_report(
-            app_url=app_url,
-            window=window,
-            min_confidence=min_confidence,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(
+        v2_surface.get_correlation_report,
+        app_url=app_url,
+        window=window,
+        min_confidence=min_confidence,
+    )
 
 
-@mcp.tool()
+@_if_compat
 async def blop_v2_suggest_flows_for_diff(
     app_url: str,
     changed_files: list[str],
@@ -1038,24 +1927,23 @@ async def blop_v2_suggest_flows_for_diff(
     Returns:
         dict with app_url, changed_segments_detected, suggested_flow_ids, suggestions[]
     """
-    try:
-        return await v2_surface.suggest_flows_for_diff(
-            app_url=app_url,
-            changed_files=changed_files,
-            changed_routes=changed_routes,
-            limit=limit,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    return await _safe_call(
+        v2_surface.suggest_flows_for_diff,
+        app_url=app_url,
+        changed_files=changed_files,
+        changed_routes=changed_routes,
+        limit=limit,
+    )
 
 
-@mcp.tool()
+@_if_compat
 async def blop_v2_autogenerate_flows(
     app_url: str,
     profile_name: Optional[str] = None,
     criticality_filter: Optional[list[str]] = None,
-    record: bool = False,
+    auto_record: bool = False,
     limit: int = 5,
+    record: Optional[bool] = None,
 ) -> dict:
     """Auto-generate test flow specs from context graph intents that lack recorded flows.
 
@@ -1066,25 +1954,25 @@ async def blop_v2_autogenerate_flows(
         app_url: The app URL (must have an existing context graph)
         profile_name: Optional auth profile for recording
         criticality_filter: Optional list of criticality levels to include (e.g. ["revenue", "activation"])
-        record: If True, call record_test_flow for each synthesized flow
+        auto_record: If True, call record_test_flow for each synthesized flow
         limit: Maximum number of flows to synthesize (default 5)
 
     Returns:
         dict with app_url, synthesized[], recorded_flow_ids[], total_unmatched_intents
     """
-    try:
-        return await v2_surface.autogenerate_flows(
-            app_url=app_url,
-            profile_name=profile_name,
-            criticality_filter=criticality_filter,
-            record=record,
-            limit=limit,
-        )
-    except Exception as e:
-        return {"error": str(e)}
+    if record is not None:
+        auto_record = record
+    return await _safe_call(
+        v2_surface.autogenerate_flows,
+        app_url=app_url,
+        profile_name=profile_name,
+        criticality_filter=criticality_filter,
+        auto_record=auto_record,
+        limit=limit,
+    )
 
 
-@mcp.tool()
+@_if_compat
 async def blop_v2_archive_storage(
     older_than_days: int = 30,
     keep_failed: bool = True,
@@ -1117,6 +2005,37 @@ async def blop_v2_archive_storage(
 # MCP Resources — read-only context for low-token agent planning
 # ---------------------------------------------------------------------------
 
+
+@mcp.resource("blop://health")
+async def health_resource() -> dict:
+    """Server health check: DB reachability, LLM key, Chromium, active run count."""
+    import shutil
+    from datetime import datetime, timezone
+    from blop.config import check_llm_api_key
+
+    has_key, _key_name = check_llm_api_key()
+    chromium_ok = bool(
+        shutil.which("chromium")
+        or shutil.which("chromium-browser")
+        or shutil.which("google-chrome")
+    )
+    db_ok = False
+    try:
+        await sqlite.list_runs(limit=1)
+        db_ok = True
+    except Exception:
+        pass
+    active_runs = sum(1 for t in regression._RUN_TASKS.values() if not t.done())
+    return {
+        "status": "ready" if (has_key and db_ok) else "degraded",
+        "db_reachable": db_ok,
+        "llm_key_present": has_key,
+        "chromium_found": chromium_ok,
+        "active_run_count": active_runs,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @mcp.resource("blop://inventory/{app}")
 async def inventory_resource(app: str) -> dict:
     """Latest crawl inventory for an app URL (URL-encoded in resource URI)."""
@@ -1135,6 +2054,12 @@ async def context_graph_resource(app: str) -> dict:
 async def run_artifact_index_resource(run_id: str) -> dict:
     """Read-only artifact index for a run."""
     return await results.get_artifact_index_resource(run_id)
+
+
+@mcp.resource("blop://run/{run_id}/recommendation")
+async def run_recommendation_resource(run_id: str) -> dict:
+    """Release recommendation (SHIP / INVESTIGATE / BLOCK) for a completed run. Lightweight polling target — cheaper than get_test_results."""
+    return await results.get_run_recommendation_resource(run_id)
 
 
 @mcp.resource("blop://flow/{flow_id}/stability-profile")
@@ -1248,30 +2173,26 @@ async def v2_correlation_resource(app: str, window: str) -> dict:
 
 @mcp.prompt()
 def discover_critical_flows() -> str:
-    return """First run validate_setup to confirm your environment is ready:
-  validate_setup(app_url="https://your-app.com")
+    return """First run validate_release_setup to confirm your environment is ready:
+  validate_release_setup(app_url="https://your-app.com")
 
-Then map interface structure before planning tests:
-  explore_site_inventory(
-    app_url="https://your-app.com",
-    max_depth=2,
-    max_pages=20
-  )
-
-If you need a focused snapshot for one route, capture compact ARIA structure:
-  get_page_structure(
-    app_url="https://your-app.com",
-    url="https://your-app.com/pricing"
-  )
-
-After structure mapping, discover the most important test flows:
-  discover_test_flows(
+Then discover the most important journeys using business language:
+  discover_critical_journeys(
     app_url="https://your-app.com",
     business_goal="Find the 5 most revenue-critical flows including signup, onboarding, and billing."
   )
 
-The response will include flows with a business_criticality field (revenue, activation, retention, support, other).
-Start by recording flows tagged "revenue" or "activation" — those are the ones that will hurt most if broken."""
+Journeys with include_in_release_gating=true (revenue, activation) are automatically
+prioritized for release checks. Record those first:
+  record_test_flow(
+    app_url="https://your-app.com",
+    flow_name="checkout_flow",
+    goal="Complete a purchase end-to-end",
+    business_criticality="revenue"
+  )
+
+Then run a release check across all gated journeys:
+  run_release_check(app_url="https://your-app.com")"""
 
 
 @mcp.prompt()
@@ -1325,15 +2246,14 @@ After saving, pass profile_name to record_test_flow and run_regression_test."""
 
 @mcp.prompt()
 def run_smoke_regression() -> str:
-    return """To run a quick smoke regression against all recorded flows:
+    return """To run a release confidence check against critical journeys:
 
 1. List available flows:
    list_recorded_tests()
 
-2. Run regression (returns immediately — poll for results):
-   run_regression_test(
+2. Run release check (returns immediately — poll for results):
+   run_release_check(
      app_url="https://your-app.com",
-     flow_ids=["<flow_id_1>", "<flow_id_2>"],
      profile_name="staging"  # optional
    )
    The status will be "queued" → "running" → "completed"
@@ -1341,8 +2261,11 @@ def run_smoke_regression() -> str:
 3. Poll for results (repeat until status is "completed" or "failed"):
    get_test_results(run_id="<run_id>")
 
-The report includes severity_counts with revenue/activation flows labeled as
-"BLOCKER in revenue flow: checkout" so you can triage at a glance."""
+4. Triage any blockers:
+   triage_release_blocker(run_id="<run_id>")
+
+The report includes a SHIP / INVESTIGATE / BLOCK decision with blocker journeys
+labeled by business criticality so you can triage at a glance."""
 
 
 @mcp.prompt()
@@ -1418,17 +2341,21 @@ def context_first_discovery() -> str:
 def context_guided_regression() -> str:
     return """Use resources + tools together for faster triage:
 
-1) Run regression:
-   run_regression_test(app_url="https://your-app.com", flow_ids=["..."], run_mode="hybrid")
+1) Run release check:
+   run_release_check(app_url="https://your-app.com", run_mode="hybrid")
 
 2) Poll:
    get_test_results(run_id="<run_id>")
 
-3) Read artifacts and stability resources:
-   - blop://run/<run_id>/artifact-index
-   - blop://flow/<flow_id>/stability-profile
+3) Triage blockers:
+   triage_release_blocker(run_id="<run_id>")
 
-4) Use those resources to prioritize:
+4) Read release resources:
+   - blop://release/<release_id>/brief
+   - blop://release/<release_id>/artifacts
+   - blop://release/<release_id>/incidents
+
+5) Use those resources to prioritize:
    - blocker/high failures in revenue or activation flows
    - low stability_score flows
    - repeated failure hotspots (same step_failure_index)
@@ -1460,7 +2387,7 @@ def quick_web_eval() -> str:
     return """Quickly evaluate a web app with a single tool call:
 
 1. (Optional) If auth is required, save a session first:
-   setup_browser_state(
+   capture_auth_session(
      login_url="https://your-app.com/login",
      profile_name="myapp",
      success_url_pattern="/dashboard"
@@ -1487,15 +2414,259 @@ def quick_web_eval() -> str:
    The recorded flow can then be replayed with run_regression_test."""
 
 
+# ===========================================================================
+# CANONICAL MVP SURFACE — Release Confidence Control Plane
+# ===========================================================================
+# These 4 tools + the blop://release/* resources are the primary public API.
+# All other tools are available only when BLOP_ENABLE_COMPAT_TOOLS=true.
+#
+# Workflow:
+#   validate_release_setup → discover_critical_journeys → run_release_check → triage_release_blocker
+# ===========================================================================
+
+from blop.tools import journeys as journeys_tools
+from blop.tools import release_check as release_check_tools
+from blop.tools import triage as triage_tools
+from blop.tools import resources as resources_tools
+from blop.tools.prompts import (
+    RELEASE_READINESS_REVIEW,
+    INVESTIGATE_BLOCKER,
+    EXPLAIN_RELEASE_RISK,
+)
+
+
+@mcp.tool()
+async def validate_release_setup(
+    app_url: Optional[str] = None,
+    profile_name: Optional[str] = None,
+) -> dict:
+    """Preflight check before a release: verifies API key, Chromium, DB, app reachability, and auth profile.
+
+    This is the canonical MVP entry point — run this before discover_critical_journeys or run_release_check.
+    """
+    return await _safe_call(validate.validate_release_setup, tool_name="validate_release_setup",
+                            app_url=app_url, profile_name=profile_name)
+
+
+@mcp.tool()
+async def discover_critical_journeys(
+    app_url: str,
+    profile_name: Optional[str] = None,
+    business_goal: Optional[str] = None,
+    max_depth: int = 2,
+    max_pages: int = BLOP_DISCOVERY_MAX_PAGES,
+    seed_urls: Optional[list[str]] = None,
+    include_url_pattern: Optional[str] = None,
+    exclude_url_pattern: Optional[str] = None,
+) -> dict:
+    """Crawl app_url and plan 3-8 critical user journeys in business language.
+
+    Returns CriticalJourney objects with why_it_matters and include_in_release_gating fields
+    so you can immediately scope which journeys gate a release. Revenue and activation journeys
+    are automatically flagged for release gating.
+    """
+    return await _safe_call(
+        journeys_tools.discover_critical_journeys,
+        tool_name="discover_critical_journeys",
+        app_url=app_url,
+        profile_name=profile_name,
+        business_goal=business_goal,
+        max_depth=max_depth,
+        max_pages=max_pages,
+        seed_urls=seed_urls,
+        include_url_pattern=include_url_pattern,
+        exclude_url_pattern=exclude_url_pattern,
+    )
+
+
+@mcp.tool()
+async def run_release_check(
+    app_url: str,
+    journey_ids: Optional[list[str]] = None,
+    profile_name: Optional[str] = None,
+    mode: Literal["replay", "targeted"] = "replay",
+    criticality_filter: Optional[list[str]] = None,
+    release_id: Optional[str] = None,
+    headless: bool = True,
+    run_mode: str = "hybrid",
+) -> dict:
+    """Flagship release confidence tool: replay critical journeys and return a SHIP / INVESTIGATE / BLOCK decision.
+
+    In replay mode (default), queues a regression run and returns immediately with run_id for polling.
+    In targeted mode, runs a one-shot agent evaluation synchronously.
+
+    Args:
+        journey_ids: flow_ids to replay. If omitted, uses all flows matching criticality_filter.
+        criticality_filter: defaults to ["revenue", "activation"].
+        release_id: optional caller-supplied release identifier (auto-generated if omitted).
+        mode: "replay" (default) or "targeted" (one-shot eval, no recording needed).
+    """
+    return await _safe_call(
+        release_check_tools.run_release_check,
+        tool_name="run_release_check",
+        app_url=app_url,
+        journey_ids=journey_ids,
+        profile_name=profile_name,
+        mode=mode,
+        criticality_filter=criticality_filter,
+        release_id=release_id,
+        headless=headless,
+        run_mode=run_mode,
+    )
+
+
+@mcp.tool()
+async def triage_release_blocker(
+    run_id: Optional[str] = None,
+    release_id: Optional[str] = None,
+    journey_id: Optional[str] = None,
+    incident_cluster_id: Optional[str] = None,
+    generate_remediation: bool = True,
+) -> dict:
+    """Root-cause evidence + next actions for a release blocker.
+
+    Accepts any of: run_id, release_id, journey_id, incident_cluster_id (at least one required).
+    Returns BlockerTriage with likely_cause, evidence_summary, user_business_impact,
+    recommended_action, suggested_owner, and linked_artifacts.
+    """
+    return await _safe_call(
+        triage_tools.triage_release_blocker,
+        tool_name="triage_release_blocker",
+        run_id=run_id,
+        release_id=release_id,
+        journey_id=journey_id,
+        incident_cluster_id=incident_cluster_id,
+        generate_remediation=generate_remediation,
+    )
+
+
+# ── MVP RESOURCES ─────────────────────────────────────────────────────────────
+
+@mcp.resource("blop://journeys")
+async def journeys_resource() -> dict:
+    """All recorded journeys as CriticalJourney-shaped objects."""
+    return await resources_tools.journeys_resource()
+
+
+@mcp.resource("blop://release/{release_id}/brief")
+async def release_brief_resource(release_id: str) -> dict:
+    """Condensed release summary: decision, risk score, blocker count, top actions."""
+    return await resources_tools.release_brief_resource(release_id)
+
+
+@mcp.resource("blop://release/{release_id}/artifacts")
+async def release_artifacts_resource(release_id: str) -> dict:
+    """Screenshots, traces, and console logs for a release run, grouped by type."""
+    return await resources_tools.release_artifacts_resource(release_id)
+
+
+@mcp.resource("blop://release/{release_id}/incidents")
+async def release_incidents_resource(release_id: str) -> dict:
+    """Incident clusters linked to a release run."""
+    return await resources_tools.release_incidents_resource(release_id)
+
+
+# ── MVP PROMPTS ───────────────────────────────────────────────────────────────
+
+@mcp.prompt()
+def release_readiness_review() -> str:
+    return RELEASE_READINESS_REVIEW
+
+
+@mcp.prompt()
+def investigate_blocker() -> str:
+    return INVESTIGATE_BLOCKER
+
+
+@mcp.prompt()
+def explain_release_risk() -> str:
+    return EXPLAIN_RELEASE_RISK
+
+
 def run() -> int:
     """Entry point for the MCP server."""
     import asyncio
+    import signal
+    from blop.config import BLOP_DB_PATH, BLOP_DEBUG_LOG, check_llm_api_key, runtime_config_issues
+    from blop.storage import files as file_store
+
+    def _check_writable(path: Path, *, as_file: bool = False) -> str | None:
+        try:
+            target_dir = path.parent if as_file else path
+            target_dir.mkdir(parents=True, exist_ok=True)
+            probe = target_dir / ".blop_write_test"
+            probe.touch()
+            probe.unlink(missing_ok=True)
+            return None
+        except Exception as exc:
+            return f"{path}: {exc}"
+
+    cfg_errors, cfg_warnings = runtime_config_issues()
+    if cfg_warnings:
+        for warning in cfg_warnings:
+            _log.warning("startup_config_warning warning=%s", warning)
+
+    db_error = _check_writable(Path(BLOP_DB_PATH), as_file=True)
+    if db_error:
+        cfg_errors.append(f"BLOP_DB_PATH is not writable: {db_error}")
+
+    runs_error = _check_writable(file_store._runs_dir(), as_file=False)
+    if runs_error:
+        cfg_errors.append(f"BLOP_RUNS_DIR is not writable: {runs_error}")
+
+    if BLOP_DEBUG_LOG:
+        log_error = _check_writable(Path(BLOP_DEBUG_LOG), as_file=True)
+        if log_error:
+            cfg_errors.append(f"BLOP_DEBUG_LOG is not writable: {log_error}")
+
+    if cfg_errors:
+        for err in cfg_errors:
+            _log.error("startup_config_error error=%s", err)
+        return 1
+
     asyncio.run(init_db())
+
+    # Startup validation warning (non-blocking)
+    has_key, key_name = check_llm_api_key()
+    if not has_key:
+        _log.warning("startup event=missing_llm_key key_name=%s", key_name)
+
+    # Signal handlers for graceful shutdown (single-process deployment)
+    def _handle_signal(signum, frame):
+        _log.info("shutdown event=signal signum=%s", signum)
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    # SIGINT already triggers KeyboardInterrupt → SystemExit; leave as-is
+
+    _log.info("startup event=server_ready")
+    exit_code = 0
     try:
         mcp.run()
-        return 0
-    except Exception:
-        return 1
+    except (SystemExit, KeyboardInterrupt):
+        pass  # clean exit
+    except Exception as e:
+        _log.error("server_crash error=%s", e, exc_info=True)
+        exit_code = 1
+    finally:
+        drained = {"cancelled": 0, "timed_out": 0, "forced": 0}
+        forced = {"forced_cancelled": 0}
+        try:
+            drained = asyncio.run(regression.shutdown_run_tasks())
+        except Exception as e:
+            _log.warning("shutdown_drain_failed error=%s", e)
+        try:
+            forced = asyncio.run(regression.force_finalize_active_runs(reason="server_shutdown"))
+            _log.info(
+                "shutdown event=tasks_cleaned cancelled=%s timed_out=%s forced=%s forced_cancelled=%s",
+                drained.get("cancelled", 0),
+                drained.get("timed_out", 0),
+                drained.get("forced", 0),
+                forced.get("forced_cancelled", 0),
+            )
+        except Exception as e:
+            _log.warning("shutdown_cleanup_failed error=%s", e)
+    return exit_code
 
 
 if __name__ == "__main__":

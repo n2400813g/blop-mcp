@@ -54,12 +54,13 @@ def pixel_diff(baseline_path: str, current_path: str) -> tuple[float, str | None
             return 1.0, None, True
 
         diff = ImageChops.difference(baseline, current)
-        pixels = list(diff.getdata())
-        total = len(pixels)
+        grayscale = diff.convert("L")
+        total = grayscale.size[0] * grayscale.size[1]
         if total == 0:
             return 0.0, None, False
 
-        changed = sum(1 for r, g, b in pixels if r + g + b > 30)
+        histogram = grayscale.histogram()
+        changed = total - sum(histogram[:31])
         ratio = changed / total
 
         diff_path = current_path.replace(".png", "_diff.png")

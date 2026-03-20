@@ -3,40 +3,18 @@ from __future__ import annotations
 
 from typing import Optional
 
+from blop.engine.browser_runtime import acquire_page_session
 
-async def _get_page(app_url: str, profile_name: Optional[str] = None):
-    """Launch browser and return (page, browser, context, pw) handles.
 
-    Returns:
-        page: Playwright page for assertions.
-        browser: Playwright browser instance.
-        context: Playwright browser context.
-        pw: Playwright driver/session handle from async_playwright().start().
-    """
-    from playwright.async_api import async_playwright
-
-    from blop.engine.auth import resolve_storage_state
-    from blop.storage.sqlite import get_auth_profile
-
-    storage_state = None
-    if profile_name:
-        profile = await get_auth_profile(profile_name)
-        if profile:
-            try:
-                storage_state = await resolve_storage_state(profile)
-            except Exception:
-                pass
-
-    pw = await async_playwright().start()
-    browser = await pw.chromium.launch(headless=True)
-    ctx_kwargs: dict = {}
-    if storage_state:
-        ctx_kwargs["storage_state"] = storage_state
-    context = await browser.new_context(**ctx_kwargs)
-    page = await context.new_page()
-    await page.goto(app_url, wait_until="domcontentloaded", timeout=30000)
-    await page.wait_for_timeout(1500)
-    return page, browser, context, pw
+async def _acquire_assertion_session(app_url: str, profile_name: Optional[str]):
+    return await acquire_page_session(
+        app_url,
+        profile_name=profile_name,
+        headless=True,
+        timeout_ms=30000,
+        post_nav_wait_ms=1500,
+        allow_auto_env=False,
+    )
 
 
 async def verify_element_visible(
@@ -46,9 +24,10 @@ async def verify_element_visible(
     profile_name: Optional[str] = None,
 ) -> dict:
     """Navigate to app_url and verify that an ARIA element with the given role/name is visible."""
-    page = browser = context = pw = None
+    session = None
     try:
-        page, browser, context, pw = await _get_page(app_url, profile_name)
+        session = await _acquire_assertion_session(app_url, profile_name)
+        page = session.page
         loc = page.get_by_role(role, name=accessible_name)
         count = await loc.count()
         visible = False
@@ -68,12 +47,8 @@ async def verify_element_visible(
     except Exception as e:
         return {"assertion": "element_visible", "passed": False, "error": str(e)}
     finally:
-        for obj in (context, browser, pw):
-            if obj:
-                try:
-                    await obj.close()
-                except Exception:
-                    pass
+        if session:
+            await session.close()
 
 
 async def verify_text_visible(
@@ -82,9 +57,10 @@ async def verify_text_visible(
     profile_name: Optional[str] = None,
 ) -> dict:
     """Navigate to app_url and verify that the given text is present on the page."""
-    page = browser = context = pw = None
+    session = None
     try:
-        page, browser, context, pw = await _get_page(app_url, profile_name)
+        session = await _acquire_assertion_session(app_url, profile_name)
+        page = session.page
         body_text = await page.inner_text("body")
         found = text in body_text
         return {
@@ -96,12 +72,8 @@ async def verify_text_visible(
     except Exception as e:
         return {"assertion": "text_visible", "passed": False, "error": str(e)}
     finally:
-        for obj in (context, browser, pw):
-            if obj:
-                try:
-                    await obj.close()
-                except Exception:
-                    pass
+        if session:
+            await session.close()
 
 
 async def verify_value(
@@ -111,9 +83,10 @@ async def verify_value(
     profile_name: Optional[str] = None,
 ) -> dict:
     """Navigate to app_url and verify that a form field matches the expected value."""
-    page = browser = context = pw = None
+    session = None
     try:
-        page, browser, context, pw = await _get_page(app_url, profile_name)
+        session = await _acquire_assertion_session(app_url, profile_name)
+        page = session.page
         el = page.locator(selector)
         count = await el.count()
         if count == 0:
@@ -136,12 +109,8 @@ async def verify_value(
     except Exception as e:
         return {"assertion": "verify_value", "passed": False, "error": str(e)}
     finally:
-        for obj in (context, browser, pw):
-            if obj:
-                try:
-                    await obj.close()
-                except Exception:
-                    pass
+        if session:
+            await session.close()
 
 
 async def verify_visual_state(
@@ -150,9 +119,11 @@ async def verify_visual_state(
     profile_name: Optional[str] = None,
 ) -> dict:
     """Navigate to app_url and ask the vision LLM whether a visual condition holds."""
-    page = browser = context = pw = None
+    session = None
     try:
-        page, browser, context, pw = await _get_page(app_url, profile_name)
+        session = await _acquire_assertion_session(app_url, profile_name)
+        page = session.page
+        # Lazy import avoids circular dependencies and defers heavy vision/LLM initialization.
         from blop.engine.vision import assert_by_vision
 
         passed = await assert_by_vision(page, description)
@@ -165,9 +136,5 @@ async def verify_visual_state(
     except Exception as e:
         return {"assertion": "visual_state", "passed": False, "error": str(e)}
     finally:
-        for obj in (context, browser, pw):
-            if obj:
-                try:
-                    await obj.close()
-                except Exception:
-                    pass
+        if session:
+            await session.close()

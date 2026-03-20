@@ -8,9 +8,6 @@ from blop.engine import auth as auth_engine
 from blop.schemas import AuthProfile, AuthProfileResult
 from blop.storage import sqlite
 
-_VALID_AUTH_TYPES = ("env_login", "storage_state", "cookie_json")
-
-
 async def save_auth_profile(
     profile_name: str,
     auth_type: str,
@@ -32,10 +29,12 @@ async def save_auth_profile(
             cookie_json_path=cookie_json_path,
             user_data_dir=user_data_dir,
         )
-    except ValidationError:
-        return {
-            "error": f"Invalid auth_type '{auth_type}'. Must be one of: {', '.join(_VALID_AUTH_TYPES)}"
-        }
+    except ValidationError as exc:
+        details = "; ".join(
+            f"{'.'.join(str(p) for p in err.get('loc', []))}: {err.get('msg')}"
+            for err in exc.errors()
+        )
+        return {"error": f"Invalid auth profile input. {details}"}
 
     storage_path: Optional[str] = None
     auth_warning: Optional[str] = None

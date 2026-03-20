@@ -31,6 +31,8 @@ async def init_db() -> None:
     path = _db_path()
     os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
     async with aiosqlite.connect(path) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS auth_profiles (
                 profile_name TEXT PRIMARY KEY,
@@ -183,10 +185,27 @@ async def init_db() -> None:
                 version INTEGER NOT NULL
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS risk_calibration (
+                record_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                app_url TEXT NOT NULL,
+                predicted_decision TEXT NOT NULL,
+                blocker_count INTEGER DEFAULT 0,
+                critical_journey_failures INTEGER DEFAULT 0,
+                flow_ids_json TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
         # Telemetry index for faster time-range queries
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_ts_signals ON telemetry_signals(app_url, ts)"
         )
+        # Performance indexes on hot query paths
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_runs_app_status ON runs(app_url, status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_cases_run ON run_cases(run_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_cases_flow ON run_cases(flow_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_health_run ON run_health_events(run_id)")
         await db.commit()
 
         # Migrate existing tables to add new columns if missing
@@ -226,6 +245,9 @@ async def _migrate(db) -> None:
         (15, "run_cases", "rerecorded", "INTEGER DEFAULT 0"),
         (16, "run_cases", "performance_metrics_json", "TEXT"),
         (17, "runs", "next_actions_json", "TEXT"),
+        (18, "risk_calibration", "blocker_count", "INTEGER DEFAULT 0"),
+        (19, "release_snapshots", "brief_json", "TEXT"),
+        (20, "release_snapshots", "run_id", "TEXT"),
     ]
 
     current_version = await _get_schema_version(db)
@@ -235,9 +257,16 @@ async def _migrate(db) -> None:
             continue
         try:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-        except Exception:
-            pass  # Column already exists
-        await _set_schema_version(db, version)
+            await _set_schema_version(db, version)
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "duplicate column name" in msg or "already exists" in msg:
+                # Column already exists (e.g. re-run after partial failure): still advance
+                await _set_schema_version(db, version)
+            else:
+                raise RuntimeError(
+                    f"Migration {version} failed — {table}.{column}: {exc}"
+                ) from exc
 
     await db.commit()
 
@@ -489,7 +518,12 @@ async def get_run(run_id: str) -> dict | None:
     return None
 
 
+_VALID_STATUSES = {"queued", "running", "completed", "failed", "cancelled", "waiting_auth"}
+
+
 async def list_runs(limit: int = 20, status: str | None = None) -> list[dict]:
+    if status is not None and status not in _VALID_STATUSES:
+        return []
     safe_limit = max(1, min(limit, 200))
     async with aiosqlite.connect(_db_path()) as db:
         if status:
@@ -1100,6 +1134,64 @@ async def save_correlation_report(app_url: str, window: str, report: dict) -> st
     return report_id
 
 
+async def save_risk_calibration_record(
+    run_id: str,
+    app_url: str,
+    predicted_decision: str,
+    blocker_count: int,
+    critical_journey_failures: int,
+    flow_ids: list[str],
+) -> None:
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO risk_calibration
+            (record_id, run_id, app_url, predicted_decision, blocker_count, critical_journey_failures, flow_ids_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                uuid.uuid4().hex,
+                run_id,
+                app_url,
+                predicted_decision,
+                blocker_count,
+                critical_journey_failures,
+                json.dumps(flow_ids),
+            ),
+        )
+        await db.commit()
+
+
+async def list_risk_calibration(app_url: str, limit: int = 100) -> list[dict]:
+    """Return recent risk calibration records for an app, newest first."""
+    safe_limit = max(1, min(limit, 500))
+    async with aiosqlite.connect(_db_path()) as db:
+        async with db.execute(
+            """
+            SELECT record_id, run_id, app_url, predicted_decision,
+                   blocker_count, critical_journey_failures, created_at
+            FROM risk_calibration
+            WHERE app_url = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (app_url, safe_limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [
+                {
+                    "record_id": r[0],
+                    "run_id": r[1],
+                    "app_url": r[2],
+                    "predicted_decision": r[3],
+                    "blocker_count": r[4],
+                    "critical_journey_failures": r[5],
+                    "created_at": r[6],
+                }
+                for r in rows
+            ]
+
+
 async def _get_schema_version(db) -> int:
     try:
         async with db.execute("SELECT version FROM schema_version LIMIT 1") as cursor:
@@ -1138,6 +1230,52 @@ async def list_cases_for_flow_since(flow_id: str, since_iso: str, limit: int = 5
             return cases
 
 
+async def save_release_brief(
+    release_id: str,
+    run_id: str,
+    app_url: str,
+    brief: dict,
+) -> None:
+    """Persist a ReleaseBrief as brief_json in the release_snapshots table."""
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO release_snapshots
+            (release_id, app_url, created_at, snapshot_json, brief_json, run_id)
+            VALUES (?, ?, datetime('now'), ?, ?, ?)
+            """,
+            (
+                release_id,
+                app_url,
+                json.dumps({}),
+                json.dumps(brief),
+                run_id,
+            ),
+        )
+        await db.commit()
+
+
+async def get_release_brief(release_id: str) -> dict | None:
+    """Retrieve a ReleaseBrief by release_id."""
+    async with aiosqlite.connect(_db_path()) as db:
+        async with db.execute(
+            "SELECT brief_json, run_id, app_url FROM release_snapshots WHERE release_id = ?",
+            (release_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row or not row[0]:
+                return None
+            try:
+                brief = json.loads(row[0])
+                # Ensure run_id and app_url are always present
+                if isinstance(brief, dict):
+                    brief.setdefault("run_id", row[1])
+                    brief.setdefault("app_url", row[2])
+                return brief
+            except Exception:
+                return None
+
+
 async def archive_old_runs(older_than_days: int = 30, keep_failed: bool = True) -> dict:
     """Delete runs (and associated cases/artifacts/events) older than older_than_days.
 
@@ -1159,12 +1297,17 @@ async def archive_old_runs(older_than_days: int = 30, keep_failed: bool = True) 
                 rows = await cursor.fetchall()
 
         run_ids = [r[0] for r in rows]
-        for run_id in run_ids:
-            await db.execute("DELETE FROM run_cases WHERE run_id = ?", (run_id,))
-            await db.execute("DELETE FROM artifacts WHERE run_id = ?", (run_id,))
-            await db.execute("DELETE FROM run_health_events WHERE run_id = ?", (run_id,))
-            await db.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
-        await db.commit()
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            for run_id in run_ids:
+                await db.execute("DELETE FROM run_cases WHERE run_id = ?", (run_id,))
+                await db.execute("DELETE FROM artifacts WHERE run_id = ?", (run_id,))
+                await db.execute("DELETE FROM run_health_events WHERE run_id = ?", (run_id,))
+                await db.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     return {
         "archived_runs": len(run_ids),

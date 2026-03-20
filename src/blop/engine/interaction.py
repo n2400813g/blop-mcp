@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
+from blop.config import BLOP_INTERACTION_EDITOR_LOADING_CAP_MS, BLOP_INTERACTION_LOADING_CAP_MS
 from blop.engine.logger import get_logger
 
 _log = get_logger("interaction")
@@ -66,7 +67,7 @@ async def wait_for_spa_ready(
                     return s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0';
                 });
             }""",
-            timeout=min(settle_ms * 3, 8000),
+            timeout=min(settle_ms * 3, max(BLOP_INTERACTION_LOADING_CAP_MS, 1000)),
         )
     except Exception:
         _log.debug("generic loading-indicator check failed", exc_info=True)
@@ -154,7 +155,7 @@ async def wait_for_editor_ready(
                     return s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0';
                 });
             }""",
-            timeout=min(editor_settle_ms * 2, 20000),
+            timeout=min(editor_settle_ms * 2, max(BLOP_INTERACTION_EDITOR_LOADING_CAP_MS, 1000)),
         )
     except Exception:
         _log.debug("editor generic loading overlay check failed", exc_info=True)

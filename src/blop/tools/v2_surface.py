@@ -1,3 +1,17 @@
+"""v2 surface tools — COMPAT ONLY.
+
+These tools are registered in the MCP server only when BLOP_ENABLE_COMPAT_TOOLS=true.
+They are superseded by the canonical MVP tools:
+
+  validate_setup        → validate_release_setup
+  discover_test_flows   → discover_critical_journeys
+  run_regression_test   → run_release_check
+  (no v1 equivalent)    → triage_release_blocker
+
+The engine logic in blop/engine/ is shared between both the compat and canonical surfaces.
+This module contains the MCP tool handler wrappers for the v2 change-intelligence and
+reliability control-plane tools (context graphs, incident clustering, correlation, etc.).
+"""
 from __future__ import annotations
 
 import json
@@ -10,7 +24,16 @@ from urllib.parse import quote
 
 from blop.engine.context_graph import diff_context_graph
 from blop.engine.secrets import mask_text
-from blop.schemas import CorrelationMatch, IncidentCluster, JourneyHealth, ReleaseReference, ReleaseSnapshot, RemediationDraft, TelemetrySignal
+from blop.schemas import (
+    CorrelationMatch,
+    IncidentCluster,
+    JourneyHealth,
+    ReleaseReference,
+    ReleaseSnapshot,
+    RemediationDraft,
+    TelemetrySignal,
+    TelemetrySignalInput,
+)
 from blop.storage import sqlite
 
 
@@ -43,11 +66,12 @@ def _default_criticality_weights() -> dict[str, float]:
 
 
 def _severity_from_score(score: float) -> str:
-    if score >= 80:
+    from blop.config import BLOP_RISK_THRESHOLD_BLOCKER, BLOP_RISK_THRESHOLD_HIGH, BLOP_RISK_THRESHOLD_MEDIUM
+    if score >= BLOP_RISK_THRESHOLD_BLOCKER:
         return "blocker"
-    if score >= 60:
+    if score >= BLOP_RISK_THRESHOLD_HIGH:
         return "high"
-    if score >= 30:
+    if score >= BLOP_RISK_THRESHOLD_MEDIUM:
         return "medium"
     return "low"
 
@@ -202,8 +226,20 @@ TOOL_CONTRACTS = {
             "properties": {
                 "app_url": {"type": "string", "format": "uri"},
                 "release_id": {"type": "string"},
-                "baseline_ref": {"type": "object"},
-                "candidate_ref": {"type": "object"},
+                "baseline_ref": {
+                    "type": "object",
+                    "properties": {
+                        "graph_id": {"type": "string"},
+                        "run_id": {"type": "string"},
+                    },
+                },
+                "candidate_ref": {
+                    "type": "object",
+                    "properties": {
+                        "graph_id": {"type": "string"},
+                        "run_id": {"type": "string"},
+                    },
+                },
                 "criticality_weights": {"type": "object"},
             },
         },
@@ -245,7 +281,31 @@ TOOL_CONTRACTS = {
                 "min_cluster_size": {"type": "integer", "minimum": 1, "default": 2},
             },
         },
-        "response_schema": {"type": "object", "properties": {"cluster_count": {"type": "integer"}, "clusters": {"type": "array"}}},
+        "response_schema": {
+            "type": "object",
+            "properties": {
+                "cluster_count": {"type": "integer"},
+                "clusters": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "cluster_id": {"type": "string"},
+                            "title": {"type": "string"},
+                            "severity": {"type": "string"},
+                            "first_seen": {
+                                "type": "string",
+                                "description": "Run ID where this cluster first appeared.",
+                            },
+                            "last_seen": {
+                                "type": "string",
+                                "description": "Run ID where this cluster most recently appeared.",
+                            },
+                        },
+                    },
+                },
+            },
+        },
         "example": {"app_url": "https://app.example.com", "window": "7d", "min_cluster_size": 2},
     },
     "blop_v2_generate_remediation": {
@@ -269,7 +329,25 @@ TOOL_CONTRACTS = {
             "properties": {
                 "app_url": {"type": "string", "format": "uri"},
                 "source": {"type": "string", "enum": ["sentry", "datadog", "ga4", "custom"]},
-                "signals": {"type": "array", "items": {"type": "object"}},
+                "signals": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["ts", "signal_type", "value"],
+                        "properties": {
+                            "ts": {"type": "string", "format": "date-time"},
+                            "signal_type": {
+                                "type": "string",
+                                "enum": ["error_rate", "latency_p95", "conversion", "custom"],
+                            },
+                            "value": {"type": "number"},
+                            "journey_key": {"type": "string"},
+                            "route": {"type": "string"},
+                            "unit": {"type": "string"},
+                            "tags": {"type": "object"},
+                        },
+                    },
+                },
             },
         },
         "response_schema": {
@@ -332,7 +410,7 @@ TOOL_CONTRACTS = {
                 "app_url": {"type": "string", "format": "uri"},
                 "profile_name": {"type": "string"},
                 "criticality_filter": {"type": "array", "items": {"type": "string", "enum": CRITICALITY_VALUES}},
-                "record": {"type": "boolean", "default": False},
+                "auto_record": {"type": "boolean", "default": False},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
             },
         },
@@ -345,7 +423,11 @@ TOOL_CONTRACTS = {
                 "total_unmatched_intents": {"type": "integer"},
             },
         },
-        "example": {"app_url": "https://app.example.com", "criticality_filter": ["revenue", "activation"]},
+        "example": {
+            "app_url": "https://app.example.com",
+            "criticality_filter": ["revenue", "activation"],
+            "auto_record": False,
+        },
     },
 }
 
@@ -493,8 +575,8 @@ async def compare_context(
 async def assess_release_risk(
     app_url: str,
     release_id: str | None = None,
-    baseline_ref: dict | None = None,
-    candidate_ref: dict | None = None,
+    baseline_ref: ReleaseReference | dict | None = None,
+    candidate_ref: ReleaseReference | dict | None = None,
     criticality_weights: dict | None = None,
 ) -> dict:
     weights = _default_criticality_weights()
@@ -503,8 +585,8 @@ async def assess_release_risk(
             if key in weights and isinstance(value, (int, float)):
                 weights[key] = float(value)
 
-    baseline = ReleaseReference.model_validate(baseline_ref or {})
-    candidate = ReleaseReference.model_validate(candidate_ref or {})
+    baseline = baseline_ref if isinstance(baseline_ref, ReleaseReference) else ReleaseReference.model_validate(baseline_ref or {})
+    candidate = candidate_ref if isinstance(candidate_ref, ReleaseReference) else ReleaseReference.model_validate(candidate_ref or {})
     if not candidate.graph_id:
         latest = await sqlite.get_latest_context_graph(app_url)
         if latest:
@@ -583,7 +665,19 @@ async def assess_release_risk(
         metadata={"weights": weights},
     )
     await sqlite.save_release_snapshot(snapshot)
-    return snapshot.model_dump()
+    result = snapshot.model_dump()
+    from blop.config import BLOP_RISK_THRESHOLD_BLOCKER, BLOP_RISK_THRESHOLD_HIGH, BLOP_RISK_THRESHOLD_MEDIUM
+    result["score_explanation"] = (
+        f"Risk score {risk_score}/100 ({risk_level.upper()}). "
+        f"Context change contribution: +{round(context_risk, 1)} pts (max 40). "
+        f"Run failure contribution: +{round(run_risk, 1)} pts (max 60). "
+        f"Thresholds (configurable via env): "
+        f">={BLOP_RISK_THRESHOLD_BLOCKER}=BLOCKER (do not ship), "
+        f">={BLOP_RISK_THRESHOLD_HIGH}=HIGH (investigate), "
+        f">={BLOP_RISK_THRESHOLD_MEDIUM}=MEDIUM (review), "
+        f"<{BLOP_RISK_THRESHOLD_MEDIUM}=LOW (safe)."
+    )
+    return result
 
 
 async def get_journey_health(
@@ -827,24 +921,31 @@ async def generate_remediation(
 
 async def ingest_telemetry_signals(
     app_url: str,
-    signals: list[dict],
+    signals: list[TelemetrySignalInput | dict],
     source: str = "custom",
 ) -> dict:
+    _MAX_SIGNALS = 500
+    if len(signals) > _MAX_SIGNALS:
+        return {
+            "error": f"Batch too large ({len(signals)}). Max {_MAX_SIGNALS} per call.",
+            "max_allowed": _MAX_SIGNALS,
+        }
     normalized: list[TelemetrySignal] = []
     rejected = 0
-    for signal in signals:
+    for signal_raw in signals:
         try:
+            signal = signal_raw if isinstance(signal_raw, TelemetrySignalInput) else TelemetrySignalInput.model_validate(signal_raw)
             normalized.append(
                 TelemetrySignal(
                     app_url=app_url,
                     source=source,  # type: ignore[arg-type]
-                    ts=signal["ts"],
-                    signal_type=signal["signal_type"],  # type: ignore[arg-type]
-                    journey_key=signal.get("journey_key"),
-                    route=signal.get("route"),
-                    value=float(signal["value"]),
-                    unit=signal.get("unit"),
-                    tags=signal.get("tags", {}),
+                    ts=signal.ts,
+                    signal_type=signal.signal_type,  # type: ignore[arg-type]
+                    journey_key=signal.journey_key,
+                    route=signal.route,
+                    value=float(signal.value),
+                    unit=signal.unit,
+                    tags=signal.tags,
                 )
             )
         except Exception:
@@ -1033,10 +1134,13 @@ async def autogenerate_flows(
     app_url: str,
     profile_name: str | None = None,
     criticality_filter: list[str] | None = None,
-    record: bool = False,
+    auto_record: bool = False,
     limit: int = 5,
+    record: bool | None = None,
 ) -> dict:
     """Synthesize test flows for intent nodes in the context graph that lack recorded flows."""
+    if record is not None:
+        auto_record = record
     graph = await sqlite.get_latest_context_graph(app_url)
     if not graph:
         return {
@@ -1082,7 +1186,7 @@ async def autogenerate_flows(
             "business_criticality": bc,
         }
 
-        if record:
+        if auto_record:
             try:
                 from blop.tools.record import record_test_flow
                 result = await record_test_flow(

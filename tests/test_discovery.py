@@ -14,15 +14,12 @@ async def init_test_db():
     await init_db()
 
 
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("init_test_db")
-async def test_discover_flows_returns_fallback_without_api_key():
-    """Returns fallback flows when GOOGLE_API_KEY is not set."""
-    from blop.engine.discovery import discover_flows
-
+@pytest.fixture
+def mock_playwright_stack():
     mock_page = AsyncMock()
     mock_page.goto = AsyncMock()
     mock_page.evaluate = AsyncMock(return_value=[])
+    mock_page.aria_snapshot = AsyncMock(return_value=None)
 
     mock_context = AsyncMock()
     mock_context.new_page.return_value = mock_page
@@ -35,6 +32,17 @@ async def test_discover_flows_returns_fallback_without_api_key():
     mock_playwright.__aexit__ = AsyncMock(return_value=False)
     mock_playwright.chromium.launch.return_value = mock_browser
 
+    return mock_playwright, mock_browser, mock_context, mock_page
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("init_test_db")
+async def test_discover_flows_returns_fallback_without_api_key(mock_playwright_stack):
+    """Returns fallback flows when GOOGLE_API_KEY is not set."""
+    from blop.engine.discovery import discover_flows
+
+    mock_playwright, _, _, _ = mock_playwright_stack
+
     with patch.dict(os.environ, {}, clear=True):
         with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
             result = await discover_flows("https://example.com")
@@ -46,7 +54,7 @@ async def test_discover_flows_returns_fallback_without_api_key():
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("init_test_db")
-async def test_discover_flows_with_gemini_response():
+async def test_discover_flows_with_gemini_response(mock_playwright_stack):
     """Parses Gemini response into flow dicts."""
     from blop.engine.discovery import discover_flows
 
@@ -62,20 +70,7 @@ async def test_discover_flows_with_gemini_response():
     mock_llm = AsyncMock()
     mock_llm.ainvoke.return_value = mock_response
 
-    mock_page = AsyncMock()
-    mock_page.goto = AsyncMock()
-    mock_page.evaluate = AsyncMock(return_value=[])
-
-    mock_context = AsyncMock()
-    mock_context.new_page.return_value = mock_page
-
-    mock_browser = AsyncMock()
-    mock_browser.new_context.return_value = mock_context
-
-    mock_playwright = AsyncMock()
-    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
-    mock_playwright.__aexit__ = AsyncMock(return_value=False)
-    mock_playwright.chromium.launch.return_value = mock_browser
+    mock_playwright, _, _, _ = mock_playwright_stack
 
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
         with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
@@ -89,7 +84,7 @@ async def test_discover_flows_with_gemini_response():
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("init_test_db")
-async def test_discover_flows_count_clamped():
+async def test_discover_flows_count_clamped(mock_playwright_stack):
     """Result is always 3-8 flows."""
     from blop.engine.discovery import discover_flows
 
@@ -106,30 +101,20 @@ async def test_discover_flows_count_clamped():
     mock_llm = AsyncMock()
     mock_llm.ainvoke.return_value = mock_response
 
-    mock_page = AsyncMock()
-    mock_page.goto = AsyncMock()
-    mock_page.evaluate = AsyncMock(return_value=[])
-
-    mock_context = AsyncMock()
-    mock_context.new_page.return_value = mock_page
-    mock_browser = AsyncMock()
-    mock_browser.new_context.return_value = mock_context
-    mock_playwright = AsyncMock()
-    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
-    mock_playwright.__aexit__ = AsyncMock(return_value=False)
-    mock_playwright.chromium.launch.return_value = mock_browser
+    mock_playwright, _, _, _ = mock_playwright_stack
 
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
         with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
             with patch("browser_use.llm.ChatGoogle", return_value=mock_llm):
-                flows = await discover_flows("https://example.com")
+                result = await discover_flows("https://example.com")
 
+    flows = result["flows"] if isinstance(result, dict) else result
     assert 3 <= len(flows) <= 8
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("init_test_db")
-async def test_discover_flows_includes_business_criticality():
+async def test_discover_flows_includes_business_criticality(mock_playwright_stack):
     """Gemini response includes business_criticality → flows in result have it; missing field falls back to 'other'."""
     from blop.engine.discovery import discover_flows
 
@@ -159,20 +144,7 @@ async def test_discover_flows_includes_business_criticality():
     mock_llm = AsyncMock()
     mock_llm.ainvoke.return_value = mock_response
 
-    mock_page = AsyncMock()
-    mock_page.goto = AsyncMock()
-    mock_page.evaluate = AsyncMock(return_value=[])
-
-    mock_context = AsyncMock()
-    mock_context.new_page.return_value = mock_page
-
-    mock_browser = AsyncMock()
-    mock_browser.new_context.return_value = mock_context
-
-    mock_playwright = AsyncMock()
-    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
-    mock_playwright.__aexit__ = AsyncMock(return_value=False)
-    mock_playwright.chromium.launch.return_value = mock_browser
+    mock_playwright, _, _, _ = mock_playwright_stack
 
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
         with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
@@ -189,7 +161,7 @@ async def test_discover_flows_includes_business_criticality():
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("init_test_db")
-async def test_discover_flows_with_repo_path(tmp_path):
+async def test_discover_flows_with_repo_path(tmp_path, mock_playwright_stack):
     """Uses repo path when provided."""
     from blop.engine.discovery import discover_flows
 
@@ -209,21 +181,26 @@ async def test_discover_flows_with_repo_path(tmp_path):
     mock_llm = AsyncMock()
     mock_llm.ainvoke.return_value = mock_response
 
-    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
-        with patch("browser_use.llm.ChatGoogle", return_value=mock_llm):
-            flows = await discover_flows("https://example.com", repo_path=str(tmp_path))
+    mock_playwright, _, _, _ = mock_playwright_stack
 
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+        with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+            with patch("browser_use.llm.ChatGoogle", return_value=mock_llm):
+                result = await discover_flows("https://example.com", repo_path=str(tmp_path))
+
+    flows = result["flows"] if isinstance(result, dict) else result
     assert len(flows) >= 3
+    assert result["quality"]["planning_fallback"] is False
+    assert result["quality"]["planning_error"] is None
 
 
 @pytest.mark.asyncio
-async def test_explore_site_inventory_includes_page_structures():
+async def test_explore_site_inventory_includes_page_structures(mock_playwright_stack):
     """Inventory response includes compact per-page interactive ARIA nodes."""
     from blop.engine.discovery import explore_site_inventory
 
-    mock_page = AsyncMock()
+    mock_playwright, _, _, mock_page = mock_playwright_stack
     mock_page.url = "https://example.com"
-    mock_page.goto = AsyncMock()
     mock_page.evaluate = AsyncMock(side_effect=[[], [], [], [], []])
     mock_page.accessibility = MagicMock(
         snapshot=AsyncMock(
@@ -238,17 +215,6 @@ async def test_explore_site_inventory_includes_page_structures():
         )
     )
 
-    mock_context = AsyncMock()
-    mock_context.new_page.return_value = mock_page
-
-    mock_browser = AsyncMock()
-    mock_browser.new_context.return_value = mock_context
-
-    mock_playwright = AsyncMock()
-    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
-    mock_playwright.__aexit__ = AsyncMock(return_value=False)
-    mock_playwright.chromium.launch.return_value = mock_browser
-
     with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
         result = await explore_site_inventory("https://example.com")
 
@@ -259,13 +225,12 @@ async def test_explore_site_inventory_includes_page_structures():
 
 
 @pytest.mark.asyncio
-async def test_get_page_structure_returns_interactive_nodes():
+async def test_get_page_structure_returns_interactive_nodes(mock_playwright_stack):
     """Single-page structure tool returns flattened ARIA interactive elements."""
     from blop.engine.discovery import get_page_structure
 
-    mock_page = AsyncMock()
+    mock_playwright, _, _, mock_page = mock_playwright_stack
     mock_page.url = "https://example.com/pricing"
-    mock_page.goto = AsyncMock()
     mock_page.wait_for_function = AsyncMock()
     mock_page.wait_for_timeout = AsyncMock()
     mock_page.accessibility = MagicMock(
@@ -280,17 +245,6 @@ async def test_get_page_structure_returns_interactive_nodes():
             }
         )
     )
-
-    mock_context = AsyncMock()
-    mock_context.new_page.return_value = mock_page
-
-    mock_browser = AsyncMock()
-    mock_browser.new_context.return_value = mock_context
-
-    mock_playwright = AsyncMock()
-    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
-    mock_playwright.__aexit__ = AsyncMock(return_value=False)
-    mock_playwright.chromium.launch.return_value = mock_browser
 
     with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
         result = await get_page_structure(

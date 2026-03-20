@@ -155,6 +155,30 @@ async def test_validate_app_url_reachable_adds_check():
 
 
 @pytest.mark.asyncio
+async def test_validate_app_url_invalid_scheme_skips_fetch():
+    from blop.tools.validate import validate_setup
+
+    mock_browser = AsyncMock()
+    mock_playwright = AsyncMock()
+    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
+    mock_playwright.__aexit__ = AsyncMock(return_value=False)
+    mock_playwright.chromium.launch.return_value = mock_browser
+
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+        with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+            with patch("blop.storage.sqlite.init_db", new_callable=AsyncMock):
+                with patch("urllib.request.urlopen") as urlopen_mock:
+                    result = await validate_setup(app_url="file:///etc/passwd")
+
+    assert result["status"] == "warnings"
+    url_check = next((c for c in result["checks"] if c["name"] == "app_url_reachable"), None)
+    assert url_check is not None
+    assert url_check["passed"] is False
+    assert "http or https" in url_check["message"]
+    urlopen_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_validate_profile_not_found_warning():
     """profile_name provided but not in DB → warning, not blocker."""
     from blop.tools.validate import validate_setup
@@ -176,6 +200,53 @@ async def test_validate_profile_not_found_warning():
     auth_check = next((c for c in result["checks"] if c["name"] == "auth_profile"), None)
     assert auth_check is not None
     assert not auth_check["passed"]
+
+
+@pytest.mark.asyncio
+async def test_validate_release_setup_suggested_steps_use_canonical_names():
+    """validate_release_setup rewrites discover_test_flows → discover_critical_journeys."""
+    from blop.tools.validate import validate_release_setup
+
+    mock_browser = AsyncMock()
+    mock_playwright = AsyncMock()
+    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
+    mock_playwright.__aexit__ = AsyncMock(return_value=False)
+    mock_playwright.chromium.launch.return_value = mock_browser
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_urlopen_ctx = MagicMock()
+    mock_urlopen_ctx.__enter__ = MagicMock(return_value=mock_resp)
+    mock_urlopen_ctx.__exit__ = MagicMock(return_value=False)
+
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+        with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+            with patch("blop.storage.sqlite.init_db", new_callable=AsyncMock):
+                with patch("urllib.request.urlopen", return_value=mock_urlopen_ctx):
+                    result = await validate_release_setup(app_url="https://example.com")
+
+    steps_text = " ".join(result.get("suggested_next_steps", []))
+    assert "discover_critical_journeys" in steps_text
+    assert "discover_test_flows" not in steps_text
+
+
+@pytest.mark.asyncio
+async def test_validate_release_setup_delegates_to_validate_setup():
+    """validate_release_setup returns the same status as validate_setup."""
+    from blop.tools.validate import validate_release_setup, validate_setup
+
+    mock_browser = AsyncMock()
+    mock_playwright = AsyncMock()
+    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
+    mock_playwright.__aexit__ = AsyncMock(return_value=False)
+    mock_playwright.chromium.launch.return_value = mock_browser
+
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+        with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+            with patch("blop.storage.sqlite.init_db", new_callable=AsyncMock):
+                result_setup = await validate_setup()
+                result_release = await validate_release_setup()
+
+    assert result_setup["status"] == result_release["status"]
 
 
 @pytest.mark.asyncio

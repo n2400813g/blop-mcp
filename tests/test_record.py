@@ -26,17 +26,29 @@ async def test_record_flow_happy_path():
     mock_get_auth_profile = AsyncMock(return_value=None)
     mock_artifacts_dir = "/tmp/runs/flow_abc123"
 
-    with patch("blop.tools.record.recording.record_flow", mock_record_flow):
-        with patch("blop.tools.record.sqlite.save_flow", mock_save_flow):
-            with patch("blop.tools.record.sqlite.get_auth_profile", mock_get_auth_profile):
-                with patch("blop.tools.record.file_store.artifacts_dir", return_value=mock_artifacts_dir):
-                    with patch("blop.engine.context_graph.detect_app_archetype", return_value="saas_app"):
-                        with patch("blop.engine.context_graph.editor_hints_from_archetype", return_value={}):
-                            result = await record_test_flow(
-                                app_url="https://example.com",
-                                flow_name="test_flow",
-                                goal="Complete the form",
-                            )
+    patchers = [
+        patch("blop.tools.record.recording.record_flow", mock_record_flow),
+        patch("blop.tools.record.sqlite.save_flow", mock_save_flow),
+        patch("blop.tools.record.sqlite.get_auth_profile", mock_get_auth_profile),
+        patch("blop.tools.record.file_store.artifacts_dir", return_value=mock_artifacts_dir),
+        patch("blop.engine.context_graph.detect_app_archetype", return_value="saas_app"),
+        patch("blop.engine.context_graph.editor_hints_from_archetype", return_value={}),
+        patch(
+            "blop.tools.record.auth_engine.auto_storage_state_from_env",
+            new=AsyncMock(return_value=None),
+        ),
+    ]
+    for patcher in patchers:
+        patcher.start()
+    try:
+        result = await record_test_flow(
+            app_url="https://example.com",
+            flow_name="test_flow",
+            goal="Complete the form",
+        )
+    finally:
+        for patcher in reversed(patchers):
+            patcher.stop()
 
     assert result["status"] == "recorded"
     assert result["step_count"] == 2
@@ -66,12 +78,16 @@ async def test_record_flow_with_business_criticality():
                 with patch("blop.tools.record.file_store.artifacts_dir", return_value="/tmp/runs/f1"):
                     with patch("blop.engine.context_graph.detect_app_archetype", return_value="saas_app"):
                         with patch("blop.engine.context_graph.editor_hints_from_archetype", return_value={}):
-                            result = await record_test_flow(
-                                app_url="https://example.com",
-                                flow_name="checkout",
-                                goal="Complete checkout",
-                                business_criticality="revenue",
-                            )
+                            with patch(
+                                "blop.tools.record.auth_engine.auto_storage_state_from_env",
+                                new=AsyncMock(return_value=None),
+                            ):
+                                result = await record_test_flow(
+                                    app_url="https://example.com",
+                                    flow_name="checkout",
+                                    goal="Complete checkout",
+                                    business_criticality="revenue",
+                                )
 
     assert result["status"] == "recorded"
     saved_flow = mock_save_flow.call_args[0][0]

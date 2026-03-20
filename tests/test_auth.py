@@ -56,9 +56,12 @@ async def test_env_login_missing_credentials(env_login_profile):
 @pytest.mark.asyncio
 async def test_storage_state_returns_path(storage_state_profile):
     """Returns path when file exists."""
+    import blop.engine.auth as auth_engine
     from blop.engine.auth import resolve_storage_state
 
-    result = await resolve_storage_state(storage_state_profile)
+    # Allow absolute paths outside repo root (tmp_path lives outside the project dir)
+    with patch.object(auth_engine, "_ALLOW_ABSOLUTE_AUTH_PATHS", True):
+        result = await resolve_storage_state(storage_state_profile)
     assert result == storage_state_profile.storage_state_path
 
 
@@ -73,6 +76,22 @@ async def test_storage_state_missing_file():
         storage_state_path="/nonexistent/path.json",
     )
     result = await resolve_storage_state(profile)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_storage_state_rejects_path_traversal(tmp_path):
+    """Relative traversal paths are rejected for storage_state profiles."""
+    from blop.engine.auth import resolve_storage_state
+
+    with patch("blop.engine.auth._REPO_ROOT", tmp_path):
+        profile = AuthProfile(
+            profile_name="traversal",
+            auth_type="storage_state",
+            storage_state_path="../../etc/passwd",
+        )
+        result = await resolve_storage_state(profile)
+
     assert result is None
 
 
@@ -102,8 +121,39 @@ async def test_env_login_uses_cache(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_env_login_invalid_cached_session_falls_back_when_validation_enabled(tmp_path, monkeypatch):
+    """When cache validation is enabled and session is invalid, cache entry is dropped."""
+    from blop.engine import auth as auth_engine
+
+    state_file = tmp_path / "cached_invalid.json"
+    state_file.write_text("{}")
+    cache_key = "cached_invalid_profile"
+    auth_engine._auth_cache[cache_key] = {
+        "path": str(state_file),
+        "expires": time.time() + 3600,
+    }
+    monkeypatch.setattr(auth_engine, "BLOP_VALIDATE_AUTH_CACHE", True)
+    monkeypatch.setattr(auth_engine, "APP_BASE_URL", "https://example.com")
+    monkeypatch.setattr(auth_engine, "validate_auth_session", AsyncMock(return_value=False))
+
+    profile = AuthProfile(
+        profile_name=cache_key,
+        auth_type="env_login",
+        login_url="https://example.com/login",
+    )
+
+    with patch.dict(os.environ, {}, clear=True):
+        result = await auth_engine.resolve_storage_state(profile)
+
+    assert result is None
+    assert cache_key not in auth_engine._auth_cache
+    auth_engine.validate_auth_session.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_cookie_json_path(cookie_json_profile, tmp_path):
     """cookie_json path calls playwright and saves state."""
+    import blop.engine.auth as auth_engine
     from blop.engine.auth import resolve_storage_state
 
     mock_context = AsyncMock()
@@ -114,14 +164,14 @@ async def test_cookie_json_path(cookie_json_profile, tmp_path):
     mock_playwright.__aexit__ = AsyncMock(return_value=False)
     mock_playwright.chromium.launch.return_value = mock_browser
 
-    expected_path = os.path.join(".blop", f"auth_state_{cookie_json_profile.profile_name}.json")
+    # Allow absolute paths so tmp_path (outside repo root) is accepted
+    with patch.object(auth_engine, "_ALLOW_ABSOLUTE_AUTH_PATHS", True):
+        with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+            with patch("os.makedirs"):
+                result = await resolve_storage_state(cookie_json_profile)
 
-    with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
-        with patch("os.makedirs"):
-            result = await resolve_storage_state(cookie_json_profile)
-
-    # Should have tried to save state (mock won't create file but path is returned)
-    assert result is not None or result is None  # Just verify no exception
+    # Should have tried to create a browser context
+    mock_browser.new_context.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -134,8 +184,8 @@ async def test_save_auth_profile_invalid_auth_type():
         auth_type="oauth",
     )
     assert "error" in result
-    assert "Invalid auth_type" in result["error"]
-    assert "oauth" in result["error"]
+    assert "Invalid auth profile input." in result["error"]
+    assert "auth_type" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -143,12 +193,18 @@ async def test_save_auth_profile_valid_types():
     """All valid auth types should be accepted by Pydantic."""
     from blop.tools.auth import save_auth_profile
 
+    required_fields = {
+        "env_login": {"login_url": "https://example.com/login"},
+        "storage_state": {"storage_state_path": "/tmp/state.json"},
+        "cookie_json": {"cookie_json_path": "/tmp/cookies.json"},
+    }
     for auth_type in ("env_login", "storage_state", "cookie_json"):
         with patch("blop.engine.auth.resolve_storage_state", new=AsyncMock(return_value=None)):
             with patch("blop.storage.sqlite.save_auth_profile", new=AsyncMock()):
                 result = await save_auth_profile(
                     profile_name=f"test_{auth_type}",
                     auth_type=auth_type,
+                    **required_fields[auth_type],
                 )
         assert result.get("status") == "saved", f"Failed for auth_type={auth_type}"
 
@@ -184,3 +240,22 @@ async def test_cookie_json_malformed_file(tmp_path):
                 result = None
     # Either None (failed) or a path (cookie load failed but state was saved)
     assert result is None or isinstance(result, str)
+
+
+@pytest.mark.asyncio
+async def test_cookie_json_rejects_relative_path_traversal(tmp_path):
+    """Relative traversal paths are rejected for cookie_json profiles."""
+    from blop.engine.auth import resolve_storage_state
+
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    profile = AuthProfile(
+        profile_name="cookie_profile",
+        auth_type="cookie_json",
+        cookie_json_path="../../etc/passwd",
+    )
+    with patch("blop.engine.auth._REPO_ROOT", repo_root):
+        result = await resolve_storage_state(profile)
+
+    assert result is None

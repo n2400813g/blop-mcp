@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Optional
 
 from blop.config import validate_app_url
 from blop.engine import auth as auth_engine
+from blop.engine.flow_builder import build_recorded_flow
 from blop.engine import recording
-from blop.schemas import RecordedFlow, RecordedFlowResult
+from blop.engine.logger import get_logger
+from blop.schemas import RecordedFlowResult
 from blop.storage import sqlite, files as file_store
+
+_log = get_logger("tools.record")
 
 
 async def record_test_flow(
@@ -36,10 +39,26 @@ async def record_test_flow(
     profile = None
     if profile_name:
         profile = await sqlite.get_auth_profile(profile_name)
+        if profile is None:
+            return {
+                "error": (
+                    f"Auth profile '{profile_name}' was not found. "
+                    "Provide a valid profile_name, run save_auth_profile, or use capture_auth_session."
+                )
+            }
 
     storage_state: Optional[str] = None
     if profile:
-        storage_state = await auth_engine.resolve_storage_state(profile)
+        try:
+            storage_state = await auth_engine.resolve_storage_state(profile)
+        except Exception as exc:
+            _log.error("auth_resolve_failed profile=%s", profile_name, exc_info=True)
+            return {
+                "error": (
+                    f"Auth profile '{profile_name}' could not be resolved. "
+                    "Run capture_auth_session to refresh."
+                )
+            }
     if storage_state is None:
         storage_state = await auth_engine.auto_storage_state_from_env()
 
@@ -87,12 +106,11 @@ async def record_test_flow(
     spa_hints = SpaHints(**_hint_kwargs) if _hint_kwargs else SpaHints()
     run_mode_override = "goal_fallback" if _hint_kwargs else None
 
-    flow = RecordedFlow(
+    flow = build_recorded_flow(
         flow_name=flow_name,
         app_url=app_url,
         goal=goal,
         steps=steps,
-        created_at=datetime.now(timezone.utc).isoformat(),
         assertions_json=assertions_json,
         entry_url=app_url,
         business_criticality=bc,
@@ -103,10 +121,15 @@ async def record_test_flow(
 
     artifacts_dir = file_store.artifacts_dir(flow.flow_id)
 
-    return RecordedFlowResult(
+    result = RecordedFlowResult(
         flow_id=flow.flow_id,
         flow_name=flow_name,
         step_count=len(steps),
         status="recorded",
         artifacts_dir=artifacts_dir,
     ).model_dump()
+    result["workflow_hint"] = (
+        f"Flow '{flow_name}' recorded ({len(steps)} steps). "
+        f"Next: run_regression_test(app_url='{app_url}', flow_ids=['{flow.flow_id}'])"
+    )
+    return result

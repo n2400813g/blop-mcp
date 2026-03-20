@@ -11,7 +11,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from blop.config import BLOP_AGENT_MAX_ACTIONS_PER_STEP, BLOP_AGENT_MAX_FAILURES
+from blop.config import (
+    BLOP_AGENT_MAX_ACTIONS_PER_STEP,
+    BLOP_AGENT_MAX_FAILURES,
+    BLOP_RECORDING_ENTRY_SETTLE_MS,
+)
+from blop.engine.dom_utils import extract_interactive_nodes_flat
 from blop.engine.logger import get_logger
 from blop.schemas import FlowStep, StructuredAssertion
 
@@ -104,6 +109,7 @@ async def record_flow(
     recording_id = run_id or uuid.uuid4().hex
     steps: list[FlowStep] = []
     step_counter = 0
+    record_error: Exception | None = None
 
     # Initial navigation step
     steps.append(FlowStep(
@@ -149,19 +155,9 @@ async def record_flow(
     else:
         task = f"Navigate to {app_url} then: {goal}"
 
-    # Inject credentials so the agent can authenticate if it hits a login gate
-    # (covers both initial auth and mid-session expiry during recording).
-    from blop.config import LOGIN_URL, TEST_AUTH_URL, TEST_USERNAME, TEST_PASSWORD
-    _username = TEST_USERNAME
-    _password = TEST_PASSWORD
-    _login_url = LOGIN_URL or TEST_AUTH_URL
-    if _username and _password and _login_url:
-        task += (
-            f"\n\nIf you encounter a login page or are redirected to an auth page, "
-            f"use these credentials: email/username={_username} password={_password} "
-            f"(login URL: {_login_url}). "
-            f"Do NOT create a new account — log in with the provided credentials."
-        )
+    # Provide runtime auth guidance without ever including raw credentials.
+    from blop.engine.auth_prompt import append_runtime_auth_guidance
+    task = append_runtime_auth_guidance(task)
     step_screenshots: list[str] = []
     screenshot_task: Optional[asyncio.Task] = None
     step_idx_counter = [0]
@@ -390,13 +386,33 @@ async def record_flow(
         except Exception:
             _log.debug("capture final screenshot and generate assertions", exc_info=True)
 
-    except Exception:
-        _log.debug("agent run or step capture", exc_info=True)
+    except Exception as e:
+        record_error = e
+        _log.debug(
+            "record_failed recording_id=%s goal=%s error=%s",
+            recording_id,
+            goal[:120],
+            str(e),
+            exc_info=True,
+        )
+        # Keep one explicit artifact for debugging failed recordings when possible.
+        try:
+            ctx = getattr(browser_session, "context", None)
+            if ctx and ctx.pages:
+                failure_path = file_store.screenshot_path(recording_id, "record", 998)
+                await ctx.pages[0].screenshot(path=failure_path)
+        except Exception:
+            _log.debug("capture recording failure screenshot", exc_info=True)
     finally:
         try:
             await browser_session.aclose()
         except Exception:
             _log.debug("close browser session", exc_info=True)
+
+    if record_error is not None:
+        raise RuntimeError(
+            f"record_flow failed for recording_id={recording_id}: {type(record_error).__name__}: {record_error}"
+        ) from record_error
 
     # Guarantee at least a navigation + assertion
     if len(steps) <= 1:
@@ -497,7 +513,7 @@ async def _get_page_aria_context(page) -> str:
         snapshot = await page.accessibility.snapshot(interesting_only=True)
         if not snapshot:
             return ""
-        nodes = _extract_interactive_nodes(snapshot, max_nodes=40)
+        nodes = extract_interactive_nodes_flat(snapshot, max_nodes=40)
         return format_snapshot_for_llm(nodes)
     except Exception:
         return ""
@@ -619,27 +635,6 @@ def _serialize_aria_node(node: dict, depth: int, max_depth: int) -> dict:
     return out
 
 
-def _extract_interactive_nodes(node: dict, max_nodes: int = 40, _count: Optional[list] = None) -> list[dict]:
-    """Flatten the ARIA tree into a list of interactive leaf nodes."""
-    if _count is None:
-        _count = [0]
-    interactive_roles = {
-        "button", "link", "textbox", "checkbox", "radio", "combobox",
-        "listbox", "menuitem", "tab", "switch", "searchbox", "spinbutton",
-    }
-    results = []
-    role = node.get("role", "")
-    if role in interactive_roles and node.get("name"):
-        if _count[0] < max_nodes:
-            results.append({"role": role, "name": node["name"]})
-            _count[0] += 1
-    for child in node.get("children", []):
-        if _count[0] >= max_nodes:
-            break
-        results.extend(_extract_interactive_nodes(child, max_nodes, _count))
-    return results
-
-
 def _extract_target_text(description: str) -> Optional[str]:
     """Pull the most likely visible label from an action description string."""
     m = re.search(r"['\"](.+?)['\"]", description)
@@ -733,7 +728,7 @@ async def _resolve_spa_entry_url(
         page = await context.new_page()
         try:
             await page.goto(app_url, wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(5000)  # SPA render settle — extended for canvas/WebGL apps
+            await page.wait_for_timeout(max(BLOP_RECORDING_ENTRY_SETTLE_MS, 0))
 
             # Strategy 1: anchor links pointing to known deep paths
             sub_path_patterns = [

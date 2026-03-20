@@ -36,3 +36,16 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Test cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# SQLite databases (runtime data)
+*.db
+*.db-shm
+*.db-wal

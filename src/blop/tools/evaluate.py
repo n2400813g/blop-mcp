@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 import uuid
@@ -11,7 +12,11 @@ from typing import Optional
 
 from blop.config import validate_app_url
 from blop.engine import auth as auth_engine
-from blop.schemas import FlowStep, RecordedFlow
+from blop.engine.flow_builder import (
+    AgentStepInfo,
+    build_recorded_flow,
+    build_steps_from_agent_actions,
+)
 from blop.storage import sqlite, files as file_store
 
 
@@ -36,6 +41,8 @@ async def evaluate_web_task(
         return {"error": url_err}
     if not task or not task.strip():
         return {"error": "task is required"}
+    if format not in {"markdown", "text", "json"}:
+        return {"error": f"Invalid format '{format}'. Must be one of: markdown, text, json"}
 
     capture_flags = set(capture or ["screenshots", "console", "network", "trace"])
     valid_flags = {"screenshots", "console", "network", "trace"}
@@ -47,11 +54,21 @@ async def evaluate_web_task(
     if profile_name:
         profile = await sqlite.get_auth_profile(profile_name)
         if profile is None:
-            raise ValueError(
-                f"Auth profile '{profile_name}' was not found. "
-                "Provide a valid profile_name or omit it to run without auth."
-            )
-        storage_state = await auth_engine.resolve_storage_state(profile)
+            return {
+                "error": (
+                    f"Auth profile '{profile_name}' was not found. "
+                    "Provide a valid profile_name or omit it to run without auth."
+                )
+            }
+        try:
+            storage_state = await auth_engine.resolve_storage_state(profile)
+        except Exception as exc:
+            return {
+                "error": (
+                    f"Auth profile '{profile_name}' could not be resolved: {exc}. "
+                    "Refresh credentials or run capture_auth_session."
+                )
+            }
     if storage_state is None:
         storage_state = await auth_engine.auto_storage_state_from_env()
 
@@ -118,10 +135,34 @@ async def evaluate_web_task(
     if recorded_flow_id:
         report["recorded_flow_id"] = recorded_flow_id
 
+    # Compute simplified go/no-go recommendation
+    pf = report.get("pass_fail", "error")
+    evidence = report.get("evidence", {})
+    has_console_errors = bool(evidence.get("console_errors"))
+    has_network_failures = bool(evidence.get("network_failures"))
+    raw = report.get("raw_result", "").lower()
+    is_hard_failure = any(kw in raw for kw in ("error", "not found", "failed", "could not"))
+    if pf == "pass" and not has_console_errors and not has_network_failures:
+        rec_decision = "SHIP"
+        rec_rationale = "Task completed successfully with no console or network errors."
+    elif pf == "fail" and is_hard_failure:
+        rec_decision = "BLOCK"
+        rec_rationale = "Task failed with explicit error or missing resource. Investigate before shipping."
+    else:
+        rec_decision = "INVESTIGATE"
+        rec_rationale = "Task encountered issues or errors. Review evidence before shipping."
+    report["release_recommendation"] = {
+        "decision": rec_decision,
+        "confidence": "medium",
+        "rationale": rec_rationale,
+    }
+
     if format == "markdown":
         report["formatted_report"] = _format_markdown(report, task, app_url)
     elif format == "text":
         report["formatted_report"] = _format_text(report, task, app_url)
+    elif format == "json":
+        report["formatted_report"] = json.dumps(report, indent=2)
 
     return report
 
@@ -145,7 +186,7 @@ async def _run_evaluation(
     browser_profile = make_browser_profile(headless=headless, storage_state=storage_state)
     browser_session = BrowserSession(browser_profile=browser_profile)
 
-    agent_steps: list[dict] = []
+    agent_steps: list[AgentStepInfo] = []
     console_logs: list[dict] = []
     console_errors: list[str] = []
     network_requests: list[dict] = []
@@ -157,18 +198,8 @@ async def _run_evaluation(
     start_time = time.time()
 
     try:
-        _agent_task = f"Navigate to {app_url} then: {task}"
-        from blop.config import LOGIN_URL, TEST_AUTH_URL, TEST_USERNAME, TEST_PASSWORD
-        _username = TEST_USERNAME
-        _password = TEST_PASSWORD
-        _login_url = LOGIN_URL or TEST_AUTH_URL
-        if _username and _password and _login_url:
-            _agent_task += (
-                f"\n\nIf you encounter a login page or are redirected to auth, "
-                f"use: email/username={_username} password={_password} "
-                f"(login URL: {_login_url}). "
-                f"Do NOT create a new account — log in with the provided credentials."
-            )
+        from blop.engine.auth_prompt import append_runtime_auth_guidance
+        _agent_task = append_runtime_auth_guidance(f"Navigate to {app_url} then: {task}")
         agent = Agent(
             task=_agent_task,
             llm=llm,
@@ -205,12 +236,16 @@ async def _run_evaluation(
         # Screenshot polling + listener attachment
         step_idx = [0]
 
+        _MAX_SCREENSHOTS = int(os.getenv("BLOP_MAX_SCREENSHOTS", "50"))
+
         async def _poll_screenshots():
             while True:
                 try:
                     await asyncio.sleep(3)
                     await _attach_listeners()
                     if "screenshots" in capture_flags:
+                        if step_idx[0] >= _MAX_SCREENSHOTS:
+                            break
                         ctx = getattr(browser_session, "context", None)
                         if ctx and ctx.pages:
                             shot_path = file_store.screenshot_path(run_id, "eval", step_idx[0])
@@ -405,7 +440,7 @@ def _on_request_failed(req, network_failures: list) -> None:
     })
 
 
-def _summarize_action(action, index: int) -> Optional[dict]:
+def _summarize_action(action, index: int) -> Optional[AgentStepInfo]:
     """Convert a browser-use model action dict into a compact step summary."""
     if not isinstance(action, dict):
         return None
@@ -457,7 +492,7 @@ async def _promote_to_recorded_flow(
     app_url: str,
     task: str,
     run_id: str,
-    agent_steps: list[dict],
+    agent_steps: list[AgentStepInfo],
     flow_name: Optional[str] = None,
 ) -> Optional[str]:
     """Convert evaluation agent steps into a RecordedFlow and persist it."""
@@ -465,41 +500,17 @@ async def _promote_to_recorded_flow(
         return None
 
     name = flow_name or f"eval_{run_id[:8]}"
-    steps: list[FlowStep] = []
-
-    steps.append(FlowStep(
-        step_id=0,
-        action="navigate",
-        value=app_url,
-        description=f"Navigate to {app_url}",
-        url_after=app_url,
-    ))
-
-    for i, step_info in enumerate(agent_steps):
-        action_name = step_info.get("action", "click")
-        mapped = _map_eval_action(action_name)
-        if not mapped:
-            continue
-        desc = step_info.get("description", "")
-        steps.append(FlowStep(
-            step_id=i + 1,
-            action=mapped,
-            description=desc,
-        ))
-
-    steps.append(FlowStep(
-        step_id=len(steps),
-        action="assert",
-        description=task,
-        value=task,
-    ))
-
-    flow = RecordedFlow(
+    steps = build_steps_from_agent_actions(
+        app_url=app_url,
+        final_assertion=task,
+        agent_steps=agent_steps,
+        map_action=_map_eval_action,
+    )
+    flow = build_recorded_flow(
         flow_name=name,
         app_url=app_url,
         goal=task,
         steps=steps,
-        created_at=datetime.now(timezone.utc).isoformat(),
         assertions_json=[task],
         entry_url=app_url,
     )
@@ -531,6 +542,17 @@ def _format_markdown(report: dict, task: str, app_url: str) -> str:
     pf = report.get("pass_fail", "unknown")
     lines.append(f"**Result:** {pf.upper()} ({report.get('elapsed_secs', '?')}s)")
     lines.append("")
+
+    rec = report.get("release_recommendation", {})
+    if rec:
+        decision = rec.get("decision", "INVESTIGATE")
+        confidence = rec.get("confidence", "medium")
+        rationale = rec.get("rationale", "")
+        decision_icon = {"SHIP": "✅", "INVESTIGATE": "⚠️", "BLOCK": "🚫"}.get(decision, "❓")
+        lines.append(f"### Release Recommendation: {decision_icon} {decision} (confidence: {confidence})")
+        if rationale:
+            lines.append(f"> {rationale}")
+        lines.append("")
 
     summary = report.get("summary", [])
     if summary:

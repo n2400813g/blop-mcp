@@ -1,0 +1,110 @@
+from __future__ import annotations
+
+import os
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_evaluate_web_task_persists_run_artifacts_and_format(tmp_path):
+    from blop.tools import evaluate
+    from blop.storage import sqlite
+
+    db_path = str(tmp_path / "evaluate.db")
+    app_url = "https://example.com"
+
+    fake_report = {
+        "summary": ["Task completed successfully"],
+        "agent_steps": [{"step": 1, "action": "navigate", "description": "Navigate -> https://example.com"}],
+        "evidence": {
+            "console_errors": [],
+            "console_log_count": 3,
+            "network_failures": [],
+            "network_request_count": 8,
+            "screenshots": ["/tmp/eval_1.png", "/tmp/eval_2.png"],
+            "trace_path": "/tmp/eval_trace.zip",
+        },
+        "pass_fail": "pass",
+        "raw_result": "done",
+        "elapsed_secs": 1.2,
+        "_network_log_path": "/tmp/network.jsonl",
+        "_console_log_path": "/tmp/console.log",
+    }
+
+    with patch.dict(os.environ, {"BLOP_DB_PATH": db_path}):
+        await sqlite.init_db()
+        with patch(
+            "blop.tools.evaluate.auth_engine.auto_storage_state_from_env",
+            new=AsyncMock(return_value=None),
+        ), patch("blop.tools.evaluate._run_evaluation", new=AsyncMock(return_value=fake_report)):
+            result = await evaluate.evaluate_web_task(
+                app_url=app_url,
+                task="Open homepage and verify it loads",
+                format="markdown",
+                save_as_recorded_flow=False,
+            )
+
+        run = await sqlite.get_run(result["run_id"])
+        artifacts = await sqlite.list_artifacts_for_run(result["run_id"])
+
+    assert run is not None
+    assert run["status"] == "completed"
+    assert run["run_mode"] == "evaluate"
+    assert "formatted_report" in result
+    assert result["formatted_report"].startswith("## Web Evaluation Report")
+
+    artifact_types = {a["artifact_type"] for a in artifacts}
+    assert "network_log" in artifact_types
+    assert "console_log" in artifact_types
+    assert "trace" in artifact_types
+    assert "screenshot" in artifact_types
+
+
+@pytest.mark.asyncio
+async def test_evaluate_web_task_promotes_to_recorded_flow_when_requested(tmp_path):
+    from blop.tools import evaluate
+    from blop.storage import sqlite
+
+    db_path = str(tmp_path / "evaluate_promote.db")
+
+    fake_report = {
+        "summary": ["Task completed successfully"],
+        "agent_steps": [{"step": 1, "action": "click_element", "description": "Click element (index 1)"}],
+        "evidence": {
+            "console_errors": [],
+            "console_log_count": 0,
+            "network_failures": [],
+            "network_request_count": 0,
+            "screenshots": [],
+            "trace_path": None,
+        },
+        "pass_fail": "pass",
+        "raw_result": "ok",
+        "elapsed_secs": 0.9,
+        "_network_log_path": None,
+        "_console_log_path": None,
+    }
+
+    with patch.dict(os.environ, {"BLOP_DB_PATH": db_path}):
+        await sqlite.init_db()
+        with patch(
+            "blop.tools.evaluate.auth_engine.auto_storage_state_from_env",
+            new=AsyncMock(return_value=None),
+        ):
+            with patch("blop.tools.evaluate._run_evaluation", new=AsyncMock(return_value=fake_report)):
+                with patch(
+                    "blop.tools.evaluate._promote_to_recorded_flow",
+                    new=AsyncMock(return_value="flow_promoted_123"),
+                ) as promote_mock:
+                    result = await evaluate.evaluate_web_task(
+                        app_url="https://example.com",
+                        task="Complete signup",
+                        save_as_recorded_flow=True,
+                        flow_name="signup_smoke",
+                        format="json",
+                    )
+
+    promote_mock.assert_awaited_once()
+    assert result["recorded_flow_id"] == "flow_promoted_123"
+    assert result["pass_fail"] == "pass"

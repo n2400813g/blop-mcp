@@ -7,8 +7,12 @@ import os
 import re
 from typing import TYPE_CHECKING
 
+from blop.engine.logger import get_logger
+
 if TYPE_CHECKING:
     from playwright.async_api import Page
+
+_log = get_logger("vision")
 
 
 def _llm(max_output_tokens: int = 256):
@@ -72,8 +76,24 @@ If not found, return {{"x": null, "y": null}}"""
         m = re.search(r'\{"x":\s*(\d+|null),\s*"y":\s*(\d+|null)\}', text)
         if m and m.group(1) != "null":
             return int(m.group(1)), int(m.group(2))
-    except Exception:
-        pass
+        if m and m.group(1) == "null":
+            _log.debug(
+                "vision_not_found event=vision_not_found description=%s",
+                description[:120],
+            )
+        else:
+            _log.debug(
+                "vision_parse_failed event=vision_parse_failed mode=find_element_coords description=%s response=%s",
+                description[:120],
+                text[:200],
+            )
+    except Exception as e:
+        _log.debug(
+            "vision_provider_error event=vision_provider_error mode=find_element_coords error_type=%s error_message=%s",
+            type(e).__name__,
+            str(e)[:200],
+            exc_info=True,
+        )
 
     return None
 
@@ -123,7 +143,21 @@ Return ONLY a JSON array of booleans in the same order (e.g. [true, false, true]
             if isinstance(result, list):
                 padded = list(result) + [False] * (len(assertions) - len(result))
                 return [bool(v) for v in padded[:len(assertions)]]
-    except Exception:
-        pass
+            _log.debug(
+                "vision_parse_failed event=vision_parse_failed mode=assert_all_by_vision reason=non_list_json response=%s",
+                str(result)[:200],
+            )
+        else:
+            _log.debug(
+                "vision_parse_failed event=vision_parse_failed mode=assert_all_by_vision reason=json_array_not_found response=%s",
+                text[:200],
+            )
+    except Exception as e:
+        _log.debug(
+            "vision_provider_error event=vision_provider_error mode=assert_all_by_vision error_type=%s error_message=%s",
+            type(e).__name__,
+            str(e)[:200],
+            exc_info=True,
+        )
 
     return [False] * len(assertions)

@@ -1,10 +1,37 @@
 from __future__ import annotations
 
+import os
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 from blop.reporting import results as reporting
 from blop.schemas import FailureCase
 from blop.storage import sqlite
+
+
+def _annotate_staleness(rec: dict, completed_at: str | None, run_status: str) -> dict:
+    """Add stale=True/False to a release_recommendation dict."""
+    if run_status not in ("completed", "failed"):
+        rec["stale"] = False
+        return rec
+    stale_hours = int(os.getenv("BLOP_RECOMMENDATION_STALE_HOURS", "24"))
+    stale = False
+    if completed_at:
+        try:
+            completed_dt = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+            if completed_dt.tzinfo is None:
+                completed_dt = completed_dt.replace(tzinfo=timezone.utc)
+            age_hours = (datetime.now(timezone.utc) - completed_dt).total_seconds() / 3600
+            stale = age_hours > stale_hours
+        except Exception:
+            pass
+    rec["stale"] = stale
+    if stale:
+        rec["stale_reason"] = (
+            f"Run completed more than {stale_hours}h ago. "
+            "Re-run for a fresh recommendation."
+        )
+    return rec
 
 
 async def get_test_results(run_id: str) -> dict:
@@ -18,6 +45,13 @@ async def get_test_results(run_id: str) -> dict:
         cases = [FailureCase(**c) for c in run["cases"]]
 
     report = await reporting.build_report(run, cases)
+
+    # Annotate recommendation with staleness
+    rec = report.get("release_recommendation", {})
+    report["release_recommendation"] = _annotate_staleness(
+        rec, run.get("completed_at"), run.get("status", "unknown")
+    )
+
     events = await sqlite.list_run_health_events(run_id, limit=500)
     report["run_health"] = {
         "event_count": len(events),
@@ -34,7 +68,74 @@ async def get_test_results(run_id: str) -> dict:
         ]
     else:
         report["related_v2_resources"] = []
+
+    rec = report.get("release_recommendation", {})
+    decision = rec.get("decision", "INVESTIGATE")
+    run_status = report.get("status", "unknown")
+    if run_status in ("queued", "running"):
+        report["workflow_hint"] = (
+            f"Run still in progress. Poll: get_test_results(run_id='{run_id}')"
+        )
+    elif decision == "BLOCK":
+        report["workflow_hint"] = (
+            "Shipping blocked. Next: debug_test_case(run_id='...', case_id='...') "
+            "on the top failed case, then fix and re-run."
+        )
+    elif decision == "INVESTIGATE":
+        report["workflow_hint"] = (
+            "Review failures. For detailed evidence: debug_test_case(). "
+            "For trends: get_risk_analytics()."
+        )
+    else:
+        report["workflow_hint"] = (
+            "All flows passed. Safe to ship. Consider blop_v2_capture_context "
+            "to update your baseline before deploying."
+        )
+
     return report
+
+
+async def get_run_recommendation_resource(run_id: str) -> dict:
+    """Return just the release_recommendation for a run — lightweight polling target."""
+    run = await sqlite.get_run(run_id)
+    if not run:
+        return {"error": f"Run {run_id} not found"}
+
+    from blop.reporting.results import _compute_release_recommendation
+    from blop.schemas import FailureCase
+
+    cases = await sqlite.list_cases_for_run(run_id)
+    if not cases and run.get("cases"):
+        cases = [FailureCase(**c) for c in run["cases"]]
+
+    status = run.get("status", "unknown")
+    rec = _compute_release_recommendation(cases, status)
+
+    # Apply staleness check
+    import os
+    from datetime import datetime, timezone
+    stale_hours = int(os.getenv("BLOP_RECOMMENDATION_STALE_HOURS", "24"))
+    stale = False
+    completed_at = run.get("completed_at")
+    if completed_at and status in ("completed", "failed"):
+        try:
+            completed_dt = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+            if completed_dt.tzinfo is None:
+                completed_dt = completed_dt.replace(tzinfo=timezone.utc)
+            age_hours = (datetime.now(timezone.utc) - completed_dt).total_seconds() / 3600
+            stale = age_hours > stale_hours
+        except Exception:
+            pass
+    rec["stale"] = stale
+    if stale:
+        rec["stale_reason"] = f"Run completed more than {stale_hours}h ago. Re-run for a fresh recommendation."
+
+    return {
+        "run_id": run_id,
+        "status": status,
+        "completed_at": completed_at,
+        "release_recommendation": rec,
+    }
 
 
 async def list_runs(limit: int = 20, status: str | None = None) -> dict:
@@ -194,11 +295,30 @@ async def get_risk_analytics(limit_runs: int = 30) -> dict:
             "failure_rate": failure_rate,
         }
 
+    # Calibration summary: aggregate decision distribution across all analyzed runs
+    calibration_totals: dict[str, int] = {"SHIP": 0, "INVESTIGATE": 0, "BLOCK": 0}
+    app_urls = list({r.get("app_url", "") for r in runs if r.get("app_url")})
+    for url in app_urls:
+        records = await sqlite.list_risk_calibration(url, limit=limit_runs)
+        for rec in records:
+            d = rec.get("predicted_decision", "INVESTIGATE")
+            if d in calibration_totals:
+                calibration_totals[d] += 1
+    total_calibration = sum(calibration_totals.values())
+    calibration_summary = {
+        "total_predictions": total_calibration,
+        "decision_distribution": {
+            k: {"count": v, "rate": round(v / total_calibration, 4) if total_calibration else None}
+            for k, v in calibration_totals.items()
+        },
+    }
+
     return {
         "analyzed_runs": len(run_ids),
         "flaky_steps_leaderboard": flaky_leaderboard,
         "failing_transitions": transition_leaderboard,
         "business_risk": business_risk_summary,
+        "calibration_summary": calibration_summary,
         "related_v2_resources": [
             "blop://v2/contracts/tools",
         ],

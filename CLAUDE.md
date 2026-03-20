@@ -4,7 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**blop** is an AI-powered QA testing tool that uses Browser-Use agents (backed by Google Gemini, Anthropic, or OpenAI) to autonomously test web applications. It exposes 26 MCP tools (14 core v1 + 12 v2 surface tools) and 13 MCP resources via a FastMCP server that integrates with Cursor and Claude Code.
+**blop** is an MCP-native **release confidence control plane** for web applications. It combines Browser-Use execution (backed by Google Gemini, Anthropic, or OpenAI) with business-critical journey context, run evidence, and risk governance so teams can make reliable ship/no-ship decisions.
+
+It exposes 26 MCP tools (14 core v1 + 12 v2 surface tools) and 13 MCP resources via a FastMCP server that integrates with Cursor and Claude Code.
+
+### Product Thesis (internal shorthand)
+
+- Teams do not have a "generate more tests" problem; they have a **release confidence** problem.
+- Generic AI test runners optimize for action throughput; blop optimizes for **decision quality under uncertainty**.
+- The moat is persistent context + evidence + risk scoring + remediation/correlation workflows, not one-shot browser automation.
 
 ## Setup & Installation
 
@@ -43,11 +51,17 @@ python -m blop.server
 
 The MCP server config for Cursor is in `.cursor/mcp.json`.
 
+## Production baseline
+
+- Primary production transport is local managed `stdio` (client launches `blop-mcp`).
+- See `docs/production_setup.md` for hardening, runbook, and deployment templates.
+- Use `deploy/prod.env.template` as the config contract (absolute paths, capability profile, URL safety).
+
 ## Architecture
 
 All logic lives in `src/blop/`.
 
-The system follows a **discover → auth → record → run → results** pipeline:
+The system follows a **validate → contextualize → execute → decide** control-plane loop:
 
 1. **`server.py`** — FastMCP entry point exposing 26 tools and 13 resources. Suppresses all logging on import.
 
@@ -129,6 +143,6 @@ Screenshots, traces, and console logs are in `runs/<type>/<run_id>/`. SQLite DB 
 - All logging is suppressed on `config.py` import to prevent JSON-RPC interference.
 - `make_browser_profile()` supports optional `user_data_dir` for persistent context; otherwise disables user data dir and browser security features.
 - Default LLM: `gemini-2.5-flash` for agents and planning. Configurable via `BLOP_LLM_PROVIDER` (google/anthropic/openai) and `BLOP_LLM_MODEL`.
-- `run_regression_test` fires an `asyncio.create_task` and returns immediately — caller must poll `get_test_results`. Run status: `queued` → `running` → `completed` or `failed`; `waiting_auth` if auth profile cannot be resolved.
+- `run_regression_test` fires an `asyncio.create_task` and returns immediately — caller must poll `get_test_results`. Run status: `queued` → `running` → `completed`/`failed`/`cancelled`; `waiting_auth` if auth profile cannot be resolved.
 - `business_criticality` (revenue, activation, retention, support, other) is stored on flows and cases; classifier and reporting use it for severity labels (e.g. "BLOCKER in revenue flow").
 - Exploration profile defaults are configurable via `BLOP_EXPLORATION_PROFILE` (`default`/`saas_marketing`) with override knobs for network idle, SPA settle, agent retries, and crawl page limits.

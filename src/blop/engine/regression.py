@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 from blop.config import BLOP_AUTO_HEAL_MIN_CONFIDENCE as AUTO_HEAL_MIN_CONFIDENCE
 from blop.config import BLOP_AUTO_HEAL_MAX_BEHAVIOR_RISK as AUTO_HEAL_MAX_BEHAVIOR_RISK
+from blop.config import BLOP_STEP_TIMEOUT_SECS
 
 
 def _selector_entropy(selector: Optional[str]) -> float:
@@ -121,20 +122,36 @@ async def execute_recorded_flow(
             spa_hints = getattr(flow, "spa_hints", None)
 
             for step_idx, step in enumerate(flow.steps):
+                # Cooperative cancellation boundary between potentially long browser steps.
+                await asyncio.sleep(0)
                 if step.action == "assert":
                     deferred_asserts.append((step_idx, step))
                     continue
 
-                step_result = await _execute_single_step(
-                    page=page,
-                    step=step,
-                    step_idx=step_idx,
-                    run_id=run_id,
-                    case_id=case_id,
-                    run_mode=run_mode,
-                    trace=trace,
-                    spa_hints=spa_hints,
-                )
+                try:
+                    step_result = await asyncio.wait_for(
+                        _execute_single_step(
+                            page=page,
+                            step=step,
+                            step_idx=step_idx,
+                            run_id=run_id,
+                            case_id=case_id,
+                            run_mode=run_mode,
+                            trace=trace,
+                            spa_hints=spa_hints,
+                        ),
+                        timeout=float(BLOP_STEP_TIMEOUT_SECS),
+                    )
+                except asyncio.TimeoutError:
+                    step_result = ReplayStepResult(
+                        step_id=step.step_id,
+                        action=step.action,
+                        status="fail",
+                        replay_mode="step_timeout",
+                        error=f"Step exceeded BLOP_STEP_TIMEOUT_SECS={BLOP_STEP_TIMEOUT_SECS}",
+                        elapsed_ms=int(float(BLOP_STEP_TIMEOUT_SECS) * 1000),
+                        failure_reason="step_timeout",
+                    )
                 trace.step_results.append(step_result)
 
                 # Collect performance metrics after navigation steps
@@ -161,6 +178,7 @@ async def execute_recorded_flow(
 
             # Tiered assertion evaluation: deterministic first, vision batch for semantic only
             if deferred_asserts:
+                await asyncio.sleep(0)
                 assertion_eval_results = await _evaluate_assertions(page, deferred_asserts)
                 for result in assertion_eval_results:
                     step_obj = result["step"]
@@ -1066,18 +1084,8 @@ async def _goal_fallback(
 
     try:
         llm = make_agent_llm()
-        task = f"Navigate to {app_url} then: {flow.goal}"
-        # Append login hint so agent can authenticate if session cookies are stale
-        from blop.config import TEST_USERNAME, TEST_PASSWORD, LOGIN_URL, TEST_AUTH_URL
-        _username = TEST_USERNAME
-        _password = TEST_PASSWORD
-        _login_url = LOGIN_URL or TEST_AUTH_URL
-        if _username and _password and _login_url:
-            task += (
-                f"\n\nIf you encounter a login page, use these credentials: "
-                f"email={_username} password={_password} (login URL: {_login_url}). "
-                f"Do NOT create a new account — log in with the provided credentials."
-            )
+        from blop.engine.auth_prompt import append_runtime_auth_guidance
+        task = append_runtime_auth_guidance(f"Navigate to {app_url} then: {flow.goal}")
         from blop.engine.recording import SPA_AGENT_RULES
         _is_heavy = getattr(flow, "spa_hints", None) and getattr(flow.spa_hints, "is_editor_heavy", False)
         _system_msg = SPA_AGENT_RULES
@@ -1273,13 +1281,21 @@ async def run_flows(
     cases: list[FailureCase] = []
     for i, result in enumerate(results):
         if isinstance(result, Exception):
+            _log.debug(
+                "run_flows orchestration_error run_id=%s flow_id=%s error=%s",
+                run_id,
+                flows[i].flow_id if i < len(flows) else "unknown",
+                str(result),
+                exc_info=True,
+            )
             cases.append(FailureCase(
                 run_id=run_id,
                 flow_id=flows[i].flow_id if i < len(flows) else "unknown",
                 flow_name=flows[i].flow_name if i < len(flows) else "unknown",
                 status="error",
                 raw_result=str(result),
-                replay_mode="goal_fallback",
+                replay_mode="orchestration_error",
+                failure_reason_codes=["orchestration_error"],
             ))
         else:
             cases.append(result)

@@ -1,19 +1,80 @@
-# blop — AI-Powered QA Testing for Your Web App
+# blop — The MCP-Native Release Confidence Control Plane
 
-**blop** lets you test any web application by just describing what you want to test in plain English. It opens a real browser, clicks through your app like a human would, and tells you what's broken — complete with screenshots, severity labels, and suggested fixes.
+Most AI testing tools can click through pages. Teams still do not know whether they should ship.
 
-You don't write test code. You just talk to it.
+**blop** turns browser execution into **release decisions** by combining business-critical journey context, evidence-heavy QA runs, and risk governance in one MCP-native control plane.
+
+You do not write test code. You ask in chat, then ship with auditable evidence, prioritized risk, and a clear go/no-go recommendation.
+
+Compatible MCP clients: **Cursor**, **Claude Code**, and other clients that support MCP tool/resource workflows.
+
+## Quick Navigation
+
+- [Product thesis](#product-thesis)
+- [What it actually does](#what-does-it-actually-do)
+- [Why blop vs generic AI testing agents](#why-blop-vs-generic-ai-testing-agents)
+- [Before you start](#before-you-start--what-youll-need)
+- [Install](#installation--step-by-step)
+- [Configure and connect](#configure-and-connect-blop)
+- [Production setup](#production-setup-local-managed-stdio)
+- [5-minute quickstart](#your-first-mcp-native-run-in-5-minutes)
+- [Business-context QA scenarios](#real-world-testing-scenarios-for-b2b-saas)
+- [MCP resources + v2 surface](#mcp-resources--v2-surface-summary)
+- [Troubleshooting](#troubleshooting)
+- [Full tool reference](#full-tool-reference)
+
+---
+
+## Product thesis
+
+- **Core belief:** teams do not have a "generate more tests" problem; they have a **release confidence** problem.
+- **What competitors miss:** bug detection without business weighting creates noisy output and weak ship/no-ship decisions.
+- **What blop uniquely does:** connect context graphs, regression evidence, incident patterns, and telemetry into a single risk narrative that leaders can act on.
 
 ---
 
 ## What does it actually do?
 
-1. **Discovers** your app's key flows by crawling it (login, pricing, contact, checkout, etc.)
-2. **Records** those flows by watching an AI agent use your app
-3. **Replays** them on demand to catch regressions
-4. **Reports** exactly what broke, how severe it is, and what to fix
+1. **Captures context** with inventory + graph resources agents can read cheaply
+2. **Discovers and records** business-critical flows from that context
+3. **Replays** flows asynchronously to catch regressions before release
+4. **Correlates evidence** across screenshots, traces, run health, and telemetry signals
+5. **Scores risk** so teams can prioritize or gate releases with confidence
 
 It plugs into **Cursor** or **Claude Code** as an MCP tool — meaning you just ask it to run tests in a chat window, the same way you'd ask a colleague.
+
+### Who this helps
+
+- **QA + developers:** quickly discover, record, and replay business-critical flows with deterministic evidence.
+- **Engineering managers:** tie regressions to business impact with release-risk scoring, clusters, and remediation guidance.
+
+### Trust and operations at a glance
+
+- **Read-only context:** resources (`blop://...`) are for low-token retrieval and planning.
+- **Action tools:** tools execute browser actions, replays, recording, and risk analysis.
+- **Artifact storage:** runs, screenshots, traces, and logs are persisted locally (`.blop/` and `runs/`).
+- **Auth behavior:** auth sessions are cached and validated; expired sessions are surfaced before critical runs.
+
+---
+
+## Why blop vs generic AI testing agents?
+
+Generic browser agents optimize for test execution throughput. blop optimizes for decision quality under uncertainty.
+
+| Dimension | Generic AI browser runner | blop MCP-native approach |
+|-----------|---------------------------|---------------------------|
+| Output shape | Mostly conversational text | Structured contracts + typed envelopes via `blop_v2_get_surface_contract` and v2 resources |
+| Context handling | Re-run flows to recover context | Read `blop://...` resources first (`inventory`, `context-graph`, `artifact-index`, `stability-profile`) |
+| Ops model | One-shot execution focus | Async run lifecycle with health stream, run states, and artifact indexing |
+| Release decisions | Manual interpretation | Risk scoring, incident clustering, remediation drafts, telemetry correlation |
+| Client portability | Tooling-specific patterns | Standard MCP tool/resource model across Cursor, Claude Code, and compatible clients |
+
+Proof points in implementation:
+- Contract definitions and stable resource envelope in `src/blop/tools/v2_surface.py`
+- Correlation/risk persistence in `src/blop/storage/sqlite.py`
+- Structured run reporting in `src/blop/reporting/results.py`
+
+If your release process needs a deterministic answer to "can we ship this safely?", blop is purpose-built for that question.
 
 ---
 
@@ -25,6 +86,7 @@ It plugs into **Cursor** or **Claude Code** as an MCP tool — meaning you just 
 | `uv` (fast Python installer) | Run `curl -LsSf https://astral.sh/uv/install.sh \| sh` in Terminal | 1 min |
 | Google API key (free tier works) | [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey) | 2 min |
 | Cursor or Claude Code | [cursor.com](https://cursor.com) or `npm i -g @anthropic-ai/claude-code` | 5 min |
+| Chromium runtime | Installed by `playwright install chromium --with-deps --no-shell` | 2-5 min |
 
 ---
 
@@ -50,7 +112,9 @@ You should see no errors. If you do, check the [Troubleshooting](#troubleshootin
 
 ---
 
-## Configure your credentials
+## Configure and connect blop
+
+### 1) Configure credentials
 
 Copy the example config file and fill it in:
 
@@ -75,9 +139,7 @@ TEST_PASSWORD=your_password
 
 Everything else can stay as-is.
 
----
-
-## Connect blop to your IDE
+### 2) Connect to your IDE
 
 ### Cursor
 
@@ -122,25 +184,233 @@ Type `/mcp` in Claude Code to verify — you should see `blop: connected`.
 
 ---
 
-## Your first test in 5 minutes
+## Production setup (local managed stdio)
+
+blop production is optimized for a **client-managed `stdio` MCP process** (Cursor/Claude launching `blop-mcp`), with strict runtime/path validation and least-privilege tool exposure.
+
+- Full guide: [`docs/production_setup.md`](docs/production_setup.md)
+- Production env template: [`deploy/prod.env.template`](deploy/prod.env.template)
+- Optional SSE sidecar systemd unit: [`deploy/systemd/blop-http.service`](deploy/systemd/blop-http.service)
+- Optional container baseline: [`deploy/docker/Dockerfile`](deploy/docker/Dockerfile)
+
+Recommended production posture:
+
+- `BLOP_ENV=production`
+- `BLOP_REQUIRE_ABSOLUTE_PATHS=true`
+- absolute `BLOP_DB_PATH`, `BLOP_RUNS_DIR`, and `BLOP_DEBUG_LOG`
+- `BLOP_ALLOW_INTERNAL_URLS=false` (default-safe URL policy)
+- `BLOP_CAPABILITIES_PROFILE=production_minimal`
+- `BLOP_ENABLE_COMPAT_TOOLS=false` unless explicitly required
+
+---
+
+## Your first MCP-native run in 5 minutes
 
 Open a chat window in Cursor or Claude Code and paste this (swap in your app URL):
 
 ```
 Use blop to test https://your-app.com
 
-1. Optionally call validate_setup(app_url="https://your-app.com") to confirm the environment is ready
-2. Call explore_site_inventory to map the interface first (routes/forms/buttons + compact page structure)
-3. Call discover_test_flows to find what flows exist on the site
-4. Run a regression test on all of them
-5. Poll get_test_results until status is "completed", then show me the results with severity levels
+1. Call validate_release_setup(app_url="https://your-app.com") and stop if status is "blocked"
+2. Call discover_critical_journeys(app_url="https://your-app.com") to find the release-gating journeys
+3. Read blop://journeys and pick the journey_ids or flow_ids that matter for this release
+4. Call run_release_check(app_url="https://your-app.com", journey_ids=[...]) or omit journey_ids to use the default revenue/activation scope
+5. If the run is queued, poll get_test_results(run_id="...") until status is terminal
+6. Read blop://release/{release_id}/brief and blop://release/{release_id}/artifacts
+7. If the decision is not SHIP, call triage_release_blocker(run_id="...") and summarize blockers, evidence, and next actions
 ```
 
-That's it. blop will crawl the site, record the flows, run the tests, and report back — all without you writing a single line of test code.
+That is the canonical MVP loop: validate, discover, decide, and triage.
+
+## Control-plane workflow (business context + QA)
+
+1. **Preflight:** confirm readiness with `validate_release_setup`.
+2. **Discover:** identify release-gating paths with `discover_critical_journeys`.
+3. **Execute:** run `run_release_check` in replay or targeted mode.
+4. **Triage:** use `triage_release_blocker` plus `blop://release/*` resources to turn failures into decisions.
+
+### Release Readiness Brief (recommended output)
+
+For each candidate release, summarize:
+
+- Decision: **ship** or **hold**
+- Risk level and score (from run outcomes + criticality weighting)
+- Top 3 risks with direct evidence paths
+- Immediate mitigation actions and target owner(s)
 
 ---
 
-## MCP tools — explained in plain English
+## Playwright-MCP compatible mode
+
+blop now includes an additive compatibility layer for prompt portability across MCP clients
+that expect Playwright-style `browser_*` tools (Cursor, Claude, Codex, Copilot, Windsurf, etc.).
+
+Enable it by adding `compat_browser` to capabilities:
+
+```bash
+export BLOP_CAPABILITIES=core,auth,debug,compat_browser
+```
+
+Optional compatibility env vars:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `BLOP_COMPAT_OUTPUT_DIR` | `.playwright-mcp` | Where compatibility artifacts (snapshots/screenshots/storage-state files) are written |
+| `BLOP_COMPAT_HEADLESS` | `true` | Run compatibility browser session headless or headed |
+| `BLOP_COMPAT_TEST_ID_ATTRIBUTE` | `data-testid` | Preferred test id attribute used when building element selectors |
+| `BLOP_COMPAT_SNAPSHOT_MODE` | `incremental` | Snapshot mode hint for compatibility workflows |
+
+Typical interop flow:
+
+1. `browser_navigate(url=...)`
+2. `browser_snapshot()` to obtain `ref` handles
+3. `browser_click(ref=...)` / `browser_type(ref=..., text=...)`
+4. `browser_tabs(action="list"|"new"|"select")`
+5. `browser_console_messages(...)`, `browser_network_requests(...)`
+6. `browser_close()`
+
+Auth bridge behavior:
+
+- If a `profile_name` is passed to `browser_navigate`, blop resolves that saved auth profile first.
+- If no profile is provided, compatibility mode falls back to env-driven auth state resolution.
+- This keeps compatibility tools aligned with existing blop auth workflows (`save_auth_profile`, `capture_auth_session`).
+- `browser_*` cookie/state/route tools act on the shared compat session only; use `get_browser_cookies`, `set_browser_cookie`, `save_browser_state`, and `mock_network_route` when you want URL-scoped storage operations or regression-run mocks.
+
+Tool confusion matrix (use this / not that):
+
+| If you want to... | Use this | Not that | Why |
+|-------------------|----------|----------|-----|
+| Inspect cookies for a specific URL/profile | `get_browser_cookies(app_url, profile_name?)` | `browser_cookie_list()` | `get_browser_cookies` is URL-scoped and runs in an ephemeral context; `browser_cookie_list` reads the shared compat session. |
+| Set a cookie for URL-scoped auth state | `set_browser_cookie(app_url, ...)` | `browser_cookie_set(...)` | `set_browser_cookie` persists URL/profile state for blop auth flows; `browser_cookie_set` mutates only the shared compat session. |
+| Save URL/profile storage state to disk | `save_browser_state(app_url, ...)` | `browser_storage_state(...)` | `save_browser_state` captures URL-scoped state; `browser_storage_state` exports the current shared compat session. |
+| Mock APIs during regression replay runs | `mock_network_route(...)` | `browser_route(...)` | `mock_network_route` applies during regression execution; `browser_route` only affects the shared compat browser session. |
+| Capture one-off exploratory QA output | `evaluate_web_task(...)` | `record_test_flow(...)` | `evaluate_web_task` returns immediate report output for one-off checks (see [full reference](#evaluate-web-task)); `record_test_flow` creates reusable flow artifacts for regression. |
+| Create reusable regression flow IDs | `record_test_flow(...)` | `evaluate_web_task(...)` | `record_test_flow` is the source of reusable `flow_id` values consumed by `run_regression_test`. |
+| Inspect page interaction structure from crawling context | `get_page_structure(app_url, url?)` | `browser_snapshot(...)` | `get_page_structure` is crawl/discovery-oriented; `browser_snapshot` is for current shared compat session state. |
+| Start/stop the long-lived compat browser interaction loop | `browser_navigate(...)`, `browser_snapshot(...)`, `browser_click(...)` | `discover_test_flows(...)` | `browser_*` tools are imperative session controls; `discover_test_flows` is planning/crawl output, not interactive control. |
+
+---
+
+## Real-world testing scenarios for B2B SaaS
+
+### Scenario 1 — New app, zero knowledge
+
+```
+Use blop to discover and test https://new-saas-app.com from scratch.
+
+1. Call discover_test_flows with business_goal="Find all revenue-critical flows including signup, checkout, and onboarding"
+2. Record the top 5 suggested flows by calling `record_test_flow` for each one
+3. Run regression on all of them
+4. Show me anything with severity "high" or "blocker"
+```
+
+### Scenario 2 — Before a release
+
+```
+We're about to ship a new version. Use blop to run a pre-release check on https://staging.myapp.com:
+
+1. list_recorded_tests — show what flows we have
+2. run_regression_test on all flows against staging
+3. get_test_results — compare pass/fail to last run
+4. debug_test_case on anything that changed from pass to fail
+```
+
+### Scenario 3 — Test the full authenticated product
+
+```
+Test the authenticated product experience on https://app.myapp.com:
+
+1. save_auth_profile("prod-user", "env_login", login_url="https://app.myapp.com/login")
+2. record_test_flow for: dashboard load, core feature (e.g. "create new project"), settings page, and billing/upgrade flow
+3. run_regression_test with profile_name="prod-user"
+4. get_test_results — show me the full breakdown
+```
+
+### Scenario 4 — Investigate a specific bug report
+
+```
+A user reported the checkout button isn't working. Use blop to investigate:
+
+1. record_test_flow("https://myapp.com", "checkout_bug", "Navigate to pricing, click the Pro plan CTA, and verify checkout loads")
+2. run_regression_test on that flow
+3. get_test_results — check step_failure_index and assertion_failures
+4. debug_test_case on the failure to get screenshots and a plain-English explanation
+```
+
+### Scenario 5 — Auth-gated flows with SSO
+
+**Option A — Interactive capture (recommended):** Use `capture_auth_session` so blop opens a browser and you log in once; it saves the session and creates the profile automatically.
+
+```
+capture_auth_session(
+  profile_name="sso-session",
+  login_url="https://your-app.com/login",
+  success_url_pattern="/dashboard",
+  timeout_secs=120
+)
+```
+
+For providers (e.g. Google, LinkedIn) that block "headless" or fresh contexts, use a persistent profile:
+
+```
+capture_auth_session(
+  profile_name="sso-session",
+  login_url="https://your-app.com/login",
+  success_url_pattern="/dashboard",
+  user_data_dir=".blop/chrome_profile_myapp"
+)
+```
+
+**Option B — Manual export:** Log in manually, export the session (e.g. Playwright or Chrome DevTools -> Application -> Storage), then:
+
+```
+save_auth_profile(
+  profile_name="sso-session",
+  auth_type="storage_state",
+  storage_state_path="/path/to/my-session.json"
+)
+```
+
+---
+
+## MCP resources + v2 surface summary
+
+Use resources for cheap context retrieval before action:
+
+- `blop://inventory/{app}`
+- `blop://context-graph/{app}`
+- `blop://run/{run_id}/artifact-index`
+- `blop://flow/{flow_id}/stability-profile`
+
+Use v2 for release-level governance:
+
+- contracts: `blop_v2_get_surface_contract`
+- release risk: `blop_v2_assess_release_risk`
+- journey health: `blop_v2_get_journey_health`
+- incidents/remediation: `blop_v2_cluster_incidents`, `blop_v2_generate_remediation`
+- telemetry correlation: `blop_v2_get_correlation_report`
+
+Detailed resources and v2 references are provided below in the full reference sections.
+
+---
+
+## Full tool reference
+
+Recommended order for reliable MCP workflows:
+
+1. **Preflight and contract**
+   - `validate_setup`
+   - `blop_v2_get_surface_contract`
+2. **Context before action**
+   - `explore_site_inventory`, `get_page_structure`
+   - read `blop://inventory/...`, `blop://context-graph/...`
+3. **Execution**
+   - `discover_test_flows`, `record_test_flow`, `run_regression_test`
+4. **Observability and governance**
+   - `get_run_health_stream`, `get_test_results`, `get_risk_analytics`
+   - v2: release risk, journey health, incident clustering, remediation, correlation
+
+Detailed tool behavior is below.
 
 ### 1. `discover_test_flows` — *"What should I test?"*
 
@@ -295,9 +565,77 @@ capture_auth_session(
 
 ---
 
+<a id="evaluate-web-task"></a>
+### `evaluate_web_task` — *"Run one exploratory task and get a full report now"*
+
+Runs a one-shot browser agent evaluation and returns results immediately in the same call. Use this for exploratory QA checks, quick validation, and ad-hoc investigation. If you want a reusable regression artifact (`flow_id`) for later replay, use `record_test_flow` instead.
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `app_url` | `str` | required | Base URL to test. |
+| `task` | `str` | required | Natural-language objective for the agent. |
+| `profile_name` | `str \| null` | `null` | Optional saved auth profile to run as a logged-in user. |
+| `headless` | `bool` | `false` | Run browser headless or visible. |
+| `max_steps` | `int` | `25` | Agent action budget before termination. |
+| `capture` | `list[str] \| null` | `["screenshots","console","network","trace"]` | Evidence channels to persist (`screenshots`, `console`, `network`, `trace`). Invalid values are ignored. |
+| `format` | `str` | `"markdown"` | Output format: `markdown`, `text`, or `json`. |
+| `save_as_recorded_flow` | `bool` | `false` | Whether to promote successful agent actions into a saved `RecordedFlow`. |
+| `flow_name` | `str \| null` | `null` | Optional flow name when `save_as_recorded_flow=true`. |
+
+**Return schema (high level):**
+
+- `status`: `"completed"` on normal completion, otherwise error status.
+- `success`: boolean pass/fail signal from evaluation outcome.
+- `pass_fail`: normalized result (`pass`, `fail`, or `error`).
+- `metrics`: execution stats such as elapsed time and step counts.
+- `agent_steps`: normalized step summaries (`step`, `action`, `description`).
+- `evidence`: logs/artifacts (`console_errors`, `network_failures`, screenshots, trace paths when captured).
+- `error`: populated when input validation/auth/bootstrap/agent execution fails.
+- `report`: formatted text/markdown block when `format` requests human-readable output.
+
+**Side effects:**
+
+- Writes run artifacts to local storage (`runs/...`) when evidence capture is enabled.
+- Persists run metadata and health events in the local SQLite store.
+- Optionally creates and saves a reusable recorded flow when `save_as_recorded_flow=true`.
+
+**Example call:**
+```python
+evaluate_web_task(
+  app_url="https://your-app.com",
+  task="Open pricing, click Pro plan CTA, and verify checkout loads",
+  profile_name="my-app-login",
+  max_steps=30,
+  capture=["screenshots", "console", "network"],
+  format="json"
+)
+```
+
+**Example output (abridged):**
+```json
+{
+  "status": "completed",
+  "success": true,
+  "pass_fail": "pass",
+  "metrics": {"elapsed_secs": 18.4, "steps_taken": 9},
+  "agent_steps": [
+    {"step": 1, "action": "navigate", "description": "Navigate -> https://your-app.com/pricing"},
+    {"step": 2, "action": "click_element", "description": "Click element (index 4)"}
+  ],
+  "evidence": {"console_errors": [], "network_failures": [], "screenshots": ["..."]},
+  "error": null
+}
+```
+
+---
+
 ### 6. `record_test_flow` — *"Watch and learn this flow"*
 
 Runs an AI agent in a real browser to accomplish a goal, and saves every step it takes. You can then replay this recording as many times as you want.
+
+Use `record_test_flow` when you want a reusable regression artifact (`flow_id`). For one-off exploratory checks, use [`evaluate_web_task`](#evaluate-web-task).
 
 **Basic usage:**
 ```
@@ -339,7 +677,9 @@ record_test_flow(
 
 ### 7. `run_regression_test` — *"Check if everything still works"*
 
-Replays recorded flows against your app. Returns immediately with a `run_id` — poll for results with `get_test_results`. Run status moves: `queued` → `running` → `completed` or `failed`. If the auth profile cannot be resolved, status is `waiting_auth` and no flows run until you fix the profile and retry.
+Replays recorded flows against your app. Returns immediately with a `run_id` — poll for results with `get_test_results`. Run status moves: `queued` → `running` → (`completed` | `failed` | `cancelled`). If the auth profile cannot be resolved, status is `waiting_auth` and no flows run until you fix the profile and retry.
+
+`flow_ids` must come from `record_test_flow` (or `list_recorded_tests`) and all IDs must be valid for the run to start.
 
 **Basic usage:**
 ```
@@ -371,7 +711,7 @@ run_regression_test(
 
 ### 8. `get_test_results` — *"What broke?"*
 
-Polls a running test and returns structured results. Call it repeatedly until `status` is `"completed"`, `"failed"`, or `"waiting_auth"`. When status is `waiting_auth`, the response includes `waiting_auth_message` explaining that the auth profile could not be resolved (check credentials or re-run `capture_auth_session` if the session expired).
+Polls a running test and returns structured results. Call it repeatedly every 2-5 seconds until `status` is `"completed"`, `"failed"`, `"cancelled"`, or `"waiting_auth"`. When status is `waiting_auth`, the response includes `waiting_auth_message` explaining that the auth profile could not be resolved (check credentials or re-run `capture_auth_session` if the session expired).
 
 ```
 get_test_results("your-run-id-here")
@@ -599,88 +939,6 @@ blop v2 expands beyond regression execution into **change intelligence**, **jour
 
 ---
 
-## Real-world testing scenarios for B2B SaaS
-
-### Scenario 1 — New app, zero knowledge
-
-```
-Use blop to discover and test https://new-saas-app.com from scratch.
-
-1. Call discover_test_flows with business_goal="Find all revenue-critical flows including signup, checkout, and onboarding"
-2. Record the top 5 flows it finds
-3. Run regression on all of them
-4. Show me anything with severity "high" or "blocker"
-```
-
-### Scenario 2 — Before a release
-
-```
-We're about to ship a new version. Use blop to run a pre-release check on https://staging.myapp.com:
-
-1. list_recorded_tests — show what flows we have
-2. run_regression_test on all flows against staging
-3. get_test_results — compare pass/fail to last run
-4. debug_test_case on anything that changed from pass to fail
-```
-
-### Scenario 3 — Test the full authenticated product
-
-```
-Test the authenticated product experience on https://app.myapp.com:
-
-1. save_auth_profile("prod-user", "env_login", login_url="https://app.myapp.com/login")
-2. record_test_flow for: dashboard load, core feature (e.g. "create new project"), settings page, and billing/upgrade flow
-3. run_regression_test with profile_name="prod-user"
-4. get_test_results — show me the full breakdown
-```
-
-### Scenario 4 — Investigate a specific bug report
-
-```
-A user reported the checkout button isn't working. Use blop to investigate:
-
-1. record_test_flow("https://myapp.com", "checkout_bug", "Navigate to pricing, click the Pro plan CTA, and verify checkout loads")
-2. run_regression_test on that flow
-3. get_test_results — check step_failure_index and assertion_failures
-4. debug_test_case on the failure to get screenshots and a plain-English explanation
-```
-
-### Scenario 5 — Auth-gated flows with SSO
-
-**Option A — Interactive capture (recommended):** Use `capture_auth_session` so blop opens a browser and you log in once; it saves the session and creates the profile automatically.
-
-```
-capture_auth_session(
-  profile_name="sso-session",
-  login_url="https://your-app.com/login",
-  success_url_pattern="/dashboard",
-  timeout_secs=120
-)
-```
-
-For providers (e.g. Google, LinkedIn) that block "headless" or fresh contexts, use a persistent profile:
-
-```
-capture_auth_session(
-  profile_name="sso-session",
-  login_url="https://your-app.com/login",
-  success_url_pattern="/dashboard",
-  user_data_dir=".blop/chrome_profile_myapp"
-)
-```
-
-**Option B — Manual export:** Log in manually, export the session (e.g. Playwright or Chrome DevTools → Application → Storage), then:
-
-```
-save_auth_profile(
-  profile_name="sso-session",
-  auth_type="storage_state",
-  storage_state_path="/path/to/my-session.json"
-)
-```
-
----
-
 ## How auth profiles work
 
 ```
@@ -774,19 +1032,6 @@ Design baseline references:
 
 ---
 
-## Rendley validation matrix
-
-Use this quick matrix to validate that the architecture stays generic while working well for Rendley-like products:
-
-1. `validate_setup(app_url="https://rendley.com")`
-2. `explore_site_inventory(app_url="https://rendley.com", max_pages=20, include_url_pattern="/(pricing|tools|start|create)")`
-3. `discover_test_flows(app_url="https://rendley.com", max_pages=20, return_inventory=true, business_goal="prioritize onboarding, video creation, and pricing conversion")`
-4. Record 3-5 flow families (landing conversion, onboarding/auth handoff, project/workspace actions, pricing/plan gating).
-5. Run one `hybrid` replay, one strict replay (`strict_steps`), and one fallback replay (`goal_fallback`) to verify graceful degradation.
-6. Use `list_runs(status="running")` + `get_test_results(run_id=...)` and verify failure class + next actions are actionable.
-
----
-
 ## Environment variables — full reference
 
 | Variable | Required | Default | What it does |
@@ -804,21 +1049,21 @@ Use this quick matrix to validate that the architecture stays generic while work
 | `BLOP_HEADLESS` | No | `true` | `false` = show browser window during tests (useful for debugging) |
 | `BLOP_MAX_STEPS` | No | `50` | Max steps the AI agent takes per flow |
 | `BLOP_ALLOW_SCREENSHOT_LLM` | No | `false` | Privacy guard for visual-regression triage. When `false`, baseline/current screenshots are never base64-encoded or sent to external LLMs. |
+| `BLOP_ENV` | No | `development` | Environment mode (`production` enables stricter validation expectations) |
+| `BLOP_REQUIRE_ABSOLUTE_PATHS` | No | `false` (`true` in production recommended) | Require absolute paths for DB/runs/log values |
+| `BLOP_ALLOW_INTERNAL_URLS` | No | `false` | Block private/internal app URLs unless explicitly enabled |
+| `BLOP_ALLOWED_HOSTS` | No | — | Optional host allowlist for `app_url` validation |
+| `BLOP_RUN_TIMEOUT_SECS` | No | `0` | Total run timeout in seconds (`0` disables timeout) |
+| `BLOP_STEP_TIMEOUT_SECS` | No | `45` | Per-step replay timeout in seconds |
+| `BLOP_DEBUG_LOG` | No | `.blop/blop.log` | JSON log destination path |
+| `BLOP_CAPABILITIES_PROFILE` | No | env-dependent | Predefined capability profile (`production_minimal`, `production_debug`, `full`) |
+| `BLOP_ENABLE_COMPAT_TOOLS` | No | `false` | Registers legacy/compat MCP tool surface when `true` |
 | `BLOP_EXPLORATION_PROFILE` | No | `default` | Tuning preset (`default` or `saas_marketing`) for discovery and replay behavior |
 | `BLOP_DISCOVERY_MAX_PAGES` | No | profile-driven | Default crawl page cap for discovery tools |
 | `BLOP_AGENT_MAX_FAILURES` | No | profile-driven | Max recoverable action failures before agent aborts recording |
 | `BLOP_AGENT_MAX_ACTIONS_PER_STEP` | No | profile-driven | Max agent actions per reasoning step during recording |
 | `BLOP_NETWORK_IDLE_WAIT` | No | `2.0` | Seconds to wait for network idle after page load (increase for WebGL/WASM or slow dashboards) |
 | `BLOP_SPA_SETTLE_MS` | No | `1500` | Extra settle time in ms after SPA navigation (for pushState / client-side routing) |
-
----
-
-## Requirements
-
-- Python 3.11+
-- Google API key with Gemini access (free tier works)
-- Cursor or Claude Code with MCP support
-- macOS, Linux, or Windows with WSL2
 
 ---
 

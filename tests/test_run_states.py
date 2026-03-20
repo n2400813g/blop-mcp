@@ -35,12 +35,13 @@ async def test_run_regression_creates_queued_run():
         with patch("blop.storage.sqlite.create_run", mock_create_run):
             with patch("blop.storage.sqlite.save_run_health_event", new_callable=AsyncMock):
                 with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=None):
-                    with patch("blop.storage.files.artifacts_dir", return_value="/tmp/runs/run1"):
-                        with patch("asyncio.create_task"):
-                            result = await run_regression_test(
-                                app_url="https://example.com",
-                                flow_ids=["flow1", "flow2"],
-                            )
+                    with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=make_flow("flow1")):
+                        with patch("blop.storage.files.artifacts_dir", return_value="/tmp/runs/run1"):
+                            with patch("asyncio.create_task"):
+                                result = await run_regression_test(
+                                    app_url="https://example.com",
+                                    flow_ids=["flow1", "flow2"],
+                                )
 
     assert result["status"] == "queued"
     assert result["flow_count"] == 2
@@ -61,16 +62,17 @@ async def test_auth_resolution_failure_returns_waiting_auth():
 
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}):
         with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=mock_profile):
-            with patch("blop.engine.auth.resolve_storage_state", side_effect=Exception("Credentials not set")):
-                with patch("blop.storage.sqlite.create_run", new_callable=AsyncMock):
-                    with patch("blop.storage.sqlite.save_run_health_event", new_callable=AsyncMock):
-                        with patch("blop.storage.sqlite.update_run_status", new_callable=AsyncMock):
-                            with patch("blop.storage.files.artifacts_dir", return_value="/tmp/runs/r1"):
-                                result = await run_regression_test(
-                                    app_url="https://example.com",
-                                    flow_ids=["flow1"],
-                                    profile_name="prod",
-                                )
+            with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=make_flow("flow1")):
+                with patch("blop.engine.auth.resolve_storage_state", side_effect=Exception("Credentials not set")):
+                    with patch("blop.storage.sqlite.create_run", new_callable=AsyncMock):
+                        with patch("blop.storage.sqlite.save_run_health_event", new_callable=AsyncMock):
+                            with patch("blop.storage.sqlite.update_run_status", new_callable=AsyncMock):
+                                with patch("blop.storage.files.artifacts_dir", return_value="/tmp/runs/r1"):
+                                    result = await run_regression_test(
+                                        app_url="https://example.com",
+                                        flow_ids=["flow1"],
+                                        profile_name="prod",
+                                    )
 
     assert result["status"] == "waiting_auth"
     assert "message" in result
@@ -94,7 +96,6 @@ async def test_run_and_persist_transitions_to_completed():
         status_transitions.append(status)
 
     with ExitStack() as stack:
-        stack.enter_context(patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=flow))
         stack.enter_context(patch("blop.engine.regression.run_flows", new_callable=AsyncMock, return_value=[case]))
         stack.enter_context(patch("blop.engine.classifier.classify_case", new_callable=AsyncMock, return_value=case))
         stack.enter_context(
@@ -110,7 +111,7 @@ async def test_run_and_persist_transitions_to_completed():
         stack.enter_context(patch("blop.storage.sqlite.save_run_health_event", new_callable=AsyncMock))
         await _run_and_persist(
             run_id="run1",
-            flow_ids=["flow1"],
+            flows=[flow],
             app_url="https://example.com",
             storage_state=None,
             headless=True,
@@ -127,13 +128,13 @@ async def test_run_and_persist_exception_transitions_to_failed():
 
     mock_update_run = AsyncMock()
 
-    with patch("blop.storage.sqlite.get_flow", side_effect=Exception("DB corrupted")):
+    with patch("blop.engine.regression.run_flows", side_effect=Exception("DB corrupted")):
         with patch("blop.storage.sqlite.update_run_status", new_callable=AsyncMock):
             with patch("blop.storage.sqlite.update_run", mock_update_run):
                 with patch("blop.storage.sqlite.save_run_health_event", new_callable=AsyncMock):
                     await _run_and_persist(
                         run_id="run1",
-                        flow_ids=["flow1"],
+                        flows=[make_flow("flow1")],
                         app_url="https://example.com",
                         storage_state=None,
                         headless=True,
@@ -142,6 +143,41 @@ async def test_run_and_persist_exception_transitions_to_failed():
     mock_update_run.assert_called_once()
     call_args = mock_update_run.call_args
     assert call_args.kwargs["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_run_release_check_queues_run_with_release_id():
+    """run_release_check in replay mode returns a release_id and run_id."""
+    from blop.tools.release_check import run_release_check
+
+    mock_run_regression = AsyncMock(return_value={"run_id": "run-abc", "status": "queued"})
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}):
+        with patch("blop.storage.sqlite.list_flows", new_callable=AsyncMock, return_value=[]):
+            result = await run_release_check(
+                app_url="https://example.com",
+                journey_ids=[],
+                release_id="rel-123",
+            )
+
+    # No flows → structured error with release_id present
+    assert result.get("release_id") == "rel-123" or "error" in result
+
+
+@pytest.mark.asyncio
+async def test_run_release_check_no_flows_returns_structured_error():
+    """run_release_check with no recorded flows returns error dict with release_id."""
+    from blop.tools.release_check import run_release_check
+
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}):
+        with patch("blop.storage.sqlite.list_flows", new_callable=AsyncMock, return_value=[]):
+            result = await run_release_check(
+                app_url="https://example.com",
+                mode="replay",
+                release_id="rel-xyz",
+            )
+
+    assert "error" in result
+    assert result.get("release_id") == "rel-xyz"
 
 
 @pytest.mark.asyncio

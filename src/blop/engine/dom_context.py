@@ -5,12 +5,13 @@ Verification mode: Include up to 150 static elements (text, headings, images) fo
 """
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Literal, Optional
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
 
-from blop.engine.dom_utils import INTERACTIVE_ROLES
+from blop.engine.dom_utils import INTERACTIVE_ROLES, extract_nodes_flat
 
 
 STATIC_ROLES = frozenset({
@@ -18,6 +19,8 @@ STATIC_ROLES = frozenset({
     "listitem", "status", "alert", "tooltip", "dialog",
     "banner", "navigation", "main", "contentinfo",
 })
+
+logger = logging.getLogger(__name__)
 
 
 async def capture_dom_context(
@@ -38,13 +41,27 @@ async def capture_dom_context(
                 snapshot = None
         if snapshot and isinstance(snapshot, dict):
             if mode == "action":
-                nodes = _extract_nodes(snapshot, INTERACTIVE_ROLES, max_interactive)
+                nodes = extract_nodes_flat(
+                    snapshot,
+                    allowed_roles=INTERACTIVE_ROLES,
+                    max_nodes=max_interactive,
+                    require_name=True,
+                    include_value=False,
+                    include_level=False,
+                )
             else:
-                nodes = _extract_nodes(snapshot, INTERACTIVE_ROLES | STATIC_ROLES, max_nodes)
+                nodes = extract_nodes_flat(
+                    snapshot,
+                    allowed_roles=INTERACTIVE_ROLES | STATIC_ROLES,
+                    max_nodes=max_nodes,
+                    require_name=False,
+                    include_value=True,
+                    include_level=True,
+                )
             if nodes:
                 return nodes
     except Exception:
-        pass
+        logger.debug("Accessibility snapshot capture failed; falling back to DOM extraction.", exc_info=True)
 
     # DOM fallback: compute effective roles from HTML semantics
     try:
@@ -86,39 +103,3 @@ async def capture_dom_context(
         return dom_nodes or []
     except Exception:
         return []
-
-
-def _extract_nodes(
-    node: dict,
-    allowed_roles: frozenset[str],
-    max_nodes: int,
-    _count: Optional[list[int]] = None,
-) -> list[dict]:
-    """Flatten an ARIA tree, extracting nodes whose role is in allowed_roles."""
-    if _count is None:
-        _count = [0]
-
-    results: list[dict] = []
-    role = node.get("role", "")
-    name = node.get("name", "")
-
-    if role in allowed_roles and _count[0] < max_nodes:
-        entry: dict = {"role": role}
-        if name:
-            entry["name"] = name
-        if node.get("disabled"):
-            entry["disabled"] = True
-        if node.get("value"):
-            entry["value"] = node["value"]
-        if role == "heading" and node.get("level"):
-            entry["level"] = node["level"]
-        results.append(entry)
-        _count[0] += 1
-
-    for child in node.get("children", []):
-        if _count[0] >= max_nodes:
-            break
-        if isinstance(child, dict):
-            results.extend(_extract_nodes(child, allowed_roles, max_nodes, _count))
-
-    return results

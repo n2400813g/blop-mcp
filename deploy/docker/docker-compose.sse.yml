@@ -1,0 +1,13 @@
+services:
+  blop-http:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    env_file:
+      - /etc/blop/prod.env
+    ports:
+      - "8765:8765"
+    volumes:
+      - /var/lib/blop:/var/lib/blop
+      - /var/log/blop:/var/log/blop
+    restart: unless-stopped

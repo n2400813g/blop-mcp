@@ -105,3 +105,29 @@ async def test_capture_auth_session_timeout(tmp_path):
     assert result["status"] == "timeout"
     assert result["profile_name"] == "test"
     assert "No successful login detected" in result["note"]
+
+
+@pytest.mark.asyncio
+async def test_capture_auth_session_rejects_profile_name_with_separators():
+    from blop.tools.capture_auth import capture_auth_session
+
+    result = await capture_auth_session(
+        profile_name="../bad",
+        login_url="https://app.example.com/login",
+    )
+
+    assert result["status"] == "error"
+    assert "path separators" in result["note"]
+
+
+@pytest.mark.asyncio
+async def test_capture_auth_session_rejects_invalid_login_url():
+    from blop.tools.capture_auth import capture_auth_session
+
+    result = await capture_auth_session(
+        profile_name="safe-profile",
+        login_url="file:///etc/passwd",
+    )
+
+    assert result["status"] == "error"
+    assert "http or https" in result["note"]

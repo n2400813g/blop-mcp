@@ -58,8 +58,10 @@ async def test_save_and_get_auth_profile():
 
 @pytest.mark.asyncio
 async def test_list_auth_profiles():
-    p1 = AuthProfile(profile_name="profile-a", auth_type="env_login")
-    p2 = AuthProfile(profile_name="profile-b", auth_type="storage_state")
+    p1 = AuthProfile(profile_name="profile-a", auth_type="env_login",
+                     login_url="https://example.com/login")
+    p2 = AuthProfile(profile_name="profile-b", auth_type="storage_state",
+                     storage_state_path="/tmp/state.json")
     await sqlite.save_auth_profile(p1)
     await sqlite.save_auth_profile(p2)
 
