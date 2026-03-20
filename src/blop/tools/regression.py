@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import traceback
 import uuid
@@ -31,6 +32,19 @@ def _start_error(message: str) -> dict:
 
 def get_run_task(run_id: str) -> Optional[asyncio.Task]:
     return _RUN_TASKS.get(run_id)
+
+
+def _spawn_background_task(coro) -> asyncio.Task | asyncio.Future:
+    """Create a background task and safely close orphaned coroutines in tests."""
+    task = asyncio.create_task(coro)
+    if isinstance(task, (asyncio.Task, asyncio.Future)):
+        return task
+    if inspect.iscoroutine(coro):
+        coro.close()
+    loop = asyncio.get_running_loop()
+    placeholder = loop.create_future()
+    placeholder.set_result(None)
+    return placeholder
 
 
 def cancel_run_task(run_id: str) -> bool:
@@ -225,7 +239,7 @@ async def run_regression_test(
     )
 
     # Fire-and-forget; caller polls get_test_results
-    task = asyncio.create_task(
+    task = _spawn_background_task(
         _run_and_persist(run_id, flows, app_url, storage_state, headless, run_mode, auto_rerecord, profile_name)
     )
     _log.info(

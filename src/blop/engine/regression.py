@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import os
 import re
@@ -22,6 +23,20 @@ if TYPE_CHECKING:
 from blop.config import BLOP_AUTO_HEAL_MIN_CONFIDENCE as AUTO_HEAL_MIN_CONFIDENCE
 from blop.config import BLOP_AUTO_HEAL_MAX_BEHAVIOR_RISK as AUTO_HEAL_MAX_BEHAVIOR_RISK
 from blop.config import BLOP_STEP_TIMEOUT_SECS
+
+
+async def _normalize_page_text(value: object, *, max_depth: int = 2) -> str:
+    """Resolve loosely mocked async return values into plain text."""
+    current = value
+    depth = 0
+    while inspect.isawaitable(current) and depth < max_depth:
+        current = await current
+        depth += 1
+    if current is None:
+        return ""
+    if isinstance(current, str):
+        return current
+    return str(current)
 
 
 def _selector_entropy(selector: Optional[str]) -> float:
@@ -1172,7 +1187,8 @@ async def _goal_fallback(
                 final_url = await browser_session.get_current_page_url() or ""
                 page = await browser_session.get_current_page()
                 if page:
-                    final_page_text = (await page.inner_text("body") or "").lower()[:500]
+                    raw_page_text = await page.inner_text("body")
+                    final_page_text = (await _normalize_page_text(raw_page_text)).lower()[:500]
             except Exception:
                 _log.debug("get final page state failed", exc_info=True)
 

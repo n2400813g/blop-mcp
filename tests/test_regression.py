@@ -36,6 +36,11 @@ def _mock_browser_use():
     return mock_bu
 
 
+class _FinalPage:
+    async def inner_text(self, selector: str) -> str:
+        return "All good"
+
+
 @pytest.mark.asyncio
 async def test_execute_flow_pass():
     """Flow returns pass status when result has no error keywords."""
@@ -50,6 +55,8 @@ async def test_execute_flow_pass():
     mock_session = AsyncMock()
     mock_session.context = None
     mock_session.aclose = AsyncMock()
+    mock_session.get_current_page = AsyncMock(return_value=_FinalPage())
+    mock_session.get_current_page_url = AsyncMock(return_value="https://example.com")
 
     mock_bu = _mock_browser_use()
     mock_bu.Agent.return_value = mock_agent
@@ -88,6 +95,8 @@ async def test_execute_flow_fail_on_error_keyword():
     mock_session = AsyncMock()
     mock_session.context = None
     mock_session.aclose = AsyncMock()
+    mock_session.get_current_page = AsyncMock(return_value=_FinalPage())
+    mock_session.get_current_page_url = AsyncMock(return_value="https://example.com")
 
     mock_bu = _mock_browser_use()
     mock_bu.Agent.return_value = mock_agent
@@ -125,6 +134,8 @@ async def test_run_flows_parallel():
     mock_session = AsyncMock()
     mock_session.context = None
     mock_session.aclose = AsyncMock()
+    mock_session.get_current_page = AsyncMock(return_value=_FinalPage())
+    mock_session.get_current_page_url = AsyncMock(return_value="https://example.com")
 
     mock_bu = _mock_browser_use()
     mock_bu.Agent.return_value = mock_agent
@@ -173,6 +184,8 @@ async def test_run_flows_propagates_business_criticality():
     mock_session = AsyncMock()
     mock_session.context = None
     mock_session.aclose = AsyncMock()
+    mock_session.get_current_page = AsyncMock(return_value=_FinalPage())
+    mock_session.get_current_page_url = AsyncMock(return_value="https://example.com")
 
     mock_bu = _mock_browser_use()
     mock_bu.Agent.return_value = mock_agent
