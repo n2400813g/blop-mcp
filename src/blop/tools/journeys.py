@@ -7,6 +7,7 @@ from typing import Optional
 
 from blop.config import BLOP_DISCOVERY_MAX_PAGES, validate_app_url
 from blop.engine import discovery
+from blop.schemas import CriticalJourney
 from blop.storage import sqlite
 
 
@@ -21,6 +22,11 @@ def _planning_journey_id(app_url: str, journey_name: str, goal: str) -> str:
     )
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
     return f"planned_journey_{digest}"
+
+
+def _clean_text(value: str | None, fallback: str) -> str:
+    text = " ".join((value or "").split()).strip()
+    return text or fallback
 
 
 async def discover_critical_journeys(
@@ -70,7 +76,7 @@ async def discover_critical_journeys(
     raw_flows: list[dict] = result.get("flows", [])
     journeys = []
     for flow_dict in raw_flows:
-        journey = _flow_dict_to_critical_journey(flow_dict, name_to_flow_id)
+        journey = _flow_dict_to_critical_journey(flow_dict, name_to_flow_id, app_url=app_url)
         journeys.append(journey)
 
     gated = [j for j in journeys if j["include_in_release_gating"]]
@@ -95,21 +101,26 @@ async def discover_critical_journeys(
 def _flow_dict_to_critical_journey(
     flow_dict: dict,
     name_to_flow_id: dict[str, str],
+    *,
+    app_url: str | None = None,
 ) -> dict:
     """Convert a raw flow dict from discover_flows into a CriticalJourney shape."""
-    journey_name = flow_dict.get("flow_name") or flow_dict.get("name", "Unknown Journey")
-    goal = flow_dict.get("goal", "")
+    journey_name = _clean_text(flow_dict.get("flow_name") or flow_dict.get("name"), "Unknown Journey")
+    goal = _clean_text(flow_dict.get("goal"), f"{journey_name} user journey")
     criticality = flow_dict.get("business_criticality", "other")
     if criticality not in ("revenue", "activation", "retention", "support", "other"):
         criticality = "other"
-    confidence = float(flow_dict.get("confidence", 0.7))
+    try:
+        confidence = max(0.0, min(1.0, float(flow_dict.get("confidence", 0.7))))
+    except (TypeError, ValueError):
+        confidence = 0.7
     auth_required = bool(flow_dict.get("auth_required", False))
     likely_assertions = flow_dict.get("likely_assertions", [])
 
     # Why it matters: use goal directly (already business-language from Gemini)
-    why_it_matters = goal or f"{journey_name} user journey"
+    why_it_matters = goal
     if likely_assertions:
-        assertion_str = "; ".join(str(a) for a in likely_assertions[:2])
+        assertion_str = "; ".join(_clean_text(str(a), "") for a in likely_assertions[:2] if _clean_text(str(a), ""))
         why_it_matters = f"{why_it_matters}. Key checkpoints: {assertion_str}"
 
     include_in_release_gating = criticality in ("revenue", "activation")
@@ -117,7 +128,7 @@ def _flow_dict_to_critical_journey(
     # Link to existing RecordedFlow if name matches
     flow_id = name_to_flow_id.get(journey_name)
     journey_id = flow_dict.get("flow_id") or _planning_journey_id(
-        flow_dict.get("starting_url") or "",
+        flow_dict.get("starting_url") or app_url or "",
         journey_name,
         goal,
     )
@@ -135,15 +146,22 @@ def _flow_dict_to_critical_journey(
             else "Informational journey; not used for release gating by default."
         )
 
+    canonical = CriticalJourney.model_validate(
+        {
+            "journey_id": journey_id,
+            "journey_name": journey_name,
+            "why_it_matters": why_it_matters,
+            "criticality_class": criticality,
+            "auth_required": auth_required,
+            "confidence": confidence,
+            "include_in_release_gating": include_in_release_gating,
+            "flow_id": flow_id,
+        }
+    ).model_dump()
+
     return {
+        **canonical,
         "journey_id": journey_id,
-        "journey_name": journey_name,
-        "why_it_matters": why_it_matters,
-        "criticality_class": criticality,
-        "auth_required": auth_required,
-        "confidence": confidence,
-        "include_in_release_gating": include_in_release_gating,
         "gating_reason": gating_reason,
         "execution_status": execution_status,
-        "flow_id": flow_id,
     }

@@ -1,6 +1,7 @@
 """Unit tests for the 4 MVP canonical tools — no browser, no real DB."""
 from __future__ import annotations
 
+import importlib
 import os
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,6 +21,30 @@ def _make_flow(flow_id: str = "f1", criticality: str = "revenue") -> RecordedFlo
         created_at=datetime.now(timezone.utc).isoformat(),
         business_criticality=criticality,
     )
+
+
+# ---------------------------------------------------------------------------
+# canonical schema contracts
+# ---------------------------------------------------------------------------
+
+def test_release_check_request_rejects_both_flow_and_journey_ids():
+    from pydantic import ValidationError
+
+    from blop.schemas import ReleaseCheckRequest
+
+    with pytest.raises(ValidationError):
+        ReleaseCheckRequest(
+            app_url="https://example.com",
+            flow_ids=["flow-1"],
+            journey_ids=["journey-1"],
+        )
+
+
+def test_release_check_request_defaults_release_gating_filter():
+    from blop.schemas import ReleaseCheckRequest
+
+    request = ReleaseCheckRequest(app_url="https://example.com", criticality_filter=[])
+    assert request.criticality_filter == ["revenue", "activation"]
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +160,12 @@ async def test_run_release_check_result_contains_resource_links():
 
     assert "resource_links" in result
     assert "brief" in result["resource_links"]
+    assert "risk" in result
+    assert "confidence" in result
+    assert result["decision"] == "INVESTIGATE"
+    assert isinstance(result["prioritized_actions"], list)
     assert "selected_flows" in result
+    assert "execution_plan_summary" in result
     assert result["selected_flows"][0]["flow_id"] == "f1"
     assert result["active_gating_policy"]["criticality_filter"] == ["revenue", "activation"]
     assert result["recommended_next_step"]["tool"] == "get_test_results"
@@ -227,3 +257,38 @@ async def test_validate_release_setup_suggested_steps_canonical_names():
     steps = " ".join(result.get("suggested_next_steps", []))
     assert "discover_critical_journeys" in steps
     assert "discover_test_flows" not in steps
+    assert "blop://journeys" in steps
+    assert "triage_release_blocker" in steps
+
+
+# ---------------------------------------------------------------------------
+# compat wrappers
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_compat_validate_setup_adds_deprecation_metadata(monkeypatch):
+    import blop.tools.compat as compat
+
+    compat = importlib.reload(compat)
+    monkeypatch.setattr(compat, "BLOP_ENABLE_COMPAT_TOOLS", True)
+
+    with patch("blop.tools.validate.validate_release_setup", new_callable=AsyncMock, return_value={"status": "ready"}):
+        result = await compat.validate_setup(app_url="https://example.com")
+
+    assert result["deprecated"] is True
+    assert result["deprecation_notice"]["replacement_tool"] == "validate_release_setup"
+
+
+@pytest.mark.asyncio
+async def test_compat_list_recorded_tests_delegates_to_journeys_resource(monkeypatch):
+    import blop.tools.compat as compat
+
+    compat = importlib.reload(compat)
+    monkeypatch.setattr(compat, "BLOP_ENABLE_COMPAT_TOOLS", True)
+
+    with patch("blop.tools.resources.journeys_resource", new_callable=AsyncMock, return_value={"journeys": [], "total": 0}):
+        result = await compat.list_recorded_tests()
+
+    assert result["deprecated"] is True
+    assert result["deprecation_notice"]["replacement_tool"] == "blop://journeys"
+    assert result["total"] == 0

@@ -5,6 +5,7 @@ from typing import Optional
 from blop.config import validate_app_url
 from blop.engine import auth as auth_engine
 from blop.engine.flow_builder import build_recorded_flow
+from blop.engine.planner import build_execution_plan, build_intent_contract
 from blop.engine import recording
 from blop.engine.logger import get_logger
 from blop.schemas import RecordedFlowResult
@@ -29,12 +30,14 @@ async def record_test_flow(
     if not goal or not goal.strip():
         return {"error": "goal is required"}
 
+    planning_source = "explicit_goal"
     # If command provided, parse for additional intent context
     if command:
         from blop.engine.planner import parse_command
         intent = await parse_command(command, app_url, profile_name=profile_name)
         if intent.profile_name and not profile_name:
             profile_name = intent.profile_name
+        planning_source = "nl_command"
 
     profile = None
     if profile_name:
@@ -104,7 +107,31 @@ async def record_test_flow(
     archetype = detect_app_archetype(_mini_inventory)
     _hint_kwargs = editor_hints_from_archetype(archetype)
     spa_hints = SpaHints(**_hint_kwargs) if _hint_kwargs else SpaHints()
-    run_mode_override = "goal_fallback" if _hint_kwargs else None
+    run_mode_override = "strict_steps" if _hint_kwargs else None
+
+    execution_plan = build_execution_plan(
+        goal_text=goal,
+        app_url=app_url,
+        command=command,
+        profile_name=profile_name,
+        business_criticality=bc,
+        planning_source=planning_source,
+        assertions=assertions_json,
+        run_mode=run_mode_override or "hybrid",
+    )
+    intent_contract = build_intent_contract(execution_plan)
+
+    recording_drift: list[str] = []
+    if execution_plan.target_surface == "editor" and not any("/editor" in (s.value or "").lower() for s in steps if s.action == "navigate"):
+        recording_drift.append("surface_drift")
+    if execution_plan.goal_type != "exploration" and not assertions_json:
+        recording_drift.append("assertion_drift")
+    generic_only_steps = [
+        s for s in steps
+        if s.action in {"click", "fill"} and not any([s.selector, s.aria_name, s.aria_role, s.target_text, s.testid_selector])
+    ]
+    if generic_only_steps:
+        recording_drift.append("legacy_unstructured")
 
     flow = build_recorded_flow(
         flow_name=flow_name,
@@ -115,6 +142,7 @@ async def record_test_flow(
         entry_url=app_url,
         business_criticality=bc,
         spa_hints=spa_hints,
+        intent_contract=intent_contract,
         run_mode_override=run_mode_override,
     )
     await sqlite.save_flow(flow)
@@ -128,6 +156,13 @@ async def record_test_flow(
         status="recorded",
         artifacts_dir=artifacts_dir,
     ).model_dump()
+    result["execution_plan_summary"] = execution_plan.model_dump()
+    result["recording_drift"] = {
+        "drift_detected": bool(recording_drift),
+        "drift_types": recording_drift,
+        "assertion_count": len(assertions_json),
+        "legacy_unstructured": "legacy_unstructured" in recording_drift,
+    }
     result["workflow_hint"] = (
         f"Flow '{flow_name}' recorded ({len(steps)} steps). "
         f"Next: run_release_check(app_url='{app_url}', flow_ids=['{flow.flow_id}'], mode='replay')"

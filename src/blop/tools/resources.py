@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from blop.engine.context_graph import find_journey_summary, get_context_graph_summary
+from blop.schemas import CriticalJourney, ReleaseBrief
 from blop.storage import sqlite
 
 
@@ -23,15 +24,19 @@ async def journeys_resource() -> dict:
             flow_name=f["flow_name"],
             flow_id=f["flow_id"],
         ) if app_url else None
-        journeys.append({
+        canonical = CriticalJourney.model_validate({
             "journey_id": f["flow_id"],
             "journey_name": f["flow_name"],
             "why_it_matters": goal or f["flow_name"],
             "criticality_class": criticality,
             "include_in_release_gating": criticality in ("revenue", "activation"),
             "flow_id": f["flow_id"],
-            "created_at": f.get("created_at"),
             "auth_required": journey_summary.auth_required if journey_summary else False,
+            "confidence": 1.0 if flow_obj else 0.7,
+        }).model_dump()
+        journeys.append({
+            **canonical,
+            "created_at": f.get("created_at"),
             "coverage_status": journey_summary.coverage_status if journey_summary else "recorded",
             "entry_routes": journey_summary.entry_routes if journey_summary else [],
         })
@@ -50,6 +55,7 @@ async def release_brief_resource(release_id: str) -> dict:
             "error": f"No release brief found for release_id='{release_id}'. "
                      "Run run_release_check to generate one.",
         }
+    brief = ReleaseBrief.model_validate(brief).model_dump()
     app_url = brief.get("app_url")
     if app_url:
         graph = await sqlite.get_latest_context_graph(app_url)

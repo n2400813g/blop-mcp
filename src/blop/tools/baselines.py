@@ -4,6 +4,7 @@ from typing import Optional
 
 from blop.config import validate_app_url
 from blop.engine.flow_builder import build_recorded_flow
+from blop.engine.planner import build_execution_plan, build_intent_contract
 from blop.schemas import AuthenticatedBaselineRecipe, FlowStep, StructuredAssertion
 from blop.storage import sqlite
 
@@ -275,6 +276,19 @@ async def package_authenticated_saas_baseline(
 
     for recipe in parsed:
         steps = _build_steps_for_recipe(app_url, recipe)
+        plan = build_execution_plan(
+            goal_text=recipe.goal,
+            app_url=app_url,
+            profile_name=profile_name,
+            business_criticality=recipe.business_criticality,
+            planning_source="baseline_recipe",
+            assertions=[
+                step.value or step.description
+                for step in steps
+                if step.action == "assert" and (step.value or step.description)
+            ],
+            run_mode="strict_steps",
+        )
         flow = build_recorded_flow(
             flow_name=recipe.flow_name,
             app_url=app_url,
@@ -287,6 +301,7 @@ async def package_authenticated_saas_baseline(
             ],
             entry_url=recipe.entry_url or app_url,
             business_criticality=recipe.business_criticality,
+            intent_contract=build_intent_contract(plan),
             run_mode_override="strict_steps",
         )
         await sqlite.save_flow(flow)

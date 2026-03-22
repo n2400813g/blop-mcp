@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 from blop.config import BLOP_AUTO_HEAL_MIN_CONFIDENCE as AUTO_HEAL_MIN_CONFIDENCE
 from blop.config import BLOP_AUTO_HEAL_MAX_BEHAVIOR_RISK as AUTO_HEAL_MAX_BEHAVIOR_RISK
 from blop.config import BLOP_STEP_TIMEOUT_SECS
+from blop.schemas import DriftSummary
 
 
 async def _normalize_page_text(value: object, *, max_depth: int = 2) -> str:
@@ -91,6 +92,113 @@ async def _save_navigation_health_event(
             "auth_redirect_detected": auth_redirect_detected,
             "landed_authenticated": not auth_redirect_detected,
         },
+    )
+
+
+def _infer_surface_from_url(url: str) -> str:
+    lowered = (url or "").lower()
+    if "/editor" in lowered:
+        return "editor"
+    if any(token in lowered for token in ("/pricing", "/billing", "/plans", "/upgrade")):
+        return "billing"
+    if any(token in lowered for token in ("/settings", "/account", "/profile")):
+        return "settings"
+    if any(token in lowered for token in ("/login", "/signin", "/auth", "oauth")):
+        return "public_site"
+    if lowered:
+        return "authenticated_app"
+    return "unknown"
+
+
+def _has_success_assertion_match(assertion_results: list[dict], required_assertions: list[str]) -> bool | None:
+    if not required_assertions:
+        return None
+    passed = [str(item.get("assertion", "")).lower() for item in assertion_results if item.get("passed")]
+    if not passed:
+        return False
+    for required in required_assertions:
+        required_lower = required.lower()
+        if any(required_lower in candidate or candidate in required_lower for candidate in passed):
+            return True
+    return False
+
+
+def _build_drift_summary(
+    *,
+    flow: RecordedFlow,
+    status: str,
+    replay_mode: str,
+    assertion_results: list[dict],
+    failure_reason_codes: list[str],
+    rerecorded: bool,
+    actual_landing_url: str | None = None,
+) -> DriftSummary:
+    intent = getattr(flow, "intent_contract", None)
+    if intent is None:
+        return DriftSummary(
+            drift_detected=True,
+            drift_types=["legacy_unstructured"],
+            plan_fidelity="low",
+            notes=["Flow has no persisted intent contract; replay trust is reduced."],
+        )
+
+    drift_types: list[str] = []
+    allowed_fallback_used: list[str] = []
+    disallowed_fallback_used: list[str] = []
+    notes: list[str] = []
+
+    actual_surface = _infer_surface_from_url(actual_landing_url or "")
+    surface_match = None
+    if actual_landing_url:
+        surface_match = actual_surface == intent.target_surface or (
+            intent.target_surface == "authenticated_app" and actual_surface in {"authenticated_app", "editor", "billing", "settings"}
+        )
+        if not surface_match:
+            drift_types.append("surface_drift")
+
+    assertion_match = _has_success_assertion_match(assertion_results, intent.success_assertions)
+    if assertion_match is False and status == "pass":
+        drift_types.append("assertion_drift")
+
+    if replay_mode == "goal_fallback":
+        if "goal_fallback" in intent.allowed_fallbacks:
+            allowed_fallback_used.append("goal_fallback")
+            notes.append("Goal fallback was used as an allowed execution strategy.")
+        else:
+            disallowed_fallback_used.append("goal_fallback")
+            drift_types.append("plan_drift")
+    if rerecorded:
+        if "hard_rerecord" in intent.allowed_fallbacks:
+            allowed_fallback_used.append("hard_rerecord")
+        else:
+            disallowed_fallback_used.append("hard_rerecord")
+            drift_types.append("plan_drift")
+    if replay_mode in {"hybrid_repair", "agent_repair"} or "repair_rejected" in failure_reason_codes:
+        if "hybrid_repair" in intent.allowed_fallbacks:
+            allowed_fallback_used.append("hybrid_repair")
+        else:
+            disallowed_fallback_used.append("hybrid_repair")
+            drift_types.append("repair_drift")
+    if any(code in failure_reason_codes for code in ("auth_redirect", "auth_expired")):
+        drift_types.append("auth_drift")
+
+    plan_fidelity = "high"
+    if disallowed_fallback_used or "surface_drift" in drift_types or "auth_drift" in drift_types:
+        plan_fidelity = "low"
+    elif allowed_fallback_used or assertion_match is False:
+        plan_fidelity = "medium"
+
+    return DriftSummary(
+        drift_detected=bool(drift_types or allowed_fallback_used or disallowed_fallback_used),
+        drift_types=list(dict.fromkeys(drift_types)),
+        allowed_fallback_used=list(dict.fromkeys(allowed_fallback_used)),
+        disallowed_fallback_used=list(dict.fromkeys(disallowed_fallback_used)),
+        surface_match=surface_match,
+        assertion_match=assertion_match,
+        plan_fidelity=plan_fidelity,
+        intended_surface=intent.target_surface,
+        actual_surface=actual_surface if actual_landing_url else None,
+        notes=notes,
     )
 
 
@@ -214,6 +322,7 @@ async def execute_recorded_flow(
                                 landed_url=current_url,
                                 page_title=page_title[:120],
                             )
+                            trace.landing_url = current_url
                             landing_observed = True
                         except Exception:
                             _log.debug("navigation health event failed", exc_info=True)
@@ -1050,6 +1159,16 @@ def _trace_to_failure_case(
         healing_decision=healing_decision,
         healed_steps=healed_steps,
         performance_metrics=trace.performance_metrics,
+        intent_contract=flow.intent_contract,
+        drift_summary=_build_drift_summary(
+            flow=flow,
+            status=status,
+            replay_mode=trace.run_mode,
+            assertion_results=trace.assertion_results,
+            failure_reason_codes=failure_reason_codes,
+            rerecorded=False,
+            actual_landing_url=trace.landing_url,
+        ),
     )
 
 
@@ -1155,6 +1274,15 @@ async def _hard_heal_rerecord(
                 replay_mode="hard_heal_rerecord",
                 rerecorded=True,
                 raw_result=f"Flow re-recorded successfully as {rerecorded_flow_id}",
+                intent_contract=flow.intent_contract,
+                drift_summary=_build_drift_summary(
+                    flow=flow,
+                    status="pass",
+                    replay_mode="hard_heal_rerecord",
+                    assertion_results=[],
+                    failure_reason_codes=[],
+                    rerecorded=True,
+                ),
             )
             return case
     except Exception:
@@ -1187,6 +1315,7 @@ async def _goal_fallback(
     screenshots: list[str] = []
     raw_result = ""
     status = "error"
+    final_url = ""
 
     try:
         llm = make_agent_llm()
@@ -1342,6 +1471,16 @@ async def _goal_fallback(
         raw_result=raw_result,
         replay_mode="goal_fallback",
         trace_path=goal_trace_path,
+        intent_contract=flow.intent_contract,
+        drift_summary=_build_drift_summary(
+            flow=flow,
+            status=status,
+            replay_mode="goal_fallback",
+            assertion_results=[],
+            failure_reason_codes=["auth_redirect"] if "/login" in (final_url or "").lower() else [],
+            rerecorded=False,
+            actual_landing_url=final_url or None,
+        ),
     )
 
 

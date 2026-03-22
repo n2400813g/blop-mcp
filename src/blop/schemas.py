@@ -663,6 +663,34 @@ class ConfidenceScore(BaseModel):
     label: Literal["high", "medium", "low"]
 
 
+class ReleaseCheckRequest(BaseModel):
+    """Canonical public request contract for release-confidence checks."""
+
+    app_url: str
+    journey_ids: list[str] | None = None
+    flow_ids: list[str] | None = None
+    profile_name: str | None = None
+    mode: Literal["replay", "targeted"] = "replay"
+    criticality_filter: list[Literal["revenue", "activation", "retention", "support", "other"]] = Field(
+        default_factory=lambda: ["revenue", "activation"]
+    )
+    release_id: str | None = None
+    headless: bool = True
+    run_mode: Literal["hybrid", "strict_steps", "goal_fallback"] = "hybrid"
+
+    @model_validator(mode="after")
+    def _validate_alias_inputs(self) -> "ReleaseCheckRequest":
+        if self.journey_ids and self.flow_ids:
+            raise ValueError(
+                "Pass only one of flow_ids or journey_ids. journey_ids is a deprecated alias for flow_ids."
+            )
+        if not self.criticality_filter:
+            self.criticality_filter = ["revenue", "activation"]
+        else:
+            self.criticality_filter = list(dict.fromkeys(self.criticality_filter))
+        return self
+
+
 class CriticalJourney(BaseModel):
     journey_id: str
     journey_name: str

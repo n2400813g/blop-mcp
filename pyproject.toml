@@ -1,9 +1,24 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "blop"
+name = "blop-mcp"
 version = "0.3.0"
 description = "MCP-native release confidence control plane for web apps"
 requires-python = ">=3.11"
 readme = "README.md"
+license = "MIT"
+keywords = ["mcp", "browser automation", "release confidence", "qa", "playwright"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: Internet :: WWW/HTTP :: Browsers",
+]
 
 dependencies = [
   "mcp[cli]>=1.0.0",
@@ -20,11 +35,16 @@ dependencies = [
 
 [project.urls]
 Repository = "https://github.com/n2400813g/blop-mcp"
+Homepage = "https://github.com/n2400813g/blop-mcp"
+Documentation = "https://github.com/n2400813g/blop-mcp/blob/main/README.md"
+"Issue Tracker" = "https://github.com/n2400813g/blop-mcp/issues"
 
 [project.optional-dependencies]
 dev = [
+  "build>=1.2.2",
   "pytest>=7.0",
   "pytest-asyncio>=0.21",
+  "twine>=5.1.1",
 ]
 anthropic = [
   "langchain_anthropic>=0.3.0",

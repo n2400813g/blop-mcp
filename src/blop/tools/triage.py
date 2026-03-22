@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Optional
 
 from blop.engine.context_graph import build_failure_neighborhood, get_next_checks_for_release_scope
+from blop.schemas import BlockerTriage
 from blop.storage import sqlite
 
 
@@ -238,23 +239,29 @@ async def triage_release_blocker(
             if len(top_evidence_refs) >= 5:
                 break
 
+    canonical = BlockerTriage.model_validate(
+        {
+            "subject_id": subject_id,
+            "likely_cause": likely_cause or "Unknown blocker",
+            "evidence_summary": evidence_summary or "No detailed evidence captured.",
+            "user_business_impact": business_impact or "Impact unknown.",
+            "recommended_action": recommended_action or "Review the linked evidence and rerun the affected journey.",
+            "suggested_owner": suggested_owner,
+            "linked_artifacts": list(dict.fromkeys(artifacts[:10])),
+        }
+    ).model_dump()
+
     return {
-        "subject_id": subject_id,
+        **canonical,
         "subject_type": subject_type,
-        "likely_cause": likely_cause,
-        "evidence_summary": evidence_summary,
         "evidence_summary_compact": {
             "failed_case_count": len(failed_cases),
             "blocker_case_count": len(blocker_cases),
             "top_evidence_refs": top_evidence_refs,
             "failure_neighborhood": neighborhood,
         },
-        "user_business_impact": business_impact,
         "business_priority": business_priority,
         "confidence_note": confidence_note,
-        "recommended_action": recommended_action,
-        "suggested_owner": suggested_owner,
-        "linked_artifacts": artifacts[:10],
         "next_checks": next_checks,
         "blocker_case_count": len(blocker_cases),
         "total_failed_cases": len(failed_cases),
