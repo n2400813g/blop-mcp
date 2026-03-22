@@ -4,6 +4,7 @@ import os
 from datetime import datetime, timezone
 from urllib.parse import quote
 
+from blop.engine.context_graph import get_context_graph_summary, get_next_checks_for_release_scope
 from blop.reporting import results as reporting
 from blop.schemas import FailureCase
 from blop.storage import sqlite
@@ -131,6 +132,27 @@ async def get_test_results(run_id: str) -> dict:
         "latest_event_type": events[-1]["event_type"] if events else None,
     }
     app_url = run.get("app_url", "")
+    profile_name = run.get("profile_name")
+    latest_graph = None
+    if app_url:
+        try:
+            latest_graph = await sqlite.get_latest_context_graph(app_url, profile_name=profile_name)
+        except Exception:
+            latest_graph = None
+    if latest_graph:
+        failed_labels = [
+            case.flow_name for case in cases
+            if case.status in ("fail", "error", "blocked") and getattr(case, "flow_name", "")
+        ]
+        report["context_graph_summary"] = get_context_graph_summary(latest_graph).model_dump()
+        report["context_next_checks"] = get_next_checks_for_release_scope(
+            latest_graph,
+            failed_journey_labels=failed_labels,
+            limit=5,
+        )
+    else:
+        report["context_graph_summary"] = None
+        report["context_next_checks"] = []
     encoded_app = quote(app_url, safe="") if app_url else ""
     if encoded_app:
         report["related_v2_resources"] = [
@@ -148,9 +170,9 @@ async def get_test_results(run_id: str) -> dict:
     if run_status in ("queued", "running"):
         report["workflow_hint"] = f"Run still in progress. Poll: get_test_results(run_id='{run_id}')"
     elif decision == "BLOCK":
-        report["workflow_hint"] = "Shipping blocked. Debug the top failed case, fix it, and re-run."
+        report["workflow_hint"] = report["context_next_checks"][0] if report["context_next_checks"] else "Shipping blocked. Debug the top failed case, fix it, and re-run."
     elif decision == "INVESTIGATE":
-        report["workflow_hint"] = "Review the failed cases and inspect the top evidence before deciding."
+        report["workflow_hint"] = report["context_next_checks"][0] if report["context_next_checks"] else "Review the failed cases and inspect the top evidence before deciding."
     else:
         report["workflow_hint"] = "All flows passed. Review the release summary and ship if it matches scope."
 

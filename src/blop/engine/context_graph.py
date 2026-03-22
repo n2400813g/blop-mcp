@@ -85,6 +85,10 @@ def _path_segments(path: str) -> list[str]:
 
 def _route_area_key(route: str) -> str:
     parts = [seg.lower() for seg in _path_segments(route)]
+    meaningful = [part for part in parts if part not in STOP_SEGMENTS and not part.isdigit()]
+    for part in reversed(meaningful):
+        if part:
+            return part
     for part in parts:
         if part not in STOP_SEGMENTS and not part.isdigit():
             return part
@@ -475,6 +479,91 @@ def get_uncovered_critical_journeys(graph: SiteContextGraph) -> list[JourneySumm
         for journey in _journeys_from_graph(graph)
         if journey.business_criticality in CRITICAL_JOURNEY_TYPES and journey.coverage_status != "recorded"
     ]
+
+
+def list_journey_summaries(graph: SiteContextGraph) -> list[JourneySummary]:
+    return _journeys_from_graph(graph)
+
+
+def find_journey_summary(
+    graph: SiteContextGraph | None,
+    *,
+    flow_name: str | None = None,
+    journey_key: str | None = None,
+    flow_id: str | None = None,
+) -> JourneySummary | None:
+    if graph is None:
+        return None
+    journeys = _journeys_from_graph(graph)
+    for journey in journeys:
+        if journey_key and journey.journey_key == journey_key:
+            return journey
+        if flow_name and journey.label == flow_name:
+            return journey
+        if flow_id and flow_id in journey.recorded_flow_ids:
+            return journey
+    return None
+
+
+def build_failure_neighborhood(
+    graph: SiteContextGraph | None,
+    *,
+    flow_name: str | None = None,
+    journey_key: str | None = None,
+    flow_id: str | None = None,
+) -> dict:
+    journey = find_journey_summary(graph, flow_name=flow_name, journey_key=journey_key, flow_id=flow_id)
+    if journey is None:
+        return {
+            "journey": None,
+            "entry_routes": [],
+            "business_criticality": "other",
+            "auth_required": False,
+            "coverage_status": "unknown",
+            "areas": [],
+        }
+    areas = sorted({_route_area_key(route) for route in journey.entry_routes})
+    return {
+        "journey": journey.label,
+        "journey_key": journey.journey_key,
+        "entry_routes": journey.entry_routes,
+        "business_criticality": journey.business_criticality,
+        "auth_required": journey.auth_required,
+        "coverage_status": journey.coverage_status,
+        "areas": areas,
+    }
+
+
+def get_next_checks_for_release_scope(
+    graph: SiteContextGraph | None,
+    *,
+    failed_journey_labels: list[str] | None = None,
+    limit: int = 5,
+) -> list[str]:
+    if graph is None:
+        return []
+    journeys = _journeys_from_graph(graph)
+    next_checks: list[str] = []
+    failed_labels = set(failed_journey_labels or [])
+    for journey in journeys:
+        if failed_labels and journey.label not in failed_labels:
+            continue
+        if journey.auth_required:
+            next_checks.append(f"Verify auth/session preconditions before rerunning {journey.label}.")
+        if journey.entry_routes:
+            next_checks.append(f"Re-check entry route {journey.entry_routes[0]} for {journey.label}.")
+        if journey.coverage_status != "recorded" and journey.business_criticality in CRITICAL_JOURNEY_TYPES:
+            next_checks.append(f"Record or refresh a release-gating flow for {journey.label}.")
+    if not failed_labels:
+        for journey in get_uncovered_critical_journeys(graph):
+            next_checks.append(f"Add recorded coverage for critical journey {journey.label}.")
+    deduped: list[str] = []
+    for item in next_checks:
+        if item not in deduped:
+            deduped.append(item)
+        if len(deduped) >= limit:
+            break
+    return deduped
 
 
 def get_impacted_journeys(

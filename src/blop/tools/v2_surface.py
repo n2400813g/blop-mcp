@@ -24,10 +24,14 @@ from urllib.parse import quote
 
 from blop.engine.context_graph import (
     build_impact_summary,
+    build_failure_neighborhood,
     diff_context_graph,
+    find_journey_summary,
     get_context_graph_summary,
     get_impacted_journeys,
+    get_next_checks_for_release_scope,
     get_uncovered_critical_journeys,
+    list_journey_summaries,
     summarize_release_scope,
 )
 from blop.engine.secrets import mask_text
@@ -787,6 +791,7 @@ async def cluster_incidents(
     window: str = "7d",
     min_cluster_size: int = 2,
 ) -> dict:
+    graph = await sqlite.get_latest_context_graph(app_url)
     selected_run_ids = run_ids or []
     if not selected_run_ids:
         since_iso = _window_to_since_iso(window)
@@ -816,6 +821,12 @@ async def cluster_incidents(
         if len(members) < min_cluster_size:
             continue
         criticality = sorted({m.business_criticality for m in members})
+        primary_case = members[0]
+        neighborhood = build_failure_neighborhood(
+            graph,
+            flow_name=primary_case.flow_name,
+            flow_id=primary_case.flow_id,
+        )
         max_sev = max((SEVERITY_ORDER.get(m.severity, 1) for m in members), default=1)
         severity = "blocker" if max_sev >= 4 else "high" if max_sev >= 3 else "medium" if max_sev >= 2 else "low"
         cluster_id = f"cluster_{uuid.uuid5(uuid.NAMESPACE_URL, app_url + key).hex[:20]}"
@@ -831,7 +842,21 @@ async def cluster_incidents(
             evidence_refs=[f"run:{m.run_id}/case:{m.case_id}" for m in members[:10]],
             member_case_ids=[m.case_id for m in members],
             status="open",
-            metadata={"cluster_key": key, "member_count": len(members)},
+            metadata={
+                "cluster_key": key,
+                "member_count": len(members),
+                "linked_journey": neighborhood.get("journey"),
+                "journey_key": neighborhood.get("journey_key"),
+                "entry_routes": neighborhood.get("entry_routes", []),
+                "areas": neighborhood.get("areas", []),
+                "auth_required": neighborhood.get("auth_required", False),
+                "coverage_status": neighborhood.get("coverage_status", "unknown"),
+                "next_checks": get_next_checks_for_release_scope(
+                    graph,
+                    failed_journey_labels=[primary_case.flow_name],
+                    limit=3,
+                ),
+            },
         )
         await sqlite.save_incident_cluster(cluster)
         saved_clusters.append(cluster)
@@ -864,11 +889,19 @@ async def generate_remediation(
             if c.trace_path:
                 evidence.append(c.trace_path)
             evidence.extend(c.screenshots[:2])
+    neighborhood = cluster.metadata or {}
+    journey_label = neighborhood.get("linked_journey")
+    entry_routes = neighborhood.get("entry_routes", [])
+    next_checks = neighborhood.get("next_checks", [])
+    areas = neighborhood.get("areas", [])
 
     # Default template values
     owner_hints: list[str] = []
     if include_owner_hints:
-        owner_hints = [f"Likely owner: team responsible for flow domain '{cluster.title.split('#')[0]}'."]
+        owner_hints = [
+            f"Likely owner: team responsible for area '{areas[0]}'." if areas
+            else f"Likely owner: team responsible for flow domain '{cluster.title.split('#')[0]}'."
+        ]
     fix_hypotheses: list[str] = []
     if include_fix_hypotheses:
         fix_hypotheses = [
@@ -876,6 +909,10 @@ async def generate_remediation(
             "Page transition timing issue; increase settle/wait condition before interaction.",
             "Auth/session precondition missing in the flow setup.",
         ]
+        if neighborhood.get("auth_required"):
+            fix_hypotheses.insert(0, "Auth boundary likely changed; verify session bootstrap and protected-route landing.")
+        if neighborhood.get("coverage_status") != "recorded" and journey_label:
+            fix_hypotheses.append(f"Add or refresh recorded release-gating coverage for {journey_label}.")
 
     # Try Gemini for richer fix hypotheses and owner hints
     if (include_owner_hints or include_fix_hypotheses) and os.getenv("GOOGLE_API_KEY"):
@@ -897,7 +934,7 @@ async def generate_remediation(
                 severity=cluster.severity,
                 affected_flows=cluster.affected_flows,
                 criticality_buckets=", ".join(cluster.affected_criticality),
-                evidence=evidence_text,
+                evidence=evidence_text + (f"\nJourney: {journey_label}" if journey_label else ""),
                 console_errors=console_errors,
                 network_errors=network_errors,
             )
@@ -914,13 +951,22 @@ async def generate_remediation(
         except Exception:
             pass  # fall back to template values
 
+    journey_line = f"- Journey neighborhood: {journey_label}\n" if journey_label else ""
+    routes_line = f"- Entry routes: {', '.join(entry_routes[:3])}\n" if entry_routes else ""
+    next_checks_block = "### Next checks\n" + "\n".join([f"- {item}" for item in next_checks[:5]]) + "\n" if next_checks else ""
     issue_draft = (
         f"## {cluster.title}\n\n"
         f"- Severity: **{cluster.severity}**\n"
         f"- Affected flows: {cluster.affected_flows}\n"
         f"- Criticality buckets: {', '.join(cluster.affected_criticality)}\n\n"
-        f"### Repro\n" + "\n".join([f"{idx + 1}. {step}" for idx, step in enumerate(repro_steps)]) + "\n\n"
-        f"### Evidence\n" + "\n".join([f"- {ref}" for ref in evidence[:12]]) + "\n"
+        + journey_line
+        + routes_line
+        + "### Repro\n"
+        + "\n".join([f"{idx + 1}. {step}" for idx, step in enumerate(repro_steps)])
+        + "\n\n### Evidence\n"
+        + "\n".join([f"- {ref}" for ref in evidence[:12]])
+        + "\n\n"
+        + next_checks_block
     )
     draft = RemediationDraft(
         cluster_id=cluster.cluster_id,
@@ -987,6 +1033,8 @@ async def get_correlation_report(
 ) -> dict:
     clusters = await sqlite.list_open_incident_clusters(app_url, limit=300)
     signals = await sqlite.list_telemetry_signals(app_url, limit=2000)
+    graph = await sqlite.get_latest_context_graph(app_url)
+    known_journeys = {journey.journey_key: journey for journey in list_journey_summaries(graph)} if graph else {}
 
     # Resolve cluster first/last seen run_ids to actual timestamps (batch, cached)
     cluster_timestamps: dict[str, tuple[str | None, str | None]] = {}
@@ -1008,8 +1056,12 @@ async def get_correlation_report(
         cluster_timestamps[cluster.cluster_id] = (first_ts, last_ts)
 
     matches: list[CorrelationMatch] = []
+    enriched_matches: list[dict] = []
     for cluster in clusters:
         first_ts, last_ts = cluster_timestamps.get(cluster.cluster_id, (None, None))
+        cluster_meta = cluster.metadata or {}
+        cluster_journey = (cluster_meta.get("journey_key") or "").lower()
+        cluster_routes = [route.lower() for route in cluster_meta.get("entry_routes", [])]
         for signal in signals[:200]:
             signal_ts = signal.get("ts", "")
             temporal = _temporal_overlap(signal_ts, first_ts, last_ts)
@@ -1017,26 +1069,41 @@ async def get_correlation_report(
             base = 0.3 if temporal else 0.05
             if signal.get("journey_key") and signal["journey_key"].lower() in cluster.title.lower():
                 base += 0.3
+            if signal.get("journey_key") and cluster_journey and signal["journey_key"].lower() == cluster_journey:
+                base += 0.2
             if signal.get("route") and signal["route"].lower() in cluster.title.lower():
+                base += 0.2
+            if signal.get("route") and any(signal["route"].lower() in route for route in cluster_routes):
                 base += 0.2
             if cluster.severity in ("high", "blocker") and signal.get("signal_type") in ("error_rate", "conversion"):
                 base += 0.15
             confidence = round(min(base, 0.99), 2)
             if confidence < min_confidence:
                 continue
-            matches.append(
-                CorrelationMatch(
-                    cluster_id=cluster.cluster_id,
-                    telemetry_signal=f"{signal.get('signal_type')}@{signal.get('ts')}",
-                    confidence=confidence,
-                    business_impact_estimate=(
-                        "Possible measurable customer impact in critical journey."
-                        if cluster.severity in ("high", "blocker")
-                        else "Potential localized impact."
-                    ),
-                )
+            journey_context = known_journeys.get(signal.get("journey_key") or "")
+            impact_estimate = (
+                f"Possible measurable customer impact in {journey_context.business_criticality} journey."
+                if journey_context
+                else "Possible measurable customer impact in critical journey."
+                if cluster.severity in ("high", "blocker")
+                else "Potential localized impact."
             )
-    out = {"window": window, "matches": [m.model_dump() for m in matches[:100]]}
+            match = CorrelationMatch(
+                cluster_id=cluster.cluster_id,
+                telemetry_signal=f"{signal.get('signal_type')}@{signal.get('ts')}",
+                confidence=confidence,
+                business_impact_estimate=impact_estimate,
+            )
+            matches.append(match)
+            enriched_matches.append(
+                {
+                    **match.model_dump(),
+                    "journey_key": signal.get("journey_key"),
+                    "route": signal.get("route"),
+                    "linked_journey": cluster_meta.get("linked_journey"),
+                }
+            )
+    out = {"window": window, "matches": enriched_matches[:100]}
     await sqlite.save_correlation_report(app_url=app_url, window=window, report=out)
     return out
 

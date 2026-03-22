@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from blop.engine.context_graph import build_failure_neighborhood, get_next_checks_for_release_scope
 from blop.storage import sqlite
 
 
@@ -48,6 +49,9 @@ async def triage_release_blocker(
     business_impact = "Unknown"
     recommended_action = "Review run evidence and consult engineering team."
     suggested_owner: Optional[str] = None
+    graph = None
+    graph_app_url: Optional[str] = None
+    graph_profile_name: Optional[str] = None
 
     # --- Load from run_id ---
     if run_id:
@@ -56,6 +60,8 @@ async def triage_release_blocker(
             cases = await sqlite.list_cases_for_run(run_id)
             run_artifacts = await sqlite.list_artifacts_for_run(run_id)
             artifacts = [a["path"] for a in run_artifacts if a.get("path")]
+            graph_app_url = run.get("app_url")
+            graph_profile_name = run.get("profile_name")
 
     # --- Load from journey_id (flow_id) ---
     elif effective_flow_id:
@@ -64,6 +70,8 @@ async def triage_release_blocker(
         # Collect screenshots from recent cases
         for case in cases:
             artifacts.extend(getattr(case, "screenshots", []))
+        if cases:
+            graph_app_url = getattr(cases[0], "app_url", None) or graph_app_url
 
     # --- Load from incident_cluster_id ---
     cluster = None
@@ -71,6 +79,8 @@ async def triage_release_blocker(
     if incident_cluster_id:
         cluster = await sqlite.get_incident_cluster(incident_cluster_id)
         remediation = await sqlite.get_remediation_draft(incident_cluster_id)
+        if cluster:
+            graph_app_url = cluster.app_url
         if not remediation and generate_remediation and cluster:
             try:
                 from blop.tools.v2_surface import generate_remediation as gen_rem
@@ -82,6 +92,9 @@ async def triage_release_blocker(
             except Exception:
                 pass
 
+    if graph_app_url:
+        graph = await sqlite.get_latest_context_graph(graph_app_url, profile_name=graph_profile_name)
+
     # --- Build evidence summary ---
     failed_cases = [
         c for c in cases
@@ -89,19 +102,43 @@ async def triage_release_blocker(
     ]
     blocker_cases = [c for c in failed_cases if getattr(c, "severity", "") == "blocker"]
 
+    neighborhood = {}
     if cluster:
+        cluster_meta = cluster.metadata or {}
+        neighborhood = {
+            "journey": cluster_meta.get("linked_journey"),
+            "journey_key": cluster_meta.get("journey_key"),
+            "entry_routes": cluster_meta.get("entry_routes", []),
+            "business_criticality": cluster.affected_criticality[0] if cluster.affected_criticality else "other",
+            "auth_required": cluster_meta.get("auth_required", False),
+            "coverage_status": cluster_meta.get("coverage_status", "unknown"),
+            "areas": cluster_meta.get("areas", []),
+        }
         likely_cause = cluster.title
         evidence_parts.append(f"Incident cluster: {cluster.title} (severity: {cluster.severity})")
         evidence_parts.append(f"Affected flows: {cluster.affected_flows}")
+        if neighborhood.get("journey"):
+            evidence_parts.append(f"Journey neighborhood: {neighborhood['journey']}")
+        if neighborhood.get("entry_routes"):
+            evidence_parts.append(f"Entry routes: {', '.join(neighborhood['entry_routes'][:3])}")
         if cluster.evidence_refs:
             evidence_parts.append(f"Evidence refs: {', '.join(cluster.evidence_refs[:3])}")
     elif blocker_cases:
         top = blocker_cases[0]
+        neighborhood = build_failure_neighborhood(
+            graph,
+            flow_name=getattr(top, "flow_name", None),
+            flow_id=getattr(top, "flow_id", None),
+        )
         failure_class = getattr(top, "failure_class", None) or "unknown"
         likely_cause = f"{failure_class.replace('_', ' ').title()} in {getattr(top, 'flow_name', 'journey')}"
         repro = getattr(top, "repro_steps", [])
         if repro:
             evidence_parts.append("Repro steps: " + " → ".join(str(s) for s in repro[:3]))
+        if neighborhood.get("journey"):
+            evidence_parts.append(f"Journey neighborhood: {neighborhood['journey']}")
+        if neighborhood.get("entry_routes"):
+            evidence_parts.append(f"Entry routes: {', '.join(neighborhood['entry_routes'][:3])}")
         console_errs = getattr(top, "console_errors", [])
         if console_errs:
             evidence_parts.append(f"Console errors ({len(console_errs)}): {console_errs[0][:150]}")
@@ -110,10 +147,17 @@ async def triage_release_blocker(
             evidence_parts.append(f"Assertion failures: {assertion_fails[0][:150]}")
     elif failed_cases:
         top = failed_cases[0]
+        neighborhood = build_failure_neighborhood(
+            graph,
+            flow_name=getattr(top, "flow_name", None),
+            flow_id=getattr(top, "flow_id", None),
+        )
         likely_cause = f"Failure in {getattr(top, 'flow_name', 'journey')}"
         repro = getattr(top, "repro_steps", [])
         if repro:
             evidence_parts.append("Repro steps: " + " → ".join(str(s) for s in repro[:3]))
+        if neighborhood.get("journey"):
+            evidence_parts.append(f"Journey neighborhood: {neighborhood['journey']}")
 
     if not evidence_parts:
         evidence_parts.append("No detailed evidence captured — check run artifacts.")
@@ -128,6 +172,8 @@ async def triage_release_blocker(
             criticalities.add(crit)
     if cluster and cluster.affected_criticality:
         criticalities.update(cluster.affected_criticality)
+    if neighborhood.get("business_criticality"):
+        criticalities.add(neighborhood["business_criticality"])
 
     if "revenue" in criticalities:
         business_impact = "Revenue-critical journey is broken — directly impacts conversions."
@@ -155,6 +201,15 @@ async def triage_release_blocker(
             recommended_action = f"Investigate: {next_act[-1]}"
         else:
             recommended_action = f"Re-run debug_test_case(case_id='{getattr(top, 'case_id', '')}') for evidence."
+    next_checks = get_next_checks_for_release_scope(
+        graph,
+        failed_journey_labels=[getattr(c, "flow_name", "") for c in failed_cases if getattr(c, "flow_name", "")],
+        limit=3,
+    )
+    if recommended_action == "Review run evidence and consult engineering team." and next_checks:
+        recommended_action = next_checks[0]
+    if suggested_owner is None and neighborhood.get("areas"):
+        suggested_owner = f"Team owning area '{neighborhood['areas'][0]}'"
 
     subject_type = (
         "run" if run_id else
@@ -192,6 +247,7 @@ async def triage_release_blocker(
             "failed_case_count": len(failed_cases),
             "blocker_case_count": len(blocker_cases),
             "top_evidence_refs": top_evidence_refs,
+            "failure_neighborhood": neighborhood,
         },
         "user_business_impact": business_impact,
         "business_priority": business_priority,
@@ -199,6 +255,7 @@ async def triage_release_blocker(
         "recommended_action": recommended_action,
         "suggested_owner": suggested_owner,
         "linked_artifacts": artifacts[:10],
+        "next_checks": next_checks,
         "blocker_case_count": len(blocker_cases),
         "total_failed_cases": len(failed_cases),
         "id_contract": {
