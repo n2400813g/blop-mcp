@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from blop.schemas import SiteInventory
+from blop.schemas import FlowStep, RecordedFlow, SiteInventory
 
 
 def _empty_inventory(app_url: str = "https://example.com") -> SiteInventory:
@@ -78,7 +78,7 @@ def test_detect_checkout_takes_precedence_over_marketing():
 
 def test_build_context_graph_has_nodes_and_edges():
     """Build graph with routes and flows, verify nodes and edges exist."""
-    from blop.engine.context_graph import build_context_graph
+    from blop.engine.context_graph import build_context_graph, get_context_graph_summary
 
     inventory = _empty_inventory()
     inventory.routes = ["/", "/dashboard", "/settings"]
@@ -87,11 +87,30 @@ def test_build_context_graph_has_nodes_and_edges():
         {"href": "/settings", "text": "Settings", "source_route": "/dashboard"},
     ]
     flows = [
-        {"flow_name": "login_flow", "goal": "Log in", "starting_url": "https://example.com/"},
+        {"flow_name": "login_flow", "goal": "Log in", "starting_url": "https://example.com/", "business_criticality": "activation"},
         {"flow_name": "settings_flow", "goal": "Edit settings", "starting_url": "https://example.com/settings"},
     ]
+    recorded = [
+        RecordedFlow(
+            flow_id="rf_settings",
+            flow_name="settings_flow",
+            app_url="https://example.com",
+            goal="Edit settings",
+            steps=[FlowStep(step_id=0, action="navigate", value="https://example.com/settings")],
+            created_at="2026-03-22T10:00:00+00:00",
+            business_criticality="retention",
+            entry_url="https://example.com/settings",
+        )
+    ]
 
-    graph = build_context_graph("https://example.com", inventory, flows, profile_name="test_profile")
+    graph = build_context_graph(
+        "https://example.com",
+        inventory,
+        flows,
+        profile_name="test_profile",
+        recorded_flows=recorded,
+    )
+    summary = get_context_graph_summary(graph)
 
     assert graph.app_url == "https://example.com"
     assert graph.profile_name == "test_profile"
@@ -111,6 +130,111 @@ def test_build_context_graph_has_nodes_and_edges():
 
     assert graph.metadata["inventory_routes"] == 3
     assert graph.metadata["flow_count"] == 2
+    assert graph.metadata["recorded_flow_count"] == 1
+    assert summary.critical_journey_count == 1
+    assert summary.covered_critical_journey_count == 0
+    assert "login_flow" in summary.uncovered_critical_journeys
+
+    settings_node = next(n for n in graph.nodes if n.node_id == "intent:settings_flow")
+    assert settings_node.metadata["coverage_status"] == "recorded"
+    assert settings_node.metadata["recorded_flow_ids"] == ["rf_settings"]
+
+
+def test_release_confidence_summary_infers_auth_boundary_and_uncovered_critical():
+    from blop.engine.context_graph import build_context_graph, get_context_graph_summary, get_uncovered_critical_journeys
+
+    inventory = _empty_inventory()
+    inventory.routes = ["/pricing", "/dashboard", "/billing"]
+    inventory.auth_signals = ["login", "dashboard"]
+    inventory.business_signals = ["pricing", "billing"]
+    flows = [
+        {
+            "flow_name": "checkout_flow",
+            "goal": "Complete checkout",
+            "starting_url": "https://example.com/billing",
+            "business_criticality": "revenue",
+        },
+        {
+            "flow_name": "signup_flow",
+            "goal": "Sign up",
+            "starting_url": "https://example.com/pricing",
+            "business_criticality": "activation",
+        },
+    ]
+    recorded = [
+        RecordedFlow(
+            flow_id="rf_checkout",
+            flow_name="checkout_flow",
+            app_url="https://example.com",
+            goal="Complete checkout",
+            steps=[FlowStep(step_id=0, action="navigate", value="https://example.com/billing")],
+            created_at="2026-03-22T10:00:00+00:00",
+            business_criticality="revenue",
+            entry_url="https://example.com/billing",
+        )
+    ]
+
+    graph = build_context_graph(
+        "https://example.com",
+        inventory,
+        flows,
+        profile_name="prod-auth",
+        recorded_flows=recorded,
+    )
+    summary = get_context_graph_summary(graph)
+    uncovered = get_uncovered_critical_journeys(graph)
+
+    assert summary.critical_journey_count == 2
+    assert summary.covered_critical_journey_count == 1
+    assert summary.auth_boundary_summary.authenticated_routes >= 2
+    assert "signup_flow" in summary.uncovered_critical_journeys
+    assert [journey.label for journey in uncovered] == ["signup_flow"]
+
+
+def test_impacted_journey_ranking_prefers_critical_recorded_coverage():
+    from blop.engine.context_graph import build_context_graph, get_impacted_journeys
+
+    inventory = _empty_inventory()
+    inventory.routes = ["/pricing", "/settings/billing", "/settings/profile"]
+    flows = [
+        {
+            "flow_name": "billing_upgrade",
+            "goal": "Upgrade billing plan",
+            "starting_url": "https://example.com/settings/billing",
+            "business_criticality": "revenue",
+        },
+        {
+            "flow_name": "profile_update",
+            "goal": "Update profile",
+            "starting_url": "https://example.com/settings/profile",
+            "business_criticality": "retention",
+        },
+    ]
+    recorded = [
+        RecordedFlow(
+            flow_id="rf_billing",
+            flow_name="billing_upgrade",
+            app_url="https://example.com",
+            goal="Upgrade billing plan",
+            steps=[FlowStep(step_id=0, action="navigate", value="https://example.com/settings/billing")],
+            created_at="2026-03-22T10:00:00+00:00",
+            business_criticality="revenue",
+            entry_url="https://example.com/settings/billing",
+        )
+    ]
+    graph = build_context_graph("https://example.com", inventory, flows, recorded_flows=recorded)
+
+    impacted = get_impacted_journeys(
+        graph,
+        changed_files=["src/features/billing/upgrade.tsx", "src/routes/settings/billing.tsx"],
+        changed_routes=["/settings/billing"],
+        limit=3,
+    )
+
+    assert impacted
+    assert impacted[0].label == "billing_upgrade"
+    assert impacted[0].coverage_status == "recorded"
+    assert "billing" in impacted[0].matched_segments
 
 
 def test_diff_context_graph_no_previous():

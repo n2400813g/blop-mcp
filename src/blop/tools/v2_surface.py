@@ -22,7 +22,14 @@ from datetime import datetime, timedelta, timezone
 from statistics import quantiles
 from urllib.parse import quote
 
-from blop.engine.context_graph import diff_context_graph
+from blop.engine.context_graph import (
+    build_impact_summary,
+    diff_context_graph,
+    get_context_graph_summary,
+    get_impacted_journeys,
+    get_uncovered_critical_journeys,
+    summarize_release_scope,
+)
 from blop.engine.secrets import mask_text
 from blop.schemas import (
     CorrelationMatch,
@@ -460,8 +467,8 @@ async def capture_context(
     Only triggers a lightweight plan_flows_from_inventory call when intent_focus is set.
     """
     from blop.engine.discovery import inventory_site, plan_flows_from_inventory
-    from blop.engine.context_graph import build_context_graph
-    from blop.storage.sqlite import get_latest_context_graph, save_context_graph
+    from blop.engine.context_graph import build_context_graph, get_context_graph_summary
+    from blop.storage.sqlite import get_flow, get_latest_context_graph, list_flows, save_context_graph
 
     inventory = await inventory_site(
         app_url=app_url,
@@ -492,14 +499,24 @@ async def capture_context(
                 flows = []
 
     previous_graph = await get_latest_context_graph(app_url, profile_name=profile_name)
+    flow_refs = await list_flows()
+    recorded_flows = []
+    for flow_ref in flow_refs:
+        if flow_ref.get("app_url") != app_url:
+            continue
+        flow_obj = await get_flow(flow_ref["flow_id"])
+        if flow_obj is not None:
+            recorded_flows.append(flow_obj)
     current_graph = build_context_graph(
         app_url=app_url,
         inventory=inventory,
         flows=flows,
         profile_name=profile_name,
+        recorded_flows=recorded_flows,
     )
     graph_diff = diff_context_graph(previous_graph, current_graph)
     await save_context_graph(current_graph)
+    summary = get_context_graph_summary(current_graph)
 
     return {
         "graph_id": current_graph.graph_id,
@@ -508,6 +525,10 @@ async def capture_context(
         "node_count": len(current_graph.nodes),
         "edge_count": len(current_graph.edges),
         "archetype": current_graph.archetype,
+        "critical_journey_count": summary.critical_journey_count,
+        "covered_critical_journey_count": summary.covered_critical_journey_count,
+        "uncovered_critical_journeys": summary.uncovered_critical_journeys,
+        "auth_boundary_summary": summary.auth_boundary_summary.model_dump(),
         "diff_summary": {
             "previous_graph_id": graph_diff.previous_graph_id,
             "added_nodes": len(graph_diff.added_nodes),
@@ -537,25 +558,8 @@ async def compare_context(
         return {"error": "Graph IDs do not match app_url"}
 
     diff = diff_context_graph(baseline, candidate)
-    lens = impact_lens or ["revenue", "activation"]
-    impact_summary = []
-    for criticality in lens:
-        affected = 0
-        for node in candidate.nodes:
-            if node.node_type != "intent":
-                continue
-            if (node.metadata or {}).get("business_criticality", "other") != criticality:
-                continue
-            affected += 1
-        raw_risk = (affected * 5) + (len(diff.added_nodes) * 1.2) + (len(diff.removed_nodes) * 1.6)
-        risk_level = _severity_from_score(min(100.0, raw_risk))
-        impact_summary.append(
-            {
-                "criticality": criticality,
-                "risk_level": risk_level,
-                "affected_journeys": affected,
-            }
-        )
+    release_scope = summarize_release_scope(baseline, candidate)
+    impact_summary = [item.model_dump() for item in build_impact_summary(baseline, candidate, impact_lens)]
 
     return {
         "app_url": app_url,
@@ -568,6 +572,7 @@ async def compare_context(
             "removed_edges": diff.removed_edges,
             "confidence_delta": diff.confidence_delta,
         },
+        "release_scope": release_scope.model_dump(),
         "impact_summary": impact_summary,
     }
 
@@ -606,8 +611,11 @@ async def assess_release_risk(
             impact_lens=["revenue", "activation", "retention", "support", "other"],
         )
         if not compare.get("error"):
-            diff = compare["structural_diff"]
-            context_risk = min(40.0, (len(diff["added_nodes"]) * 1.2) + (len(diff["removed_nodes"]) * 1.8))
+            release_scope = compare.get("release_scope", {})
+            impacted_count = len(release_scope.get("changed_journeys", []))
+            uncovered_count = len(release_scope.get("newly_uncovered_journeys", []))
+            auth_boundary_changed = bool(release_scope.get("auth_boundary_changed"))
+            context_risk = min(40.0, (impacted_count * 8.0) + (uncovered_count * 12.0) + (8.0 if auth_boundary_changed else 0.0))
             for item in compare["impact_summary"][:5]:
                 top_risks.append(
                     {
@@ -616,8 +624,19 @@ async def assess_release_risk(
                         "criticality": item["criticality"],
                         "evidence": [
                             f"affected_journeys={item['affected_journeys']}",
+                            f"changed_journeys={len(item.get('changed_journeys', []))}",
+                            f"newly_uncovered={len(item.get('newly_uncovered_journeys', []))}",
                             f"context_diff:{baseline.graph_id}->{candidate.graph_id}",
                         ],
+                    }
+                )
+            for journey_name in release_scope.get("newly_uncovered_journeys", [])[:3]:
+                top_risks.append(
+                    {
+                        "risk_id": uuid.uuid4().hex,
+                        "title": f"{journey_name} is no longer covered by a recorded journey",
+                        "criticality": "activation" if "signup" in journey_name.lower() else "other",
+                        "evidence": [f"context_diff:{baseline.graph_id}->{candidate.graph_id}"],
                     }
                 )
 
@@ -1039,87 +1058,35 @@ async def suggest_flows_for_diff(
             "note": "No context graph found. Run blop_v2_capture_context first.",
         }
 
-    # Extract meaningful path segments from changed files
-    stopwords = {
-        "src", "app", "lib", "pages", "components", "utils", "js", "ts",
-        "tsx", "jsx", "index", "test", "spec", "stories", "style", "css",
-        "scss", "mod", "pkg", "go", "py",
-    }
-    raw_segments: list[str] = []
-    for path in changed_files:
-        for part in re.split(r"[/._\-]", path):
-            if len(part) >= 3 and part.lower() not in stopwords:
-                raw_segments.append(part.lower())
-    if changed_routes:
-        for route in changed_routes:
-            for part in re.split(r"[/._\-]", route):
-                if len(part) >= 3:
-                    raw_segments.append(part.lower())
-    changed_segments = list(dict.fromkeys(raw_segments))  # dedup, preserve order
-
-    criticality_weights = _default_criticality_weights()
-
-    # Score route nodes by segment overlap with changed_segments
-    route_scores: dict[str, float] = {}
-    for node in graph.nodes:
-        if node.node_type != "route":
-            continue
-        score = sum(1.0 for seg in changed_segments if seg in node.label.lower())
-        if score > 0:
-            route_scores[node.node_id] = score
-
-    # Find intent nodes connected to high-scoring routes via supports_intent edges
-    intent_scores: dict[str, float] = {}
-    for edge in graph.edges:
-        if edge.edge_type != "supports_intent":
-            continue
-        route_score = route_scores.get(edge.source_id, 0.0)
-        if route_score > 0:
-            intent_id = edge.target_id
-            intent_scores[intent_id] = intent_scores.get(intent_id, 0.0) + route_score
-
-    # Build intent → criticality map
-    intent_meta: dict[str, dict] = {}
-    for node in graph.nodes:
-        if node.node_type == "intent":
-            intent_meta[node.node_id] = node.metadata or {}
-
-    # Rank by (score * criticality_weight) DESC
-    ranked: list[tuple[float, str]] = []
-    for intent_id, score in intent_scores.items():
-        bc = intent_meta.get(intent_id, {}).get("business_criticality", "other")
-        w = criticality_weights.get(bc, 0.3)
-        ranked.append((score * w, intent_id))
-    ranked.sort(key=lambda x: x[0], reverse=True)
-
-    # Match intent labels to recorded flows
-    flows = await sqlite.list_flows()
-    flow_by_name: dict[str, dict] = {f["flow_name"]: f for f in flows if f.get("app_url") == app_url}
+    impacted = get_impacted_journeys(
+        graph=graph,
+        changed_files=changed_files,
+        changed_routes=changed_routes,
+        limit=limit,
+    )
+    changed_segments = []
+    for item in impacted:
+        for segment in item.matched_segments:
+            if segment not in changed_segments:
+                changed_segments.append(segment)
 
     suggestions: list[dict] = []
     suggested_flow_ids: list[str] = []
-
-    for score, intent_id in ranked[:limit]:
-        intent_label = intent_id.replace("intent:", "")
-        bc = intent_meta.get(intent_id, {}).get("business_criticality", "other")
-        goal = intent_meta.get(intent_id, {}).get("goal", "")
-        matched_flow = flow_by_name.get(intent_label)
-
-        suggestion: dict = {
-            "intent_label": intent_label,
-            "business_criticality": bc,
-            "match_score": round(score, 2),
-            "rationale": (
-                f"Changed segments {[s for s in changed_segments if any(s in n.label.lower() for n in graph.nodes if n.node_type == 'route')][:3]} "
-                f"overlap with route nodes connected to '{intent_label}' intent (score={score:.1f})"
-            ),
-            "goal": goal,
+    for item in impacted:
+        suggestion = {
+            "intent_label": item.label,
+            "business_criticality": item.business_criticality,
+            "coverage_status": item.coverage_status,
+            "match_score": round(item.impact_score, 2),
+            "matched_segments": item.matched_segments,
+            "entry_routes": item.entry_routes,
+            "rationale": item.rationale,
+            "goal": item.goal,
         }
-        if matched_flow:
-            suggestion["flow_id"] = matched_flow["flow_id"]
-            suggestion["flow_name"] = matched_flow["flow_name"]
-            suggested_flow_ids.append(matched_flow["flow_id"])
-
+        if item.flow_id:
+            suggestion["flow_id"] = item.flow_id
+            suggestion["flow_name"] = item.flow_name
+            suggested_flow_ids.append(item.flow_id)
         suggestions.append(suggestion)
 
     return {
@@ -1151,39 +1118,36 @@ async def autogenerate_flows(
             "note": "No context graph found. Run blop_v2_capture_context first.",
         }
 
-    # All recorded flow names for this app
-    flows = await sqlite.list_flows()
-    recorded_names: set[str] = {f["flow_name"] for f in flows if f.get("app_url") == app_url}
-
-    criticality_weights = _default_criticality_weights()
-
-    # Collect intent nodes without a matching recorded flow
-    candidates: list[tuple[float, object]] = []
-    for node in graph.nodes:
-        if node.node_type != "intent":
-            continue
-        flow_name = node.label
-        if flow_name in recorded_names:
-            continue
-        bc = (node.metadata or {}).get("business_criticality", "other")
-        if criticality_filter and bc not in criticality_filter:
-            continue
-        w = criticality_weights.get(bc, 0.3)
-        candidates.append((w * node.confidence, node))
-
-    candidates.sort(key=lambda x: x[0], reverse=True)
+    journeys = get_uncovered_critical_journeys(graph)
+    if criticality_filter:
+        journeys = [journey for journey in journeys if journey.business_criticality in criticality_filter]
+    uncovered_other = []
+    if len(journeys) < limit:
+        summary = get_context_graph_summary(graph)
+        all_journeys = summary.top_journeys + get_uncovered_critical_journeys(graph)
+        seen = {journey.journey_key for journey in journeys}
+        for journey in all_journeys:
+            if journey.journey_key in seen or journey.coverage_status == "recorded":
+                continue
+            if criticality_filter and journey.business_criticality not in criticality_filter:
+                continue
+            uncovered_other.append(journey)
+            seen.add(journey.journey_key)
+    candidates = (journeys + uncovered_other)[:limit]
 
     synthesized: list[dict] = []
     recorded_flow_ids: list[str] = []
 
-    for _, node in candidates[:limit]:
-        bc = (node.metadata or {}).get("business_criticality", "other")
-        goal = (node.metadata or {}).get("goal", f"Complete the {node.label} flow on {app_url}")
+    for journey in candidates[:limit]:
+        bc = journey.business_criticality
+        goal = journey.goal or f"Complete the {journey.label} flow on {app_url}"
         flow_spec: dict = {
-            "flow_name": node.label,
+            "flow_name": journey.label,
             "goal": goal,
-            "starting_url": app_url,
+            "starting_url": journey.entry_routes[0] if journey.entry_routes else app_url,
             "business_criticality": bc,
+            "coverage_status": journey.coverage_status,
+            "entry_routes": journey.entry_routes,
         }
 
         if auto_record:
@@ -1191,7 +1155,7 @@ async def autogenerate_flows(
                 from blop.tools.record import record_test_flow
                 result = await record_test_flow(
                     app_url=app_url,
-                    flow_name=node.label,
+                    flow_name=journey.label,
                     goal=goal,
                     profile_name=profile_name,
                     business_criticality=bc,
@@ -1223,6 +1187,7 @@ async def get_context_latest_resource(app_url: str) -> dict:
         "created_at": graph.created_at,
         "node_count": len(graph.nodes),
         "edge_count": len(graph.edges),
+        "summary": get_context_graph_summary(graph).model_dump(),
         "metadata": graph.metadata,
     }
     return _resource_envelope(app_url, data)

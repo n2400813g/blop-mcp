@@ -708,18 +708,33 @@ async def discover_flows(
         flows += _fallback_flows(app_url)[: 3 - len(flows)]
 
     passed, warnings = quality_gate_flows(inventory, flows)
-    from blop.engine.context_graph import build_context_graph, detect_app_archetype, diff_context_graph
-    from blop.storage.sqlite import get_latest_context_graph, save_context_graph
+    from blop.engine.context_graph import (
+        build_context_graph,
+        detect_app_archetype,
+        diff_context_graph,
+        get_context_graph_summary,
+    )
+    from blop.storage.sqlite import get_flow, get_latest_context_graph, list_flows, save_context_graph
 
     previous_graph = await get_latest_context_graph(app_url, profile_name=profile_name)
+    flow_refs = await list_flows()
+    recorded_flows = []
+    for flow_ref in flow_refs:
+        if flow_ref.get("app_url") != app_url:
+            continue
+        flow_obj = await get_flow(flow_ref["flow_id"])
+        if flow_obj is not None:
+            recorded_flows.append(flow_obj)
     current_graph = build_context_graph(
         app_url=app_url,
         inventory=inventory,
         flows=flows,
         profile_name=profile_name,
+        recorded_flows=recorded_flows,
     )
     graph_diff = diff_context_graph(previous_graph, current_graph)
     await save_context_graph(current_graph)
+    graph_summary = get_context_graph_summary(current_graph)
 
     result = {
         "app_url": app_url,
@@ -744,6 +759,7 @@ async def discover_flows(
             "node_count": len(current_graph.nodes),
             "edge_count": len(current_graph.edges),
             "archetype": current_graph.archetype,
+            "summary": graph_summary.model_dump(),
             "diff": graph_diff.model_dump(),
         },
     }

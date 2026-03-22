@@ -326,6 +326,73 @@ class ReleaseReference(BaseModel):
     run_id: str | None = None
 
 
+class AuthBoundarySummary(BaseModel):
+    profile_name: str | None = None
+    anonymous_routes: int = 0
+    authenticated_routes: int = 0
+    mixed_routes: int = 0
+    auth_required_journeys: int = 0
+
+
+class JourneySummary(BaseModel):
+    journey_key: str
+    label: str
+    goal: str = ""
+    business_criticality: Literal["revenue", "activation", "retention", "support", "other"] = "other"
+    auth_required: bool = False
+    entry_routes: list[str] = Field(default_factory=list)
+    coverage_status: Literal["recorded", "discovered_only", "uncovered"] = "uncovered"
+    recorded_flow_ids: list[str] = Field(default_factory=list)
+    confidence: float = 0.5
+    confidence_reason: str | None = None
+    freshness_ts: str | None = None
+    observed_at: str | None = None
+    source_refs: list[str] = Field(default_factory=list)
+    source_kinds: list[str] = Field(default_factory=list)
+
+
+class ImpactedJourney(BaseModel):
+    journey_key: str
+    label: str
+    business_criticality: Literal["revenue", "activation", "retention", "support", "other"] = "other"
+    coverage_status: Literal["recorded", "discovered_only", "uncovered"] = "uncovered"
+    match_score: float = 0.0
+    impact_score: float = 0.0
+    matched_segments: list[str] = Field(default_factory=list)
+    entry_routes: list[str] = Field(default_factory=list)
+    rationale: str = ""
+    flow_id: str | None = None
+    flow_name: str | None = None
+    goal: str = ""
+
+
+class ContextGraphSummary(BaseModel):
+    route_surface_count: int = 0
+    journey_count: int = 0
+    critical_journey_count: int = 0
+    covered_critical_journey_count: int = 0
+    uncovered_critical_journeys: list[str] = Field(default_factory=list)
+    auth_boundary_summary: AuthBoundarySummary = Field(default_factory=AuthBoundarySummary)
+    top_journeys: list[JourneySummary] = Field(default_factory=list)
+
+
+class ContextImpactSummary(BaseModel):
+    criticality: Literal["revenue", "activation", "retention", "support", "other"] = "other"
+    risk_level: Literal["low", "medium", "high", "blocker"] = "low"
+    affected_journeys: int = 0
+    changed_journeys: list[str] = Field(default_factory=list)
+    newly_uncovered_journeys: list[str] = Field(default_factory=list)
+
+
+class ReleaseScopeSummary(BaseModel):
+    previous_graph_id: str | None = None
+    current_graph_id: str
+    changed_journeys: list[str] = Field(default_factory=list)
+    newly_uncovered_journeys: list[str] = Field(default_factory=list)
+    auth_boundary_changed: bool = False
+    top_impacted_journeys: list[JourneySummary] = Field(default_factory=list)
+
+
 class TelemetrySignalInput(BaseModel):
     ts: str
     signal_type: Literal["error_rate", "latency_p95", "conversion", "custom"] = "custom"
@@ -461,6 +528,7 @@ class ReplayTrace:
     raw_result: str = ""
     trace_path: str | None = None
     performance_metrics: list[dict] = field(default_factory=list)
+    landing_url: str | None = None
 
 
 class HealedStep(BaseModel):
