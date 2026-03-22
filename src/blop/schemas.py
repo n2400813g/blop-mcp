@@ -91,6 +91,47 @@ class SpaHints(BaseModel):
     editor_settle_ms: int = 8000               # Settle time for canvas/WebGL views (ms)
 
 
+class IntentContract(BaseModel):
+    goal_text: str
+    goal_type: Literal["navigation", "milestone", "transaction", "gate_check", "editor_panel", "exploration"] = "milestone"
+    target_surface: Literal["public_site", "authenticated_app", "editor", "billing", "settings", "unknown"] = "unknown"
+    success_assertions: list[str] = Field(default_factory=list)
+    must_interact: list[str] = Field(default_factory=list)
+    forbidden_shortcuts: list[str] = Field(default_factory=list)
+    scope: Literal["public", "authed", "both"] = "both"
+    business_criticality: Literal["revenue", "activation", "retention", "support", "other"] = "other"
+    planning_source: Literal["nl_command", "explicit_goal", "discovery_flow", "baseline_recipe", "legacy_unstructured"] = "explicit_goal"
+    expected_url_patterns: list[str] = Field(default_factory=list)
+    allowed_fallbacks: list[Literal["hybrid_repair", "goal_fallback", "hard_rerecord"]] = Field(default_factory=list)
+
+
+class DriftSummary(BaseModel):
+    drift_detected: bool = False
+    drift_types: list[Literal["surface_drift", "auth_drift", "plan_drift", "assertion_drift", "repair_drift", "legacy_unstructured"]] = Field(default_factory=list)
+    allowed_fallback_used: list[str] = Field(default_factory=list)
+    disallowed_fallback_used: list[str] = Field(default_factory=list)
+    surface_match: bool | None = None
+    assertion_match: bool | None = None
+    plan_fidelity: Literal["high", "medium", "low"] = "high"
+    intended_surface: str | None = None
+    actual_surface: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class ExecutionPlan(BaseModel):
+    intent: Literal["discover", "record", "regress", "debug"]
+    goal_text: str
+    effective_auth_expectation: Literal["anonymous", "authenticated", "mixed"] = "mixed"
+    target_surface: Literal["public_site", "authenticated_app", "editor", "billing", "settings", "unknown"] = "unknown"
+    intended_replay_mode: Literal["hybrid", "strict_steps", "goal_fallback"] = "hybrid"
+    expected_landing_url_patterns: list[str] = Field(default_factory=list)
+    required_assertion_phrases: list[str] = Field(default_factory=list)
+    fallback_policy: list[Literal["hybrid_repair", "goal_fallback", "hard_rerecord"]] = Field(default_factory=list)
+    planning_source: Literal["nl_command", "explicit_goal", "discovery_flow", "baseline_recipe", "legacy_unstructured"] = "explicit_goal"
+    scope: Literal["public", "authed", "both"] = "both"
+    business_criticality: Literal["revenue", "activation", "retention", "support", "other"] = "other"
+
+
 class FlowStep(BaseModel):
     step_id: int
     action: Literal["navigate", "click", "fill", "select", "upload", "drag", "assert", "wait"]
@@ -126,10 +167,77 @@ class RecordedFlow(BaseModel):
     entry_url: str | None = None
     business_criticality: Literal["revenue", "activation", "retention", "support", "other"] = "other"
     spa_hints: SpaHints = Field(default_factory=SpaHints)
+    intent_contract: IntentContract | None = None
     # When set, overrides the run_mode passed to run_regression_test for this flow.
     # Useful for editor-heavy flows whose selectors don't survive replay (goal_fallback)
     # or for flows that must use strict step ordering (strict_steps).
     run_mode_override: Literal["hybrid", "strict_steps", "goal_fallback"] | None = None
+
+
+class AuthenticatedBaselineRecipe(BaseModel):
+    """Reusable recipe for promoting an authenticated SaaS golden flow into a strict replay gate."""
+
+    recipe_type: Literal[
+        "role_click_to_url",
+        "role_click_to_text",
+        "selector_then_role_to_url",
+        "text_click_to_text",
+        "text_then_text_to_text",
+        "text_then_selector_to_text",
+    ]
+    flow_name: str
+    goal: str
+    business_criticality: Literal["revenue", "activation", "retention", "support", "other"] = "other"
+    entry_url: str | None = None
+    trigger_role: str | None = None
+    trigger_name: str | None = None
+    trigger_selector: str | None = None
+    trigger_text: str | None = None
+    follow_up_role: str | None = None
+    follow_up_name: str | None = None
+    follow_up_text: str | None = None
+    follow_up_selector: str | None = None
+    expected_url_contains: str | None = None
+    expected_text: str | None = None
+    wait_before_assert_secs: float = 3.0
+    intermediate_wait_secs: float = 2.0
+
+    @model_validator(mode="after")
+    def _validate_shape(self) -> "AuthenticatedBaselineRecipe":
+        if self.recipe_type in {"role_click_to_url", "role_click_to_text"}:
+            if not self.trigger_role or not self.trigger_name:
+                raise ValueError(f"{self.recipe_type} requires trigger_role and trigger_name")
+        if self.recipe_type == "role_click_to_url" and not self.expected_url_contains:
+            raise ValueError("role_click_to_url requires expected_url_contains")
+        if self.recipe_type == "role_click_to_text" and not self.expected_text:
+            raise ValueError("role_click_to_text requires expected_text")
+        if self.recipe_type == "selector_then_role_to_url":
+            if not self.trigger_selector:
+                raise ValueError("selector_then_role_to_url requires trigger_selector")
+            if not self.follow_up_role or not self.follow_up_name:
+                raise ValueError("selector_then_role_to_url requires follow_up_role and follow_up_name")
+            if not self.expected_url_contains:
+                raise ValueError("selector_then_role_to_url requires expected_url_contains")
+        if self.recipe_type == "text_click_to_text":
+            if not self.trigger_text:
+                raise ValueError("text_click_to_text requires trigger_text")
+            if not self.expected_text:
+                raise ValueError("text_click_to_text requires expected_text")
+        if self.recipe_type == "text_then_text_to_text":
+            if not self.trigger_text:
+                raise ValueError("text_then_text_to_text requires trigger_text")
+            if not self.follow_up_text:
+                raise ValueError("text_then_text_to_text requires follow_up_text")
+            if not self.expected_text:
+                raise ValueError("text_then_text_to_text requires expected_text")
+        if self.recipe_type == "text_then_selector_to_text":
+            if not self.trigger_text:
+                raise ValueError("text_then_selector_to_text requires trigger_text")
+            if not self.follow_up_selector:
+                raise ValueError("text_then_selector_to_text requires follow_up_selector")
+            if not self.expected_text:
+                raise ValueError("text_then_selector_to_text requires expected_text")
+        return self
 
 
 @dataclass
@@ -393,6 +501,8 @@ class FailureCase(BaseModel):
     healed_steps: list[HealedStep] = Field(default_factory=list)
     rerecorded: bool = False
     performance_metrics: list[dict] = Field(default_factory=list)
+    intent_contract: IntentContract | None = None
+    drift_summary: DriftSummary = Field(default_factory=DriftSummary)
 
 
 class DiscoverResult(BaseModel):

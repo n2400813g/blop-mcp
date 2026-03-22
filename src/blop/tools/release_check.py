@@ -44,6 +44,20 @@ def _confidence_score_from_label(label: str) -> dict:
     return {"value": mapping.get(label, 0.6), "label": label}
 
 
+def _summarize_selected_flows(flows: list) -> list[dict]:
+    summaries: list[dict] = []
+    for flow in flows[:5]:
+        summaries.append(
+            {
+                "flow_id": getattr(flow, "flow_id", ""),
+                "flow_name": getattr(flow, "flow_name", ""),
+                "business_criticality": getattr(flow, "business_criticality", "other"),
+                "goal": getattr(flow, "goal", ""),
+            }
+        )
+    return summaries
+
+
 def _build_release_check_result(
     run_result: dict,
     release_id: str,
@@ -150,6 +164,7 @@ async def _save_release_brief(release_check_result: dict, app_url: str) -> None:
 async def run_release_check(
     app_url: str,
     journey_ids: Optional[list[str]] = None,
+    flow_ids: Optional[list[str]] = None,
     profile_name: Optional[str] = None,
     mode: Literal["replay", "targeted"] = "replay",
     criticality_filter: Optional[list[str]] = None,
@@ -164,7 +179,8 @@ async def run_release_check(
 
     Args:
         app_url: The app to check.
-        journey_ids: flow_ids to replay. If None, uses all recorded flows filtered
+        journey_ids: Deprecated alias for flow_ids.
+        flow_ids: Recorded flow IDs to replay. If None, uses all recorded flows filtered
             by criticality_filter (defaults to revenue + activation).
         profile_name: Auth profile for flows that require login.
         mode: "replay" (default) uses the regression engine on recorded flows.
@@ -179,16 +195,20 @@ async def run_release_check(
     if url_err:
         return {"error": url_err}
 
+    if journey_ids and flow_ids:
+        return {"error": "Pass only one of flow_ids or journey_ids. journey_ids is a deprecated alias for flow_ids."}
+
     release_id = release_id or uuid.uuid4().hex
     criticality_filter = criticality_filter or ["revenue", "activation"]
+    effective_flow_ids = flow_ids if flow_ids is not None else journey_ids
 
     if mode == "targeted":
-        return await _run_targeted(app_url, journey_ids, profile_name, release_id, headless)
+        return await _run_targeted(app_url, effective_flow_ids, profile_name, release_id, headless)
 
     # Default: replay mode
     return await _run_replay(
         app_url=app_url,
-        journey_ids=journey_ids,
+        flow_ids=effective_flow_ids,
         profile_name=profile_name,
         criticality_filter=criticality_filter,
         release_id=release_id,
@@ -199,7 +219,7 @@ async def run_release_check(
 
 async def _run_replay(
     app_url: str,
-    journey_ids: Optional[list[str]],
+    flow_ids: Optional[list[str]],
     profile_name: Optional[str],
     criticality_filter: list[str],
     release_id: str,
@@ -209,26 +229,33 @@ async def _run_replay(
     from blop.tools.regression import run_regression_test
 
     # Resolve flow_ids if not provided
-    if not journey_ids:
+    selected_flows = []
+    if not flow_ids:
         all_flows = await sqlite.list_flows()
-        journey_ids = []
+        flow_ids = []
         for f in all_flows:
             flow_obj = await sqlite.get_flow(f["flow_id"])
             if flow_obj and flow_obj.business_criticality in criticality_filter:
-                journey_ids.append(f["flow_id"])
+                flow_ids.append(f["flow_id"])
+                selected_flows.append(flow_obj)
+    else:
+        for flow_id in flow_ids:
+            flow_obj = await sqlite.get_flow(flow_id)
+            if flow_obj:
+                selected_flows.append(flow_obj)
 
-    if not journey_ids:
+    if not flow_ids:
         return {
             "error": (
                 "No recorded flows found matching criticality_filter. "
-                "Record journeys first with record_test_flow, or pass explicit journey_ids."
+                "Record journeys first with record_test_flow, or pass explicit flow_ids."
             ),
             "release_id": release_id,
         }
 
     run_result = await run_regression_test(
         app_url=app_url,
-        flow_ids=journey_ids,
+        flow_ids=flow_ids,
         profile_name=profile_name,
         headless=headless,
         run_mode=run_mode,
@@ -245,17 +272,24 @@ async def _run_replay(
         "release_id": release_id,
         "run_id": run_id,
         "status": status,
-        "journey_count": len(journey_ids),
+        "flow_count": len(flow_ids),
+        "selected_flows": _summarize_selected_flows(selected_flows),
+        "active_gating_policy": {
+            "mode": "replay",
+            "criticality_filter": criticality_filter,
+            "default_release_gates": ["revenue", "activation"],
+        },
         "resource_links": {
             "brief": f"blop://release/{release_id}/brief",
             "artifacts": f"blop://release/{release_id}/artifacts",
             "incidents": f"blop://release/{release_id}/incidents",
         },
-        "workflow_hint": (
-            f"Release check queued (run_id='{run_id}', release_id='{release_id}'). "
-            f"Poll: get_test_results(run_id='{run_id}'). "
-            f"Then: triage_release_blocker(run_id='{run_id}') for any blockers."
-        ),
+        "recommended_next_step": {
+            "tool": "get_test_results",
+            "arguments": {"run_id": run_id},
+            "reason": "Poll the queued release check until it reaches a terminal status.",
+        },
+        "workflow_hint": f"Release check queued. Next: get_test_results(run_id='{run_id}').",
     }
 
     # Best-effort persist a preliminary brief
@@ -281,7 +315,7 @@ async def _run_replay(
 
 async def _run_targeted(
     app_url: str,
-    journey_ids: Optional[list[str]],
+    flow_ids: Optional[list[str]],
     profile_name: Optional[str],
     release_id: str,
     headless: bool,
@@ -290,8 +324,8 @@ async def _run_targeted(
 
     # Build a task from journey goals or a generic one
     tasks: list[str] = []
-    if journey_ids:
-        for fid in journey_ids:
+    if flow_ids:
+        for fid in flow_ids:
             flow = await sqlite.get_flow(fid)
             if flow:
                 tasks.append(flow.goal)
@@ -339,4 +373,20 @@ async def _run_targeted(
 
     result["mode"] = "targeted"
     result["evaluation_summary"] = eval_result.get("summary", [])
+    result["selected_flows"] = []
+    result["active_gating_policy"] = {
+        "mode": "targeted",
+        "criticality_filter": ["revenue", "activation"],
+        "default_release_gates": ["revenue", "activation"],
+    }
+    result["recommended_next_step"] = {
+        "tool": "triage_release_blocker" if decision != "SHIP" else None,
+        "resource": None if decision != "SHIP" else f"blop://release/{release_id}/brief",
+        "arguments": {"release_id": release_id} if decision != "SHIP" else {},
+        "reason": (
+            "Investigate the targeted result before making a release decision."
+            if decision != "SHIP"
+            else "Review the release brief and ship if it matches scope."
+        ),
+    }
     return result

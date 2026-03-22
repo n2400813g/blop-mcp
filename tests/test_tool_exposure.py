@@ -32,6 +32,13 @@ def test_canonical_four_tools_always_registered():
     assert not missing, f"Canonical tools not registered: {missing}"
 
 
+def test_authenticated_baseline_packager_is_registered():
+    import blop.server  # noqa: F401
+
+    registered = _get_registered_tool_names()
+    assert "package_authenticated_saas_baseline" in registered
+
+
 def test_compat_tools_absent_by_default():
     """With BLOP_ENABLE_COMPAT_TOOLS unset, compat tools must not appear."""
     env = {k: v for k, v in os.environ.items() if k != "BLOP_ENABLE_COMPAT_TOOLS"}
@@ -76,3 +83,18 @@ def test_safe_call_wraps_exceptions():
     assert "error" in result
     assert result.get("error_type") == "ValueError"
     assert result.get("tool") == "test_tool"
+
+
+def test_legacy_docstrings_point_to_canonical_alternatives():
+    import blop.server as server
+
+    assert "discover_critical_journeys" in (server.discover_test_flows.__doc__ or "")
+    assert "run_release_check" in (server.run_regression_test.__doc__ or "")
+    assert "blop://journeys resource" in (server.list_recorded_tests.__doc__ or "")
+
+
+def test_prompt_resources_marked_internal_debug():
+    import blop.server as server
+
+    assert "Debug/internal resource" in (server.prompts_list_resource.__doc__ or "")
+    assert "Debug/internal resource" in (server.prompt_resource.__doc__ or "")

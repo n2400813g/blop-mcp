@@ -19,6 +19,11 @@ _PENDING_DB_FINALIZERS: set[asyncio.Task] = set()
 _TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "waiting_auth"}
 
 
+def _auth_redirect_detected(url: str) -> bool:
+    lowered = (url or "").lower()
+    return any(token in lowered for token in ("/login", "/signin", "/sign-in", "/auth", "oauth"))
+
+
 def _start_error(message: str) -> dict:
     return {
         "error": message,
@@ -207,6 +212,11 @@ async def run_regression_test(
     profile = None
     if profile_name:
         profile = await sqlite.get_auth_profile(profile_name)
+        if profile is None:
+            return _start_error(
+                f"Auth profile '{profile_name}' was not found. "
+                "Provide a valid profile_name, run save_auth_profile, or use capture_auth_session."
+            )
 
     storage_state: Optional[str] = None
     if profile:
@@ -227,6 +237,21 @@ async def run_regression_test(
 
     artifacts_dir = file_store.artifacts_dir(run_id)
     await sqlite.create_run(run_id, app_url, profile_name, flow_ids, headless, artifacts_dir, run_mode)
+    auth_context_payload = {
+        "profile_name": profile_name,
+        "auth_used": bool(profile_name),
+        "auth_source": getattr(profile, "auth_type", None) if profile else None,
+        "storage_state_path": storage_state,
+        "user_data_dir": getattr(profile, "user_data_dir", None) if profile else None,
+        "session_validation_status": "not_requested",
+    }
+    if storage_state:
+        try:
+            session_valid = await auth_engine.validate_auth_session(storage_state, app_url)
+            auth_context_payload["session_validation_status"] = "valid" if session_valid else "redirected_to_auth"
+        except Exception as exc:
+            auth_context_payload["session_validation_status"] = "validation_error"
+            auth_context_payload["session_validation_error"] = str(exc)[:200]
     await sqlite.save_run_health_event(
         run_id,
         "run_queued",
@@ -237,6 +262,7 @@ async def run_regression_test(
             "profile_name": profile_name,
         },
     )
+    await sqlite.save_run_health_event(run_id, "auth_context_resolved", auth_context_payload)
 
     # Fire-and-forget; caller polls get_test_results
     task = _spawn_background_task(

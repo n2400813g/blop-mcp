@@ -244,3 +244,20 @@ async def test_run_flows_semaphore():
 
     assert len(cases) == 10
     assert max_concurrent <= 5
+
+
+def test_repair_flow_context_suffix_includes_goal_for_weak_steps():
+    from blop.engine.regression import _repair_flow_context_suffix
+
+    step = FlowStep(step_id=1, action="click", target_text="click")
+
+    suffix = _repair_flow_context_suffix(
+        flow_name="view_plans_modal",
+        flow_goal="Open the View Plans button until the upgrade plan modal is visible.",
+        step_index=2,
+        step=step,
+    )
+
+    assert "Flow name: view_plans_modal" in suffix
+    assert "Flow goal: Open the View Plans button" in suffix
+    assert "weak locator data" in suffix

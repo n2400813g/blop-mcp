@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from blop.schemas import FailureCase
+from blop.schemas import AuthProfile, FailureCase
 from blop.tools import results
 
 
@@ -100,3 +100,217 @@ async def test_risk_analytics_empty():
     assert out["analyzed_runs"] == 0
     assert out["business_risk"]["revenue"]["total"] == 0
     assert out["business_risk"]["revenue"]["failed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_get_test_results_adds_summary_first_fields():
+    run = {
+        "run_id": "run-summary",
+        "status": "completed",
+        "started_at": "2026-03-19T10:00:00Z",
+        "completed_at": "2026-03-19T10:02:00Z",
+        "artifacts_dir": "/tmp/runs/run-summary",
+        "run_mode": "hybrid",
+        "app_url": "https://example.com",
+        "next_actions": ["Fix checkout CTA visibility"],
+        "profile_name": "auth-profile",
+        "headless": True,
+    }
+    cases = [
+        FailureCase(
+            case_id="case-1",
+            run_id="run-summary",
+            flow_id="flow-1",
+            flow_name="checkout",
+            status="fail",
+            severity="blocker",
+            business_criticality="revenue",
+            console_errors=["TypeError: x is undefined"],
+            network_errors=["500 https://example.com/api/checkout"],
+            screenshots=["/tmp/runs/run-summary/screenshots/1.png"],
+            trace_path="/tmp/runs/run-summary/traces/case-1.zip",
+            failure_class="test_fragility",
+        )
+    ]
+    auth_profile = AuthProfile(
+        profile_name="auth-profile",
+        auth_type="storage_state",
+        storage_state_path="/tmp/auth_state.json",
+    )
+    events = [
+        {
+            "event_id": "evt-auth",
+            "run_id": "run-summary",
+            "event_type": "auth_context_resolved",
+            "payload": {
+                "profile_name": "auth-profile",
+                "auth_used": True,
+                "auth_source": "storage_state",
+                "storage_state_path": "/tmp/auth_state.json",
+                "session_validation_status": "valid",
+            },
+            "created_at": "2026-03-19T10:00:01Z",
+        },
+        {
+            "event_id": "evt-land",
+            "run_id": "run-summary",
+            "event_type": "auth_landing_observed",
+            "payload": {
+                "flow_id": "flow-1",
+                "flow_name": "checkout",
+                "expected_url": "https://example.com/checkout",
+                "landed_url": "https://example.com/checkout",
+                "page_title": "Checkout",
+                "landed_authenticated": True,
+            },
+            "created_at": "2026-03-19T10:00:02Z",
+        },
+    ]
+
+    with patch("blop.storage.sqlite.get_run", new_callable=AsyncMock, return_value=run):
+        with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=cases):
+            with patch("blop.storage.sqlite.list_run_health_events", new_callable=AsyncMock, return_value=events):
+                with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=auth_profile):
+                    out = await results.get_test_results("run-summary")
+
+    assert out["decision_summary"]["decision"] == "BLOCK"
+    assert out["decision_summary"]["top_blocker_journeys"] == ["checkout"]
+    assert out["evidence_summary"]["failed_case_count"] == 1
+    assert out["evidence_summary"]["top_artifact_refs"] == [
+        "/tmp/runs/run-summary/screenshots/1.png",
+        "/tmp/runs/run-summary/traces/case-1.zip",
+    ]
+    assert out["evidence_quality"]["traces_present"] is True
+    assert "automation fragility" in out["evidence_quality"]["confidence_drivers"][-1].lower()
+    assert out["coverage_summary"]["failure_kinds"] == ["automation_fragility"]
+    assert out["auth_provenance"]["auth_source"] == "storage_state"
+    assert out["auth_provenance"]["session_validation_status"] == "valid"
+    assert out["auth_provenance"]["landed_authenticated"] is True
+    assert out["auth_provenance"]["landing_url"] == "https://example.com/checkout"
+    assert out["run_environment"]["headless"] is True
+    assert "cases" in out
+    assert "failed_cases" in out
+
+
+@pytest.mark.asyncio
+async def test_get_test_results_success_report_includes_coverage_proof():
+    run = {
+        "run_id": "run-pass",
+        "status": "completed",
+        "started_at": "2026-03-19T10:00:00Z",
+        "completed_at": "2026-03-19T10:02:00Z",
+        "artifacts_dir": "/tmp/runs/run-pass",
+        "run_mode": "strict_steps",
+        "app_url": "https://app.example.com/editor",
+        "next_actions": [],
+        "profile_name": "manual-auth",
+        "headless": False,
+    }
+    cases = [
+        FailureCase(
+            case_id="case-pass-1",
+            run_id="run-pass",
+            flow_id="flow-1",
+            flow_name="editor_text_panel",
+            status="pass",
+            severity="none",
+            screenshots=["/tmp/runs/run-pass/screenshots/text.png"],
+            trace_path="/tmp/runs/run-pass/traces/text.zip",
+            assertion_results=[
+                {"assertion": "Add Heading", "passed": True, "eval_type": "text_present"},
+            ],
+        ),
+        FailureCase(
+            case_id="case-pass-2",
+            run_id="run-pass",
+            flow_id="flow-2",
+            flow_name="editor_captions_panel",
+            status="pass",
+            severity="none",
+            screenshots=["/tmp/runs/run-pass/screenshots/captions.png"],
+            trace_path="/tmp/runs/run-pass/traces/captions.zip",
+            assertion_results=[
+                {"assertion": "Auto captions", "passed": True, "eval_type": "text_present"},
+            ],
+        ),
+        FailureCase(
+            case_id="case-pass-3",
+            run_id="run-pass",
+            flow_id="flow-3",
+            flow_name="editor_ai_agent_panel",
+            status="pass",
+            severity="none",
+            screenshots=["/tmp/runs/run-pass/screenshots/ai-agent.png"],
+            trace_path="/tmp/runs/run-pass/traces/ai-agent.zip",
+            assertion_results=[
+                {
+                    "assertion": "Create an animated intro for my brand",
+                    "passed": True,
+                    "eval_type": "text_present",
+                },
+            ],
+        ),
+    ]
+    auth_profile = AuthProfile(
+        profile_name="manual-auth",
+        auth_type="storage_state",
+        storage_state_path="/tmp/manual-auth.json",
+        user_data_dir="/tmp/manual-auth-dir",
+    )
+    events = [
+        {
+            "event_id": "evt-auth-pass",
+            "run_id": "run-pass",
+            "event_type": "auth_context_resolved",
+            "payload": {
+                "profile_name": "manual-auth",
+                "auth_used": True,
+                "auth_source": "storage_state",
+                "storage_state_path": "/tmp/manual-auth.json",
+                "user_data_dir": "/tmp/manual-auth-dir",
+                "session_validation_status": "valid",
+            },
+            "created_at": "2026-03-19T10:00:01Z",
+        },
+        {
+            "event_id": "evt-land-pass",
+            "run_id": "run-pass",
+            "event_type": "auth_landing_observed",
+            "payload": {
+                "flow_id": "flow-1",
+                "flow_name": "editor_text_panel",
+                "expected_url": "https://app.example.com/editor",
+                "landed_url": "https://app.example.com/editor/123",
+                "page_title": "Untitled Project",
+                "landed_authenticated": True,
+            },
+            "created_at": "2026-03-19T10:00:02Z",
+        },
+    ]
+
+    with patch("blop.storage.sqlite.get_run", new_callable=AsyncMock, return_value=run):
+        with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=cases):
+            with patch("blop.storage.sqlite.list_run_health_events", new_callable=AsyncMock, return_value=events):
+                with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=auth_profile):
+                    out = await results.get_test_results("run-pass")
+
+    assert out["decision_summary"]["decision"] == "SHIP"
+    assert out["decision_summary"]["verified_journeys"] == [
+        "editor_text_panel",
+        "editor_captions_panel",
+        "editor_ai_agent_panel",
+    ]
+    assert out["coverage_summary"]["observed_assertions"] == [
+        "Add Heading",
+        "Auto captions",
+        "Create an animated intro for my brand",
+    ]
+    assert out["coverage_summary"]["proof_artifact_refs"][0] == "/tmp/runs/run-pass/screenshots/text.png"
+    assert out["evidence_summary"]["trace_count"] == 3
+    assert out["evidence_quality"]["screenshots_present"] is True
+    assert out["evidence_quality"]["traces_present"] is True
+    assert out["auth_provenance"]["profile_name"] == "manual-auth"
+    assert out["auth_provenance"]["user_data_dir"] == "/tmp/manual-auth-dir"
+    assert out["auth_provenance"]["landing_page_title"] == "Untitled Project"
+    assert out["auth_provenance"]["landed_authenticated"] is True
+    assert out["run_environment"]["headless"] is False

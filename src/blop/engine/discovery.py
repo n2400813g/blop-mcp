@@ -1,14 +1,16 @@
 """Inventory-first discovery: BFS crawl → Gemini planning → quality gate."""
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-from blop.config import BLOP_DISCOVERY_MAX_PAGES
+from blop.config import BLOP_DISCOVERY_MAX_PAGES, BLOP_SPA_SETTLE_MS
 from blop.engine.auth import resolve_storage_state_for_profile
+from blop.engine.interaction import wait_for_spa_ready
 from blop.engine.logger import get_logger
 from blop.engine.secrets import mask_text
 from blop.schemas import SiteInventory
@@ -42,6 +44,144 @@ def _adaptive_budget(base_max_pages: int, business_signals: list[str], auth_sign
     if signal_count >= 4:
         return min(30, base_max_pages + 6)
     return base_max_pages
+
+
+def _dedupe_dict_items(items: list[dict], key_fields: tuple[str, ...]) -> list[dict]:
+    seen: set[tuple[str, ...]] = set()
+    deduped: list[dict] = []
+    for item in items:
+        key = tuple(str(item.get(field, "")).strip() for field in key_fields)
+        if not any(key):
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _parse_flow_list(text: str) -> list[dict] | None:
+    cleaned = re.sub(r"```(?:json)?\s*", "", text).strip()
+    match = re.search(r"\[.*\]", cleaned, re.DOTALL)
+    if not match:
+        return None
+
+    candidate = match.group().strip()
+    for loader in (json.loads, ast.literal_eval):
+        try:
+            payload = loader(candidate)
+        except Exception:
+            continue
+        if isinstance(payload, list):
+            return payload
+    return None
+
+
+def _heuristic_flows_from_inventory(inventory: SiteInventory) -> list[dict]:
+    def _clean(text: str) -> str:
+        return re.sub(r"\s+", " ", text or "").strip()
+
+    signals: list[str] = []
+    for button in inventory.buttons:
+        text = _clean(button.get("text", ""))
+        if text:
+            signals.append(text)
+    for link in inventory.links:
+        text = _clean(link.get("text", ""))
+        if text:
+            signals.append(text)
+    for heading in inventory.headings:
+        text = _clean(heading)
+        if text:
+            signals.append(text)
+
+    unique_signals = list(dict.fromkeys(signals))
+    flows: list[dict] = []
+
+    def _append_once(flow_name: str, goal: str, assertions: list[str], *, criticality: str = "other", severity: str = "medium", confidence: float = 0.62) -> None:
+        if any(existing.get("flow_name") == flow_name for existing in flows):
+            return
+        flows.append(
+            {
+                "flow_name": flow_name,
+                "goal": goal,
+                "starting_url": inventory.app_url,
+                "preconditions": [],
+                "likely_assertions": assertions,
+                "severity_if_broken": severity,
+                "confidence": confidence,
+                "business_criticality": criticality,
+            }
+        )
+
+    for text in unique_signals:
+        lower = text.lower()
+        if "template" in lower:
+            _append_once(
+                "browse_templates",
+                f"Open the template library in {inventory.app_url} and confirm ready-made starting points are available.",
+                ["template library visible", "template cards or template CTA visible"],
+                criticality="activation",
+                severity="high",
+                confidence=0.74,
+            )
+        if "shared" in lower:
+            _append_once(
+                "review_shared_content",
+                f"Open the shared-content area in {inventory.app_url} and confirm shared projects or shared items can be reviewed.",
+                ["shared workspace visible", "shared project list or empty state visible"],
+                criticality="retention",
+                severity="medium",
+                confidence=0.71,
+            )
+        if "caption" in lower:
+            _append_once(
+                "start_caption_workflow",
+                f"Enter the captioning workflow in {inventory.app_url} and confirm the app exposes a caption-generation entry point.",
+                ["caption CTA visible", "caption workflow or upgrade gate visible"],
+                criticality="activation",
+                severity="high",
+                confidence=0.72,
+            )
+        if "agent" in lower:
+            _append_once(
+                "enter_ai_agent",
+                f"Open the AI-assisted creation flow in {inventory.app_url} and confirm the AI entry point responds.",
+                ["AI agent CTA visible", "AI workflow or upgrade gate visible"],
+                criticality="activation",
+                severity="high",
+                confidence=0.73,
+            )
+        if "blank project" in lower or ("project" in lower and "create" in lower):
+            _append_once(
+                "create_blank_project",
+                f"Start a blank-project workflow in {inventory.app_url} and confirm the editor shell or creation gate appears.",
+                ["project creation CTA visible", "editor shell or upgrade gate visible"],
+                criticality="activation",
+                severity="high",
+                confidence=0.72,
+            )
+        if "upload" in lower or "import" in lower:
+            _append_once(
+                "import_media",
+                f"Start a media import workflow in {inventory.app_url} and confirm upload or import controls are reachable.",
+                ["upload control visible", "import step or upgrade gate visible"],
+                criticality="activation",
+                severity="high",
+                confidence=0.69,
+            )
+
+    if inventory.routes and not any(flow.get("flow_name") == "navigate_core_routes" for flow in flows):
+        _append_once(
+            "navigate_core_routes",
+            f"Navigate the authenticated routes exposed by {inventory.app_url} and confirm each route loads without redirect loops.",
+            ["core routes reachable", "authenticated navigation remains stable"],
+            criticality="other",
+            severity="medium",
+            confidence=0.64,
+        )
+
+    return flows[:8]
 
 
 from blop.engine.dom_utils import extract_interactive_nodes_flat as _extract_interactive_nodes_flat
@@ -190,6 +330,7 @@ async def inventory_site(
         if storage_state:
             ctx_kwargs["storage_state"] = storage_state
         context = await browser.new_context(**ctx_kwargs)
+        page = await context.new_page()
 
         try:
             while queue and crawled_pages < adaptive_max_pages:
@@ -205,14 +346,22 @@ async def inventory_site(
                     continue
                 visited.add(url)
 
-                page = None
                 try:
-                    page = await context.new_page()
                     try:
-                        await page.goto(url, wait_until="networkidle", timeout=15000)
+                        await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                        await wait_for_spa_ready(
+                            page,
+                            settle_ms=max(BLOP_SPA_SETTLE_MS, 750),
+                            timeout_ms=15000,
+                        )
                     except Exception as first_error:
                         try:
                             await page.goto(url, timeout=15000)
+                            await wait_for_spa_ready(
+                                page,
+                                settle_ms=max(BLOP_SPA_SETTLE_MS, 750),
+                                timeout_ms=15000,
+                            )
                         except Exception as second_error:
                             _log.debug(
                                 "crawl_page_failed event=crawl_page_failed url=%s error_type=%s error_message=%s fallback_error_type=%s fallback_error_message=%s",
@@ -222,8 +371,6 @@ async def inventory_site(
                                 type(second_error).__name__,
                                 str(second_error)[:160],
                             )
-                            await page.close()
-                            page = None
                             continue
 
                     crawled_pages += 1
@@ -239,6 +386,7 @@ async def inventory_site(
                             .filter(el => el.text && !el.href.startsWith('mailto:') && !el.href.startsWith('tel:'))
                             .slice(0,35)"""
                     )
+                    page_links = _dedupe_dict_items(page_links or [], ("href", "text"))
                     page_forms = await page.evaluate(
                         """() => Array.from(document.querySelectorAll('form'))
                             .map(form => ({
@@ -257,6 +405,7 @@ async def inventory_site(
                             .map(el => { try { return new URL(el.href).pathname; } catch(e) { return null; } })
                             .filter(p => p && p !== '/'))].slice(0,30)"""
                     )
+                    page_buttons = _dedupe_dict_items(page_buttons or [], ("text", "href"))
                     page_nodes = await _capture_page_structure(page, max_nodes=50)
 
                     all_buttons.extend(page_buttons)
@@ -312,9 +461,6 @@ async def inventory_site(
                                 if href not in visited:
                                     priority = _url_priority(href, business_signals, auth_signals, hotspot_paths)
                                     queue.append((href, depth + 1, priority))
-
-                    await page.close()
-                    page = None
                 except Exception as e:
                     _log.debug(
                         "crawl_page_failed event=crawl_page_failed url=%s error_type=%s error_message=%s",
@@ -323,12 +469,11 @@ async def inventory_site(
                         str(e)[:200],
                         exc_info=True,
                     )
-                    if page:
-                        try:
-                            await page.close()
-                        except Exception:
-                            _log.debug("Failed to close page after crawl error", exc_info=True)
         finally:
+            try:
+                await page.close()
+            except Exception:
+                _log.debug("Failed to close crawl page", exc_info=True)
             try:
                 await context.close()
             except Exception:
@@ -399,6 +544,13 @@ async def plan_flows_from_inventory(
 
     provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
     fallback_meta = {"planning_fallback": False, "planning_error": None}
+    heuristic_flows = _heuristic_flows_from_inventory(inventory)
+    if inventory.crawled_pages <= 6 and len(inventory.routes) <= 4 and len(heuristic_flows) >= 3:
+        fallback_meta = {
+            "planning_fallback": True,
+            "planning_error": "Used heuristic CTA planner for shallow inventory",
+        }
+        return (heuristic_flows, fallback_meta) if include_meta else heuristic_flows
     if provider == "google" and not os.getenv("GOOGLE_API_KEY"):
         fallback_meta = {
             "planning_fallback": True,
@@ -453,11 +605,8 @@ async def plan_flows_from_inventory(
     try:
         response = await llm.ainvoke([make_message(prompt)])
         text = str(response.content) if hasattr(response, "content") else str(response)
-        # Strip markdown code fences before extracting JSON array
-        text = re.sub(r"```(?:json)?\s*", "", text).strip()
-        m = re.search(r"\[.*\]", text, re.DOTALL)
-        if m:
-            flows = json.loads(m.group())
+        flows = _parse_flow_list(text)
+        if flows:
             required_keys = {"flow_name", "goal"}
             valid_flows = []
             for f in flows:
@@ -693,10 +842,8 @@ Return only a JSON array:
     try:
         response = await llm.ainvoke([make_message(prompt)])
         text = str(response.content) if hasattr(response, "content") else str(response)
-        text = re.sub(r"```(?:json)?\s*", "", text).strip()
-        m = re.search(r"\[.*\]", text, re.DOTALL)
-        if m:
-            flows = json.loads(m.group())
+        flows = _parse_flow_list(text)
+        if flows:
             valid = []
             for f in flows:
                 if isinstance(f, dict) and {"flow_name", "goal"}.issubset(f.keys()):

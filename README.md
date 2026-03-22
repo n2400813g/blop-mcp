@@ -213,21 +213,25 @@ Use blop to test https://your-app.com
 
 1. Call validate_release_setup(app_url="https://your-app.com") and stop if status is "blocked"
 2. Call discover_critical_journeys(app_url="https://your-app.com") to find the release-gating journeys
-3. Read blop://journeys and pick the journey_ids or flow_ids that matter for this release
-4. Call run_release_check(app_url="https://your-app.com", journey_ids=[...]) or omit journey_ids to use the default revenue/activation scope
-5. If the run is queued, poll get_test_results(run_id="...") until status is terminal
-6. Read blop://release/{release_id}/brief and blop://release/{release_id}/artifacts
-7. If the decision is not SHIP, call triage_release_blocker(run_id="...") and summarize blockers, evidence, and next actions
+3. Read blop://journeys and pick the gated journeys that matter for this release
+4. Record or refresh those journeys with record_test_flow(...) so release checks run against real saved flows
+5. Call run_release_check(app_url="https://your-app.com", journey_ids=[...], mode="replay")
+6. Poll get_test_results(run_id="...") until status is terminal
+7. Read blop://release/{release_id}/brief and blop://release/{release_id}/artifacts
+8. If the decision is not SHIP, call triage_release_blocker(run_id="...") and summarize blockers, evidence, and next actions
 ```
 
-That is the canonical MVP loop: validate, discover, decide, and triage.
+That is the canonical MVP loop: validate, discover, record, replay, and triage.
 
 ## Control-plane workflow (business context + QA)
 
 1. **Preflight:** confirm readiness with `validate_release_setup`.
 2. **Discover:** identify release-gating paths with `discover_critical_journeys`.
-3. **Execute:** run `run_release_check` in replay or targeted mode.
-4. **Triage:** use `triage_release_blocker` plus `blop://release/*` resources to turn failures into decisions.
+3. **Record:** capture or refresh the gated journeys with `record_test_flow`.
+4. **Execute:** run `run_release_check` in `replay` mode against recorded flows.
+5. **Triage:** use `triage_release_blocker` plus `blop://release/*` resources to turn failures into decisions.
+
+`targeted` mode is still available for one-off exploratory checks, but it is a shortcut, not the golden path for release gating.
 
 ### Release Readiness Brief (recommended output)
 

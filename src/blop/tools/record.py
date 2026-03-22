@@ -130,6 +130,6 @@ async def record_test_flow(
     ).model_dump()
     result["workflow_hint"] = (
         f"Flow '{flow_name}' recorded ({len(steps)} steps). "
-        f"Next: run_regression_test(app_url='{app_url}', flow_ids=['{flow.flow_id}'])"
+        f"Next: run_release_check(app_url='{app_url}', flow_ids=['{flow.flow_id}'], mode='replay')"
     )
     return result

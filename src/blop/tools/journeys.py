@@ -1,13 +1,26 @@
 """discover_critical_journeys — MVP canonical tool for journey discovery."""
 from __future__ import annotations
 
+import hashlib
 import re
-import uuid
 from typing import Optional
 
 from blop.config import BLOP_DISCOVERY_MAX_PAGES, validate_app_url
 from blop.engine import discovery
 from blop.storage import sqlite
+
+
+def _planning_journey_id(app_url: str, journey_name: str, goal: str) -> str:
+    """Return a deterministic planning-only journey identifier for unrecorded flows."""
+    raw = "|".join(
+        [
+            (app_url or "").strip().lower(),
+            (journey_name or "").strip().lower(),
+            (goal or "").strip().lower(),
+        ]
+    )
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+    return f"planned_journey_{digest}"
 
 
 async def discover_critical_journeys(
@@ -61,14 +74,20 @@ async def discover_critical_journeys(
         journeys.append(journey)
 
     gated = [j for j in journeys if j["include_in_release_gating"]]
+    recommended_flow_ids = [j["flow_id"] for j in gated if j.get("flow_id")]
     return {
         "journeys": journeys,
         "journey_count": len(journeys),
         "release_gating_count": len(gated),
+        "recommended_flow_ids": recommended_flow_ids,
+        "id_contract": {
+            "journey_id": "planning identifier only; do not pass to execution tools",
+            "flow_id": "recorded flow identifier; pass to run_release_check(flow_ids=[...]) or triage_release_blocker(flow_id=...)",
+        },
         "resource_link": "blop://journeys",
         "workflow_hint": (
             f"Found {len(journeys)} critical journeys ({len(gated)} gated for release). "
-            "Next: run_release_check(app_url=..., journey_ids=[...]) to evaluate release confidence."
+            "Next: record any missing gated journeys, then call run_release_check(app_url=..., flow_ids=[...], mode='replay')."
         ),
     }
 
@@ -97,14 +116,34 @@ def _flow_dict_to_critical_journey(
 
     # Link to existing RecordedFlow if name matches
     flow_id = name_to_flow_id.get(journey_name)
+    journey_id = flow_dict.get("flow_id") or _planning_journey_id(
+        flow_dict.get("starting_url") or "",
+        journey_name,
+        goal,
+    )
+    execution_status = "recorded" if flow_id else "planned_only"
+    if include_in_release_gating:
+        gating_reason = (
+            f"{criticality.title()} journey gates release decisions."
+            if criticality in ("revenue", "activation")
+            else "Included in release gating."
+        )
+    else:
+        gating_reason = (
+            f"{criticality.title()} journey is useful context but does not gate release by default."
+            if criticality != "other"
+            else "Informational journey; not used for release gating by default."
+        )
 
     return {
-        "journey_id": flow_dict.get("flow_id") or uuid.uuid4().hex,
+        "journey_id": journey_id,
         "journey_name": journey_name,
         "why_it_matters": why_it_matters,
         "criticality_class": criticality,
         "auth_required": auth_required,
         "confidence": confidence,
         "include_in_release_gating": include_in_release_gating,
+        "gating_reason": gating_reason,
+        "execution_status": execution_status,
         "flow_id": flow_id,
     }

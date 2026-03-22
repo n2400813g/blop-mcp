@@ -259,12 +259,17 @@ async def validate_release_setup(
     before running a release check.
     """
     result = await validate_setup(app_url=app_url, profile_name=profile_name)
-    # Adjust suggested_next_steps to reference canonical tool names
+    # Adjust suggested_next_steps to reference canonical tool names and arguments.
     steps = result.get("suggested_next_steps", [])
     updated_steps = []
     for step in steps:
         step = step.replace("discover_test_flows", "discover_critical_journeys")
+        step = step.replace(
+            "Run regression: run_regression_test(app_url='...', flow_ids=['...'])",
+            "Run release check: run_release_check(app_url='...', flow_ids=['...'], mode='replay')",
+        )
         step = step.replace("run_regression_test", "run_release_check")
+        step = step.replace("flow_ids=['...']", "flow_ids=['...']")
         updated_steps.append(step)
     result["suggested_next_steps"] = updated_steps
     return result

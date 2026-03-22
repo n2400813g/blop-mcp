@@ -151,6 +151,74 @@ async def test_env_login_invalid_cached_session_falls_back_when_validation_enabl
 
 
 @pytest.mark.asyncio
+async def test_env_login_social_only_page_returns_none_without_selector_retries(env_login_profile):
+    from blop.engine.auth import resolve_storage_state
+
+    mock_page = AsyncMock()
+    mock_page.goto = AsyncMock()
+    mock_page.evaluate = AsyncMock(return_value={
+        "user_input_count": 0,
+        "password_input_count": 0,
+        "social_buttons": ["Continue with Google", "Continue with Microsoft"],
+    })
+    mock_context = AsyncMock()
+    mock_context.new_page = AsyncMock(return_value=mock_page)
+    mock_browser = AsyncMock()
+    mock_browser.new_context = AsyncMock(return_value=mock_context)
+    mock_playwright = AsyncMock()
+    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
+    mock_playwright.__aexit__ = AsyncMock(return_value=False)
+    mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+
+    with patch.dict(os.environ, {"TEST_USERNAME": "user", "TEST_PASSWORD": "pass"}):
+        with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+            result = await resolve_storage_state(env_login_profile)
+
+    assert result is None
+    mock_page.goto.assert_awaited_once()
+    mock_page.wait_for_selector.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_env_login_rechecks_blank_login_surface_before_selector_retries(env_login_profile):
+    from blop.engine.auth import resolve_storage_state
+
+    mock_page = AsyncMock()
+    mock_page.goto = AsyncMock()
+    mock_page.wait_for_timeout = AsyncMock()
+    mock_page.evaluate = AsyncMock(side_effect=[
+        {
+            "user_input_count": 0,
+            "password_input_count": 0,
+            "social_buttons": [],
+            "body_text_length": 0,
+        },
+        {
+            "user_input_count": 0,
+            "password_input_count": 0,
+            "social_buttons": ["Continue with Google"],
+            "body_text_length": 120,
+        },
+    ])
+    mock_context = AsyncMock()
+    mock_context.new_page = AsyncMock(return_value=mock_page)
+    mock_browser = AsyncMock()
+    mock_browser.new_context = AsyncMock(return_value=mock_context)
+    mock_playwright = AsyncMock()
+    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
+    mock_playwright.__aexit__ = AsyncMock(return_value=False)
+    mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+
+    with patch.dict(os.environ, {"TEST_USERNAME": "user", "TEST_PASSWORD": "pass"}):
+        with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+            result = await resolve_storage_state(env_login_profile)
+
+    assert result is None
+    mock_page.wait_for_timeout.assert_awaited_once_with(2500)
+    mock_page.wait_for_selector.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_cookie_json_path(cookie_json_profile, tmp_path):
     """cookie_json path calls playwright and saves state."""
     import blop.engine.auth as auth_engine
@@ -206,7 +274,24 @@ async def test_save_auth_profile_valid_types():
                     auth_type=auth_type,
                     **required_fields[auth_type],
                 )
-        assert result.get("status") == "saved", f"Failed for auth_type={auth_type}"
+        expected_status = "saved_with_warning" if auth_type == "env_login" else "saved"
+        assert result.get("status") == expected_status, f"Failed for auth_type={auth_type}"
+
+
+@pytest.mark.asyncio
+async def test_save_auth_profile_env_login_warns_when_no_storage_state():
+    from blop.tools.auth import save_auth_profile
+
+    with patch("blop.engine.auth.resolve_storage_state", new=AsyncMock(return_value=None)):
+        with patch("blop.storage.sqlite.save_auth_profile", new=AsyncMock()):
+            result = await save_auth_profile(
+                profile_name="oauthish",
+                auth_type="env_login",
+                login_url="https://example.com/login",
+            )
+
+    assert result["status"] == "saved_with_warning"
+    assert "capture_auth_session" in result["warning"]
 
 
 @pytest.mark.asyncio

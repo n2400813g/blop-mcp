@@ -65,6 +65,36 @@ async def test_discover_journeys_unknown_criticality_coerced_to_other():
     assert journey["include_in_release_gating"] is False
 
 
+@pytest.mark.asyncio
+async def test_discover_journeys_planned_ids_are_stable_and_execution_state_is_explicit():
+    from blop.tools.journeys import discover_critical_journeys
+
+    mock_flows = [
+        {
+            "flow_name": "Checkout Flow",
+            "goal": "Complete a purchase",
+            "starting_url": "https://example.com/checkout",
+            "business_criticality": "revenue",
+            "confidence": 0.9,
+            "auth_required": False,
+            "likely_assertions": ["Order confirmation shown"],
+        }
+    ]
+
+    with patch("blop.engine.discovery.discover_flows", new_callable=AsyncMock, return_value={"flows": mock_flows}):
+        with patch("blop.storage.sqlite.list_flows", new_callable=AsyncMock, return_value=[]):
+            first = await discover_critical_journeys(app_url="https://example.com")
+            second = await discover_critical_journeys(app_url="https://example.com")
+
+    first_journey = first["journeys"][0]
+    second_journey = second["journeys"][0]
+    assert first_journey["journey_id"] == second_journey["journey_id"]
+    assert first_journey["journey_id"].startswith("planned_journey_")
+    assert first_journey["execution_status"] == "planned_only"
+    assert first_journey["flow_id"] is None
+    assert "gates release decisions" in first_journey["gating_reason"]
+
+
 # ---------------------------------------------------------------------------
 # run_release_check
 # ---------------------------------------------------------------------------
@@ -105,6 +135,20 @@ async def test_run_release_check_result_contains_resource_links():
 
     assert "resource_links" in result
     assert "brief" in result["resource_links"]
+    assert "selected_flows" in result
+    assert result["selected_flows"][0]["flow_id"] == "f1"
+    assert result["active_gating_policy"]["criticality_filter"] == ["revenue", "activation"]
+    assert result["recommended_next_step"]["tool"] == "get_test_results"
+
+
+@pytest.mark.asyncio
+async def test_release_readiness_prompt_defines_replay_golden_path():
+    """The release prompt should define record -> replay as the canonical workflow."""
+    from blop.tools.prompts import RELEASE_READINESS_REVIEW
+
+    assert "record_test_flow" in RELEASE_READINESS_REVIEW
+    assert 'run_release_check(app_url="https://your-app.com", mode="replay")' in RELEASE_READINESS_REVIEW
+    assert "golden path" in RELEASE_READINESS_REVIEW.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +192,10 @@ async def test_triage_revenue_failure_mentions_revenue_in_impact():
                 result = await triage_release_blocker(run_id="r1")
 
     assert "Revenue" in result.get("user_business_impact", "") or "revenue" in result.get("user_business_impact", "").lower()
+    assert result["subject_type"] == "run"
+    assert result["business_priority"] == "release_blocker"
+    assert "confidence" in result["confidence_note"].lower()
+    assert "top_evidence_refs" in result["evidence_summary_compact"]
 
 
 # ---------------------------------------------------------------------------

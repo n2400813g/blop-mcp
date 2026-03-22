@@ -11,22 +11,34 @@ Step 2 — Discover critical journeys:
    discover_critical_journeys(app_url="https://your-app.com", business_goal="SaaS product with checkout")
    → Review journeys. Note which have include_in_release_gating=true.
 
-Step 3 — Run release check:
+Step 3 — Record or refresh the gated journeys:
+   record_test_flow(
+     app_url="https://your-app.com",
+     flow_name="checkout_flow",
+     goal="Complete a purchase end-to-end",
+     business_criticality="revenue"
+   )
+   → Repeat for each gated journey you want to use for release decisions.
+
+Step 4 — Run release check:
    run_release_check(app_url="https://your-app.com", mode="replay")
    → This queues a run. Note the run_id and release_id returned.
 
-Step 4 — Poll for results:
-   get_test_results(run_id="<run_id from step 3>")
+Step 5 — Poll for results:
+   get_test_results(run_id="<run_id from step 4>")
    → Wait until status is "completed" or "failed".
 
-Step 5 — Triage any blockers:
+Step 6 — Triage any blockers:
    triage_release_blocker(run_id="<run_id>")
    → Review likely_cause, evidence_summary, and recommended_action.
 
-Step 6 — Make the ship/no-ship decision:
+Step 7 — Make the ship/no-ship decision:
    - SHIP: All critical journeys passed, no blockers.
    - INVESTIGATE: Issues detected, review evidence with engineering.
    - BLOCK: Blocker-severity failures in revenue or activation journeys — do not ship.
+
+Note:
+   targeted mode is useful for one-off smoke checks, but replay mode over recorded flows is the release-gating golden path.
 
 Resources available:
    blop://journeys                        → All recorded journeys

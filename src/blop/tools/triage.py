@@ -9,28 +9,37 @@ from blop.storage import sqlite
 async def triage_release_blocker(
     run_id: Optional[str] = None,
     release_id: Optional[str] = None,
+    flow_id: Optional[str] = None,
     journey_id: Optional[str] = None,
     incident_cluster_id: Optional[str] = None,
     generate_remediation: bool = True,
 ) -> dict:
     """Provide root-cause evidence and next actions for a release blocker.
 
-    Accepts any one (or combination) of: run_id, release_id, journey_id,
+    Accepts any one (or combination) of: run_id, release_id, flow_id,
+    journey_id,
     incident_cluster_id. At least one is required.
 
     Returns a BlockerTriage with likely_cause, evidence_summary,
     user_business_impact, recommended_action, and linked_artifacts.
     """
-    if not any([run_id, release_id, journey_id, incident_cluster_id]):
+    if flow_id and journey_id and flow_id != journey_id:
         return {
-            "error": "At least one of run_id, release_id, journey_id, or incident_cluster_id is required."
+            "error": "Pass only one of flow_id or journey_id. journey_id is a deprecated alias for flow_id."
+        }
+
+    effective_flow_id = flow_id or journey_id
+
+    if not any([run_id, release_id, effective_flow_id, incident_cluster_id]):
+        return {
+            "error": "At least one of run_id, release_id, flow_id, journey_id, or incident_cluster_id is required."
         }
 
     # Resolve run_id from release_id if not provided
     if release_id and not run_id:
         run_id = await _resolve_run_id_from_release(release_id)
 
-    subject_id = run_id or journey_id or incident_cluster_id or release_id or "unknown"
+    subject_id = run_id or effective_flow_id or incident_cluster_id or release_id or "unknown"
 
     cases = []
     artifacts: list[str] = []
@@ -49,8 +58,8 @@ async def triage_release_blocker(
             artifacts = [a["path"] for a in run_artifacts if a.get("path")]
 
     # --- Load from journey_id (flow_id) ---
-    elif journey_id:
-        journey_cases = await sqlite.list_cases_for_flow(journey_id, limit=5)
+    elif effective_flow_id:
+        journey_cases = await sqlite.list_cases_for_flow(effective_flow_id, limit=5)
         cases = journey_cases
         # Collect screenshots from recent cases
         for case in cases:
@@ -147,16 +156,55 @@ async def triage_release_blocker(
         else:
             recommended_action = f"Re-run debug_test_case(case_id='{getattr(top, 'case_id', '')}') for evidence."
 
+    subject_type = (
+        "run" if run_id else
+        "flow" if effective_flow_id else
+        "incident_cluster" if incident_cluster_id else
+        "release" if release_id else
+        "unknown"
+    )
+    business_priority = (
+        "release_blocker" if "revenue" in criticalities or "activation" in criticalities or blocker_cases
+        else "important" if failed_cases
+        else "unknown"
+    )
+    confidence_note = (
+        "High confidence: recurring incident cluster with linked remediation context."
+        if cluster and remediation
+        else "Medium confidence: direct failure evidence captured from the most relevant failed case."
+        if blocker_cases or failed_cases
+        else "Low confidence: evidence is sparse; inspect linked artifacts for confirmation."
+    )
+    top_evidence_refs = artifacts[:3]
+    if cluster and cluster.evidence_refs:
+        for ref in cluster.evidence_refs[:3]:
+            if ref not in top_evidence_refs:
+                top_evidence_refs.append(ref)
+            if len(top_evidence_refs) >= 5:
+                break
+
     return {
         "subject_id": subject_id,
+        "subject_type": subject_type,
         "likely_cause": likely_cause,
         "evidence_summary": evidence_summary,
+        "evidence_summary_compact": {
+            "failed_case_count": len(failed_cases),
+            "blocker_case_count": len(blocker_cases),
+            "top_evidence_refs": top_evidence_refs,
+        },
         "user_business_impact": business_impact,
+        "business_priority": business_priority,
+        "confidence_note": confidence_note,
         "recommended_action": recommended_action,
         "suggested_owner": suggested_owner,
         "linked_artifacts": artifacts[:10],
         "blocker_case_count": len(blocker_cases),
         "total_failed_cases": len(failed_cases),
+        "id_contract": {
+            "flow_id": effective_flow_id,
+            "journey_id": journey_id,
+        },
     }
 
 

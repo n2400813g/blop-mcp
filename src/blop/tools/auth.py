@@ -46,6 +46,13 @@ async def save_auth_profile(
             "Runs using this profile may fail until the issue is fixed. "
             "For SSO/OAuth, try capture_auth_session instead."
         )
+    if auth_type == "env_login" and storage_path is None and auth_warning is None:
+        auth_warning = (
+            "Auth profile saved but no storage state was captured from the login flow. "
+            "The login page may require social sign-in/SSO, the credentials may be invalid, "
+            "or an additional verification step may be blocking automation. "
+            "For OAuth/SSO, try capture_auth_session instead."
+        )
 
     await sqlite.save_auth_profile(profile, storage_path)
 

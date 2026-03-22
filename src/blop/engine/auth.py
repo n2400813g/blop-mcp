@@ -163,6 +163,38 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
             "input[name='password']", "input[type='password']", "#password",
         ]
 
+        async def _inspect_login_surface(page) -> dict:
+            try:
+                return await page.evaluate(
+                    """() => {
+                        const visible = (el) => {
+                            if (!el) return false;
+                            const style = window.getComputedStyle(el);
+                            const rect = el.getBoundingClientRect();
+                            return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                        };
+                        const userInputs = Array.from(document.querySelectorAll(
+                            "input[name='username'], input[name='email'], input[type='email'], #email, input[placeholder*='email' i], input[placeholder*='username' i]"
+                        )).filter(visible);
+                        const passInputs = Array.from(document.querySelectorAll(
+                            "input[name='password'], input[type='password'], #password"
+                        )).filter(visible);
+                        const socialButtons = Array.from(document.querySelectorAll('button, a, [role=\"button\"]'))
+                            .map((el) => ((el.innerText || el.textContent || el.getAttribute('aria-label') || '') + '').trim())
+                            .filter(Boolean)
+                            .filter((text) => /continue with|sign in with|google|microsoft|facebook|github|apple|sso|oauth/i.test(text))
+                            .slice(0, 8);
+                        return {
+                            user_input_count: userInputs.length,
+                            password_input_count: passInputs.length,
+                            social_buttons: socialButtons,
+                            body_text_length: (document.body.innerText || "").trim().length,
+                        };
+                    }"""
+                )
+            except Exception:
+                return {"user_input_count": 0, "password_input_count": 0, "social_buttons": [], "body_text_length": 0}
+
         async def _try_fill(page, selectors: list[str], value: str) -> str:
             for sel in selectors:
                 try:
@@ -206,6 +238,29 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
                 try:
                     page = await context.new_page()
                     await page.goto(login_url, wait_until="domcontentloaded", timeout=15000)
+                    surface = await _inspect_login_surface(page)
+                    if (
+                        surface.get("user_input_count", 0) == 0
+                        and surface.get("password_input_count", 0) == 0
+                        and not surface.get("social_buttons")
+                        and surface.get("body_text_length", 0) == 0
+                    ):
+                        await page.wait_for_timeout(2500)
+                        surface = await _inspect_login_surface(page)
+                    if (
+                        surface.get("user_input_count", 0) == 0
+                        and surface.get("password_input_count", 0) == 0
+                        and surface.get("social_buttons")
+                    ):
+                        _log.info(
+                            "env_login_social_only profile=%s login_url=%s buttons=%s",
+                            cache_key,
+                            login_url,
+                            surface.get("social_buttons", []),
+                        )
+                        if os.path.exists(state_path):
+                            return state_path
+                        return None
                     await _try_fill(page, _user_selectors, username)
                     working_pass_sel = await _try_fill(page, _pass_selectors, password)
                     await page.press(working_pass_sel, "Enter")

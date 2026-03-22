@@ -255,3 +255,45 @@ async def test_get_page_structure_returns_interactive_nodes(mock_playwright_stac
     assert result["requested_url"] == "https://example.com/pricing"
     assert result["interactive_node_count"] == 2
     assert any(node["name"] == "Upgrade" for node in result["interactive_nodes"])
+
+
+def test_parse_flow_list_accepts_python_literal_style_output():
+    from blop.engine.discovery import _parse_flow_list
+
+    payload = """Here are the flows:
+    [{'flow_name': 'login_flow', 'goal': 'Log in'}, {'flow_name': 'upload_video', 'goal': 'Upload a video'}]
+    """
+
+    flows = _parse_flow_list(payload)
+
+    assert flows is not None
+    assert flows[0]["flow_name"] == "login_flow"
+    assert flows[1]["goal"] == "Upload a video"
+
+
+def test_heuristic_flows_from_inventory_uses_cta_buttons():
+    from blop.engine.discovery import _heuristic_flows_from_inventory
+    from blop.schemas import SiteInventory
+
+    inventory = SiteInventory(
+        app_url="https://example.com/app",
+        routes=["/templates", "/shared"],
+        buttons=[
+            {"text": "AI Agent Try AI Agent"},
+            {"text": "Blank project Create"},
+            {"text": "Auto captions Add captions"},
+        ],
+        links=[{"text": "Shared with me", "href": "https://example.com/app/shared"}],
+        forms=[],
+        headings=["Start from a template"],
+        auth_signals=[],
+        business_signals=[],
+        crawled_pages=3,
+    )
+
+    flows = _heuristic_flows_from_inventory(inventory)
+    flow_names = {flow["flow_name"] for flow in flows}
+
+    assert "enter_ai_agent" in flow_names
+    assert "create_blank_project" in flow_names
+    assert "start_caption_workflow" in flow_names

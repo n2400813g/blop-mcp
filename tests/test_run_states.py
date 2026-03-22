@@ -30,10 +30,11 @@ async def test_run_regression_creates_queued_run():
 
     mock_create_run = AsyncMock()
     mock_update_status = AsyncMock()
+    mock_save_event = AsyncMock()
 
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}):
         with patch("blop.storage.sqlite.create_run", mock_create_run):
-            with patch("blop.storage.sqlite.save_run_health_event", new_callable=AsyncMock):
+            with patch("blop.storage.sqlite.save_run_health_event", mock_save_event):
                 with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=None):
                     with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=make_flow("flow1")):
                         with patch("blop.storage.files.artifacts_dir", return_value="/tmp/runs/run1"):
@@ -46,6 +47,47 @@ async def test_run_regression_creates_queued_run():
     assert result["status"] == "queued"
     assert result["flow_count"] == 2
     mock_create_run.assert_called_once()
+    event_types = [call.args[1] for call in mock_save_event.await_args_list]
+    assert "run_queued" in event_types
+    assert "auth_context_resolved" in event_types
+
+
+@pytest.mark.asyncio
+async def test_run_regression_records_auth_validation_context():
+    from blop.tools.regression import run_regression_test
+    from blop.schemas import AuthProfile
+
+    mock_profile = AuthProfile(
+        profile_name="prod",
+        auth_type="storage_state",
+        storage_state_path="/tmp/auth.json",
+    )
+    mock_save_event = AsyncMock()
+
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}):
+        with patch("blop.storage.sqlite.create_run", new_callable=AsyncMock):
+            with patch("blop.storage.sqlite.save_run_health_event", mock_save_event):
+                with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=mock_profile):
+                    with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=make_flow("flow1")):
+                        with patch("blop.engine.auth.resolve_storage_state", new_callable=AsyncMock, return_value="/tmp/auth.json"):
+                            with patch("blop.engine.auth.validate_auth_session", new_callable=AsyncMock, return_value=True):
+                                with patch("blop.storage.files.artifacts_dir", return_value="/tmp/runs/run1"):
+                                    with patch("asyncio.create_task"):
+                                        await run_regression_test(
+                                            app_url="https://example.com/app",
+                                            flow_ids=["flow1"],
+                                            profile_name="prod",
+                                        )
+
+    auth_events = [
+        call for call in mock_save_event.await_args_list
+        if call.args[1] == "auth_context_resolved"
+    ]
+    assert len(auth_events) == 1
+    payload = auth_events[0].args[2]
+    assert payload["auth_source"] == "storage_state"
+    assert payload["storage_state_path"] == "/tmp/auth.json"
+    assert payload["session_validation_status"] == "valid"
 
 
 @pytest.mark.asyncio
@@ -77,6 +119,25 @@ async def test_auth_resolution_failure_returns_waiting_auth():
     assert result["status"] == "waiting_auth"
     assert "message" in result
     assert "prod" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_missing_profile_name_returns_structured_error():
+    """Unknown profile_name should fail fast instead of silently running unauthenticated."""
+    from blop.tools.regression import run_regression_test
+
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}):
+        with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=None):
+            with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=make_flow("flow1")):
+                result = await run_regression_test(
+                    app_url="https://example.com",
+                    flow_ids=["flow1"],
+                    profile_name="missing_profile",
+                )
+
+    assert result["status"] == "error"
+    assert "error" in result
+    assert "missing_profile" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -178,6 +239,39 @@ async def test_run_release_check_no_flows_returns_structured_error():
 
     assert "error" in result
     assert result.get("release_id") == "rel-xyz"
+
+
+@pytest.mark.asyncio
+async def test_run_release_check_accepts_flow_ids_alias():
+    """Canonical tool should accept flow_ids directly to reduce journey/flow confusion."""
+    from blop.tools.release_check import run_release_check
+
+    mock_run_regression = AsyncMock(return_value={"run_id": "run-abc", "status": "queued"})
+    with patch("blop.tools.regression.run_regression_test", mock_run_regression):
+        with patch("blop.storage.sqlite.save_release_brief", new_callable=AsyncMock):
+            result = await run_release_check(
+                app_url="https://example.com",
+                flow_ids=["flow1"],
+                mode="replay",
+                release_id="rel-flow-alias",
+            )
+
+    assert result["run_id"] == "run-abc"
+    assert result["flow_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_release_check_rejects_conflicting_flow_and_journey_ids():
+    from blop.tools.release_check import run_release_check
+
+    result = await run_release_check(
+        app_url="https://example.com",
+        flow_ids=["flow1"],
+        journey_ids=["journey1"],
+    )
+
+    assert "error" in result
+    assert "only one of flow_ids or journey_ids" in result["error"]
 
 
 @pytest.mark.asyncio

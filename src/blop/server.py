@@ -23,6 +23,7 @@ from blop.storage import sqlite
 from blop.storage.sqlite import init_db
 from blop.tools import assertions as assertions_tools
 from blop.tools import auth, capture_auth, debug, discover, evaluate as evaluate_tools
+from blop.tools import baselines as baselines_tools
 from blop.tools import browser_compat
 from blop.tools import network as network_tools
 from blop.tools import record, regression, results, security as security_tools
@@ -133,10 +134,12 @@ async def discover_test_flows(
     exclude_url_pattern: Optional[str] = None,
     return_inventory: bool = False,
 ) -> dict:
-    """[DEPRECATED — use discover_critical_journeys] Discover test flows for an application by scanning its pages or source code.
+    """[DEPRECATED — use discover_critical_journeys for release planning] Discover test flows for an application by scanning its pages or source code.
 
     Uses a BFS crawl to extract page signals (CTAs, auth routes, forms, headings),
     then sends them to Gemini to generate 5-8 meaningful test flows with severity hints.
+    This legacy tool returns raw planned flows; the canonical replacement returns
+    business-ranked journeys with clearer release-gating context.
 
     Args:
         app_url: The website URL to scan
@@ -285,7 +288,7 @@ async def capture_auth_session(
                        that detect fresh browser contexts as bots, e.g. Google, LinkedIn)
 
     Returns:
-        dict with profile_name, status ("captured" | "timeout"), storage_state_path, note
+        dict with profile_name, requested_profile_name, status ("captured" | "timeout" | "error"), storage_state_path, note
     """
     return await _safe_call(
         capture_auth.capture_auth_session,
@@ -1086,6 +1089,37 @@ async def record_test_flow(
 
 
 @mcp.tool()
+async def package_authenticated_saas_baseline(
+    app_url: str,
+    baseline_name: str,
+    recipes: list[dict],
+    profile_name: Optional[str] = None,
+) -> dict:
+    """Package reusable authenticated SaaS goldens into strict-step release-gate flows.
+
+    Use this after discovery or live exploration when you know the stable semantic path
+    you want to gate on. It promotes curated recipes into recorded flows that replay in
+    strict_steps mode and are ready for run_release_check(mode="replay").
+
+    Supported recipe_type values:
+    - role_click_to_url
+    - role_click_to_text
+    - selector_then_role_to_url
+    - text_click_to_text
+    - text_then_text_to_text
+    - text_then_selector_to_text
+    """
+    return await _safe_call(
+        baselines_tools.package_authenticated_saas_baseline,
+        tool_name="package_authenticated_saas_baseline",
+        app_url=app_url,
+        baseline_name=baseline_name,
+        recipes=recipes,
+        profile_name=profile_name,
+    )
+
+
+@mcp.tool()
 async def run_regression_test(
     app_url: str,
     flow_ids: list[str],
@@ -1095,7 +1129,7 @@ async def run_regression_test(
     command: Optional[str] = None,
     auto_rerecord: bool = False,
 ) -> dict:
-    """[DEPRECATED — use run_release_check] Run regression tests against recorded flows. Returns immediately; poll get_test_results for status.
+    """[DEPRECATED — use run_release_check for release decisions] Run regression tests against recorded flows. Returns immediately; poll get_test_results for status.
 
     Uses hybrid step-by-step replay by default: tries saved selectors first, falls back
     to text-based lookup, then repairs individual broken steps via vision LLM.
@@ -1153,6 +1187,9 @@ async def compare_visual_baseline(
 async def get_test_results(run_id: str) -> dict:
     """Get structured results for a test run.
 
+    Prefer run_release_check + blop://release/{release_id}/brief for release gating.
+    This tool remains the detailed run-level payload, now with summary-first fields.
+
     Args:
         run_id: The run_id returned from run_regression_test
 
@@ -1182,13 +1219,13 @@ async def get_run_health_stream(run_id: str, limit: int = 500) -> dict:
 
 @_if_compat
 async def get_risk_analytics(limit_runs: int = 30) -> dict:
-    """[DEPRECATED — use blop://release/{id}/incidents resource] Aggregate flaky-step, transition-failure, and business-critical risk analytics."""
+    """[DEPRECATED — use blop://release/{id}/incidents or v2 resources] Aggregate flaky-step, transition-failure, and business-critical risk analytics."""
     return await _safe_call(results.get_risk_analytics, limit_runs=limit_runs)
 
 
 @_if_compat
 async def list_recorded_tests() -> dict:
-    """[DEPRECATED — use blop://journeys resource] List all recorded test flows.
+    """[DEPRECATED — use blop://journeys resource for canonical planning context] List all recorded test flows.
 
     Returns:
         dict with flows (list of {flow_id, flow_name, app_url, goal, created_at}), total
@@ -2070,14 +2107,14 @@ async def flow_stability_profile_resource(flow_id: str) -> dict:
 
 @mcp.resource("blop://prompts/list")
 async def prompts_list_resource() -> dict:
-    """List all available prompt templates with previews."""
+    """Debug/internal resource: list available prompt templates with previews."""
     from blop.prompts import list_available_prompts
     return list_available_prompts()
 
 
 @mcp.resource("blop://prompts/{name}")
 async def prompt_resource(name: str) -> dict:
-    """Read a specific prompt template by name (discover, repair, remediation, next_actions)."""
+    """Debug/internal resource: read a specific engine prompt template by name (discover, repair, remediation, next_actions)."""
     from blop.prompts import get_prompt, DISCOVER_PROMPT, REPAIR_STEP_PROMPT, REMEDIATION_PROMPT, NEXT_ACTIONS_PROMPT
     defaults = {
         "discover": DISCOVER_PROMPT,
@@ -2417,11 +2454,11 @@ def quick_web_eval() -> str:
 # ===========================================================================
 # CANONICAL MVP SURFACE — Release Confidence Control Plane
 # ===========================================================================
-# These 4 tools + the blop://release/* resources are the primary public API.
+# These canonical release tools + the blop://release/* resources are the primary public API.
 # All other tools are available only when BLOP_ENABLE_COMPAT_TOOLS=true.
 #
 # Workflow:
-#   validate_release_setup → discover_critical_journeys → run_release_check → triage_release_blocker
+#   validate_release_setup → discover_critical_journeys → record_test_flow → run_release_check(mode="replay") → triage_release_blocker
 # ===========================================================================
 
 from blop.tools import journeys as journeys_tools
@@ -2483,6 +2520,7 @@ async def discover_critical_journeys(
 async def run_release_check(
     app_url: str,
     journey_ids: Optional[list[str]] = None,
+    flow_ids: Optional[list[str]] = None,
     profile_name: Optional[str] = None,
     mode: Literal["replay", "targeted"] = "replay",
     criticality_filter: Optional[list[str]] = None,
@@ -2493,19 +2531,21 @@ async def run_release_check(
     """Flagship release confidence tool: replay critical journeys and return a SHIP / INVESTIGATE / BLOCK decision.
 
     In replay mode (default), queues a regression run and returns immediately with run_id for polling.
-    In targeted mode, runs a one-shot agent evaluation synchronously.
+    In targeted mode, runs a one-shot agent evaluation synchronously as a shortcut smoke check.
 
     Args:
-        journey_ids: flow_ids to replay. If omitted, uses all flows matching criticality_filter.
+        journey_ids: deprecated alias for flow_ids.
+        flow_ids: recorded flow IDs to replay. If omitted, uses all flows matching criticality_filter.
         criticality_filter: defaults to ["revenue", "activation"].
         release_id: optional caller-supplied release identifier (auto-generated if omitted).
-        mode: "replay" (default) or "targeted" (one-shot eval, no recording needed).
+        mode: "replay" (default, golden path for release gating) or "targeted" (one-shot eval).
     """
     return await _safe_call(
         release_check_tools.run_release_check,
         tool_name="run_release_check",
         app_url=app_url,
         journey_ids=journey_ids,
+        flow_ids=flow_ids,
         profile_name=profile_name,
         mode=mode,
         criticality_filter=criticality_filter,
@@ -2519,13 +2559,14 @@ async def run_release_check(
 async def triage_release_blocker(
     run_id: Optional[str] = None,
     release_id: Optional[str] = None,
+    flow_id: Optional[str] = None,
     journey_id: Optional[str] = None,
     incident_cluster_id: Optional[str] = None,
     generate_remediation: bool = True,
 ) -> dict:
     """Root-cause evidence + next actions for a release blocker.
 
-    Accepts any of: run_id, release_id, journey_id, incident_cluster_id (at least one required).
+    Accepts any of: run_id, release_id, flow_id, journey_id, incident_cluster_id (at least one required).
     Returns BlockerTriage with likely_cause, evidence_summary, user_business_impact,
     recommended_action, suggested_owner, and linked_artifacts.
     """
@@ -2534,6 +2575,7 @@ async def triage_release_blocker(
         tool_name="triage_release_blocker",
         run_id=run_id,
         release_id=release_id,
+        flow_id=flow_id,
         journey_id=journey_id,
         incident_cluster_id=incident_cluster_id,
         generate_remediation=generate_remediation,

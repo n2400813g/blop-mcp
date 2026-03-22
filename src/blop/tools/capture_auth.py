@@ -31,10 +31,22 @@ async def capture_auth_session(
     try:
         safe_profile_name = sanitize_component(profile_name, field_name="profile_name")
     except ValueError as exc:
-        return {"status": "error", "profile_name": profile_name, "note": str(exc)}
+        return {
+            "error": str(exc),
+            "error_type": "invalid_profile_name",
+            "status": "error",
+            "profile_name": profile_name,
+            "note": str(exc),
+        }
     url_err = validate_app_url(login_url)
     if url_err:
-        return {"status": "error", "profile_name": profile_name, "note": url_err}
+        return {
+            "error": url_err,
+            "error_type": "invalid_login_url",
+            "status": "error",
+            "profile_name": profile_name,
+            "note": url_err,
+        }
 
     from playwright.async_api import async_playwright
     from blop.schemas import AuthProfile
@@ -57,6 +69,8 @@ async def capture_auth_session(
             )
             if resolved_user_data_dir is None:
                 return {
+                    "error": "user_data_dir must resolve within the repository root",
+                    "error_type": "invalid_user_data_dir",
                     "status": "error",
                     "profile_name": profile_name,
                     "note": "user_data_dir must resolve within the repository root",
@@ -137,6 +151,8 @@ async def capture_auth_session(
         return {
             "status": "timeout",
             "profile_name": profile_name,
+            "error": "No successful login detected within timeout.",
+            "error_type": "auth_capture_timeout",
             "note": (
                 "No successful login detected within timeout. "
                 "Check success_url_pattern or increase timeout_secs."
@@ -155,6 +171,7 @@ async def capture_auth_session(
     return {
         "status": "captured",
         "profile_name": safe_profile_name,
+        "requested_profile_name": profile_name,
         "storage_state_path": state_path,
-        "note": "Auth state saved. Pass profile_name to record_test_flow and run_regression_test.",
+        "note": "Auth state saved. Pass profile_name to record_test_flow and run_release_check(flow_ids=[...], mode='replay').",
     }

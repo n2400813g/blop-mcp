@@ -21,6 +21,17 @@ from blop.engine.logger import get_logger
 from blop.schemas import FlowStep, StructuredAssertion
 
 _log = get_logger("recording")
+_LOW_SIGNAL_TARGET_TEXT = {
+    "assert",
+    "click",
+    "done",
+    "drag",
+    "fill",
+    "navigate",
+    "select",
+    "upload",
+    "wait",
+}
 
 # Shared agent instructions used by both recording and goal-fallback regression agents.
 # Kept here so both contexts stay in sync without duplication.
@@ -256,6 +267,7 @@ async def record_flow(
                     )
                     params = action.get(action_name) or {}
                     interacted = action.get("interacted_element")
+                    interacted_hint = _extract_interacted_element_hint(interacted)
 
                     idx = params.get("index") if isinstance(params, dict) else None
                     if idx is not None:
@@ -318,24 +330,44 @@ async def record_flow(
                 aria_snapshot: Optional[str] = None
                 testid_selector: Optional[str] = None
                 label_text: Optional[str] = None
+                dom_role: Optional[str] = interacted_hint.get("role") if isinstance(interacted_hint, dict) else None
+                dom_name: Optional[str] = interacted_hint.get("name") if isinstance(interacted_hint, dict) else None
 
                 if page_ref is not None and mapped != "navigate":
+                    locator_reference = interacted_xpath or selector
+                    locator_kind = "xpath" if interacted_xpath else "css"
+                    if locator_reference:
+                        testid_selector, label_text, locator_role, locator_name = await _capture_locator_attrs(
+                            page_ref,
+                            locator_reference,
+                            mapped,
+                            locator_kind=locator_kind,
+                        )
+                        dom_role = locator_role or dom_role
+                        dom_name = locator_name or dom_name
+                        if testid_selector:
+                            selector = testid_selector
+                        elif not selector and interacted_xpath:
+                            selector = interacted_xpath
+
+                    target_text = _prefer_semantic_target_text(
+                        target_text,
+                        dom_name,
+                        label_text,
+                        interacted_hint.get("target_text") if isinstance(interacted_hint, dict) else None,
+                    )
+
                     aria_role, aria_name, aria_snapshot = await _capture_aria_for_element(
                         page_ref, target_text
                     )
-                    if interacted_xpath:
-                        testid_selector, label_text, dom_role, dom_name = await _capture_locator_attrs(
-                            page_ref, interacted_xpath, mapped
-                        )
-                        if testid_selector:
-                            selector = testid_selector
-                        elif not selector:
-                            selector = interacted_xpath
-                        # Use DOM-computed role/name as fallback when accessibility snapshot returned empty
-                        if not aria_role and dom_role:
-                            aria_role = dom_role
-                        if not aria_name and dom_name:
-                            aria_name = dom_name
+
+                    # Use DOM-computed role/name as fallback when accessibility snapshot returned empty.
+                    if not aria_role and dom_role:
+                        aria_role = dom_role
+                    if not aria_name and dom_name:
+                        aria_name = dom_name
+                    if not target_text:
+                        target_text = _prefer_semantic_target_text(None, aria_name, dom_name, label_text)
 
                 if _is_brittle_selector(selector):
                     selector = None
@@ -542,21 +574,26 @@ async def _capture_aria_for_element(
 
 
 async def _capture_locator_attrs(
-    page, xpath: str, action: str
+    page, locator: str, action: str, locator_kind: str = "xpath"
 ) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-    """Extract data-testid, label text, DOM role, and DOM name via JavaScript for stable locators."""
+    """Extract data-testid, label text, DOM role, and DOM name for a live DOM element."""
     testid_selector: Optional[str] = None
     label_text: Optional[str] = None
     dom_role: Optional[str] = None
     dom_name: Optional[str] = None
     try:
         result = await page.evaluate(
-            """(xpath) => {
+            """({ locator, locatorKind }) => {
                 try {
-                    const el = document.evaluate(
-                        xpath, document, null,
-                        XPathResult.FIRST_ORDERED_NODE_TYPE, null
-                    ).singleNodeValue;
+                    let el = null;
+                    if (locatorKind === 'xpath') {
+                        el = document.evaluate(
+                            locator, document, null,
+                            XPathResult.FIRST_ORDERED_NODE_TYPE, null
+                        ).singleNodeValue;
+                    } else {
+                        el = document.querySelector(locator);
+                    }
                     if (!el) return null;
                     const testid = el.getAttribute('data-testid') ||
                                    el.getAttribute('data-cy') ||
@@ -591,7 +628,7 @@ async def _capture_locator_attrs(
                     return {testid: testid, label: label, role: role, name: domName};
                 } catch(e) { return null; }
             }""",
-            xpath,
+            {"locator": locator, "locatorKind": locator_kind},
         )
         if result:
             if result.get("testid"):
@@ -604,6 +641,60 @@ async def _capture_locator_attrs(
     except Exception:
         _log.debug("capture locator attributes (testid, label)", exc_info=True)
     return testid_selector, label_text, dom_role, dom_name
+
+
+def _extract_interacted_element_hint(interacted) -> dict[str, Optional[str]]:
+    """Best-effort semantic hints from browser-use's interacted element object."""
+    if interacted is None:
+        return {}
+    attrs = getattr(interacted, "attributes", None) or {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+
+    node_name = (getattr(interacted, "node_name", None) or attrs.get("tagName") or "").lower()
+    role = attrs.get("role")
+    if not role:
+        if node_name == "a":
+            role = "link"
+        elif node_name == "button":
+            role = "button"
+        elif node_name == "textarea":
+            role = "textbox"
+        elif node_name == "select":
+            role = "combobox"
+        elif node_name == "input":
+            role = {
+                "checkbox": "checkbox",
+                "radio": "radio",
+                "button": "button",
+                "submit": "button",
+                "reset": "button",
+            }.get((attrs.get("type") or "").lower(), "textbox")
+
+    meaningful_text = None
+    try:
+        if hasattr(interacted, "get_meaningful_text_for_llm"):
+            meaningful_text = interacted.get_meaningful_text_for_llm()
+    except Exception:
+        _log.debug("extract meaningful interacted text", exc_info=True)
+
+    name = (
+        attrs.get("aria-label")
+        or attrs.get("title")
+        or attrs.get("placeholder")
+        or attrs.get("name")
+        or meaningful_text
+    )
+    if isinstance(name, str):
+        name = name.strip()[:100] or None
+    else:
+        name = None
+
+    return {
+        "role": role,
+        "name": name,
+        "target_text": name or (meaningful_text[:100] if isinstance(meaningful_text, str) else None),
+    }
 
 
 def _find_aria_node(node: dict, target_text: str) -> Optional[dict]:
@@ -643,6 +734,25 @@ def _extract_target_text(description: str) -> Optional[str]:
     words = description.split()[:6]
     text = " ".join(words)
     return text[:100] if text else None
+
+
+def _prefer_semantic_target_text(current: Optional[str], *candidates: Optional[str]) -> Optional[str]:
+    """Prefer visible, user-meaningful labels over generic action words."""
+    if current and not _is_low_signal_target_text(current):
+        return current[:100]
+    for candidate in candidates:
+        if candidate and not _is_low_signal_target_text(candidate):
+            return str(candidate).strip()[:100]
+    if current:
+        return current[:100]
+    return None
+
+
+def _is_low_signal_target_text(text: Optional[str]) -> bool:
+    if not text:
+        return True
+    normalized = str(text).strip().lower()
+    return not normalized or normalized in _LOW_SIGNAL_TARGET_TEXT
 
 
 def _compute_fingerprint(action: str, selector: Optional[str], target_text: Optional[str], index: int) -> str:

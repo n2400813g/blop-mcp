@@ -9,6 +9,69 @@ from blop.schemas import FailureCase
 from blop.storage import sqlite
 
 
+async def _build_auth_provenance(run: dict, events: list[dict]) -> dict:
+    profile_name = run.get("profile_name")
+    provenance = {
+        "profile_name": profile_name,
+        "auth_used": bool(profile_name),
+        "auth_source": None,
+        "storage_state_path": None,
+        "user_data_dir": None,
+        "session_validation_status": "unknown_not_captured",
+        "landed_authenticated": None,
+        "landing_url": None,
+        "expected_url": None,
+        "landing_page_title": None,
+    }
+    if not profile_name:
+        for event in events:
+            if event.get("event_type") == "auth_landing_observed":
+                payload = event.get("payload", {}) or {}
+                provenance["landed_authenticated"] = payload.get("landed_authenticated")
+                provenance["landing_url"] = payload.get("landed_url")
+                provenance["expected_url"] = payload.get("expected_url")
+                provenance["landing_page_title"] = payload.get("page_title")
+                break
+        return provenance
+
+    try:
+        profile = await sqlite.get_auth_profile(profile_name)
+    except Exception:
+        profile = None
+
+    if not profile:
+        provenance["auth_source"] = "missing_profile"
+        return provenance
+
+    provenance["auth_source"] = profile.auth_type
+    provenance["storage_state_path"] = profile.storage_state_path
+    provenance["user_data_dir"] = profile.user_data_dir
+    if profile.auth_type == "storage_state" and profile.storage_state_path:
+        provenance["session_validation_status"] = "storage_state_available"
+    elif profile.auth_type == "cookie_json" and profile.cookie_json_path:
+        provenance["session_validation_status"] = "cookie_json_available"
+    elif profile.auth_type == "env_login":
+        provenance["session_validation_status"] = "env_login_profile"
+
+    for event in events:
+        payload = event.get("payload", {}) or {}
+        if event.get("event_type") == "auth_context_resolved":
+            provenance["auth_used"] = payload.get("auth_used", provenance["auth_used"])
+            provenance["auth_source"] = payload.get("auth_source", provenance["auth_source"])
+            provenance["storage_state_path"] = payload.get("storage_state_path", provenance["storage_state_path"])
+            provenance["user_data_dir"] = payload.get("user_data_dir", provenance["user_data_dir"])
+            provenance["session_validation_status"] = payload.get(
+                "session_validation_status",
+                provenance["session_validation_status"],
+            )
+        elif event.get("event_type") == "auth_landing_observed" and provenance["landing_url"] is None:
+            provenance["landed_authenticated"] = payload.get("landed_authenticated")
+            provenance["landing_url"] = payload.get("landed_url")
+            provenance["expected_url"] = payload.get("expected_url")
+            provenance["landing_page_title"] = payload.get("page_title")
+    return provenance
+
+
 def _annotate_staleness(rec: dict, completed_at: str | None, run_status: str) -> dict:
     """Add stale=True/False to a release_recommendation dict."""
     if run_status not in ("completed", "failed"):
@@ -51,8 +114,18 @@ async def get_test_results(run_id: str) -> dict:
     report["release_recommendation"] = _annotate_staleness(
         rec, run.get("completed_at"), run.get("status", "unknown")
     )
-
     events = await sqlite.list_run_health_events(run_id, limit=500)
+    report["decision_summary"] = reporting.build_decision_summary(report)
+    report["evidence_summary"] = reporting.build_evidence_summary(report)
+    report["coverage_summary"] = reporting.build_coverage_summary(report)
+    report["evidence_quality"] = reporting.build_evidence_quality(report)
+    report["auth_provenance"] = await _build_auth_provenance(run, events)
+    report["run_environment"] = {
+        "headless": run.get("headless", True),
+        "run_mode": run.get("run_mode", "hybrid"),
+        "profile_name": run.get("profile_name"),
+        "app_url": run.get("app_url", ""),
+    }
     report["run_health"] = {
         "event_count": len(events),
         "latest_event_type": events[-1]["event_type"] if events else None,
@@ -73,24 +146,13 @@ async def get_test_results(run_id: str) -> dict:
     decision = rec.get("decision", "INVESTIGATE")
     run_status = report.get("status", "unknown")
     if run_status in ("queued", "running"):
-        report["workflow_hint"] = (
-            f"Run still in progress. Poll: get_test_results(run_id='{run_id}')"
-        )
+        report["workflow_hint"] = f"Run still in progress. Poll: get_test_results(run_id='{run_id}')"
     elif decision == "BLOCK":
-        report["workflow_hint"] = (
-            "Shipping blocked. Next: debug_test_case(run_id='...', case_id='...') "
-            "on the top failed case, then fix and re-run."
-        )
+        report["workflow_hint"] = "Shipping blocked. Debug the top failed case, fix it, and re-run."
     elif decision == "INVESTIGATE":
-        report["workflow_hint"] = (
-            "Review failures. For detailed evidence: debug_test_case(). "
-            "For trends: get_risk_analytics()."
-        )
+        report["workflow_hint"] = "Review the failed cases and inspect the top evidence before deciding."
     else:
-        report["workflow_hint"] = (
-            "All flows passed. Safe to ship. Consider blop_v2_capture_context "
-            "to update your baseline before deploying."
-        )
+        report["workflow_hint"] = "All flows passed. Review the release summary and ship if it matches scope."
 
     return report
 

@@ -227,6 +227,9 @@ async def test_validate_release_setup_suggested_steps_use_canonical_names():
     steps_text = " ".join(result.get("suggested_next_steps", []))
     assert "discover_critical_journeys" in steps_text
     assert "discover_test_flows" not in steps_text
+    assert "run_release_check" in steps_text
+    assert "flow_ids" in steps_text
+    assert "journey_ids" not in steps_text
 
 
 @pytest.mark.asyncio

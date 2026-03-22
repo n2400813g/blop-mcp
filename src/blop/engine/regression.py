@@ -66,6 +66,34 @@ def _should_auto_heal(repair_confidence: float, behavior_risk: float) -> bool:
     return repair_confidence >= AUTO_HEAL_MIN_CONFIDENCE and behavior_risk <= AUTO_HEAL_MAX_BEHAVIOR_RISK
 
 
+async def _save_navigation_health_event(
+    run_id: str,
+    case_id: str,
+    flow: RecordedFlow,
+    expected_url: str,
+    landed_url: str,
+    page_title: str,
+) -> None:
+    from blop.storage import sqlite
+
+    lowered = (landed_url or "").lower()
+    auth_redirect_detected = any(token in lowered for token in ("/login", "/signin", "/sign-in", "/auth", "oauth"))
+    await sqlite.save_run_health_event(
+        run_id,
+        "auth_landing_observed",
+        {
+            "case_id": case_id,
+            "flow_id": flow.flow_id,
+            "flow_name": flow.flow_name,
+            "expected_url": expected_url,
+            "landed_url": landed_url,
+            "page_title": page_title,
+            "auth_redirect_detected": auth_redirect_detected,
+            "landed_authenticated": not auth_redirect_detected,
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Hybrid step-by-step executor
 # ---------------------------------------------------------------------------
@@ -133,6 +161,7 @@ async def execute_recorded_flow(
         try:
             unrecoverable = False
             deferred_asserts: list[tuple[int, object]] = []  # (step_idx, step) for assert steps
+            landing_observed = False
 
             spa_hints = getattr(flow, "spa_hints", None)
 
@@ -154,6 +183,8 @@ async def execute_recorded_flow(
                             run_mode=run_mode,
                             trace=trace,
                             spa_hints=spa_hints,
+                            flow_name=flow.flow_name,
+                            flow_goal=flow.goal,
                         ),
                         timeout=float(BLOP_STEP_TIMEOUT_SECS),
                     )
@@ -171,6 +202,21 @@ async def execute_recorded_flow(
 
                 # Collect performance metrics after navigation steps
                 if step.action == "navigate" and step_result.status == "pass":
+                    if not landing_observed:
+                        try:
+                            current_url = page.url
+                            page_title = await _normalize_page_text(page.title())
+                            await _save_navigation_health_event(
+                                run_id=run_id,
+                                case_id=case_id,
+                                flow=flow,
+                                expected_url=step.value or flow.entry_url or flow.app_url,
+                                landed_url=current_url,
+                                page_title=page_title[:120],
+                            )
+                            landing_observed = True
+                        except Exception:
+                            _log.debug("navigation health event failed", exc_info=True)
                     try:
                         from blop.engine.performance import collect_performance_metrics
                         perf = await collect_performance_metrics(page)
@@ -270,6 +316,8 @@ async def _execute_single_step(
     run_mode: str,
     trace: ReplayTrace,
     spa_hints=None,
+    flow_name: str | None = None,
+    flow_goal: str | None = None,
 ) -> ReplayStepResult:
     """Tiered fallback: testid → aria_role → by_label → CSS → text → agent repair."""
     from blop.engine.interaction import click_locator, fill_locator, wait_for_spa_ready
@@ -585,9 +633,15 @@ async def _execute_single_step(
             _log.debug("text lookup locator try failed", exc_info=True)
 
     # Tier 6: Hybrid repair via agent (ARIA-enhanced)
-    if run_mode in ("hybrid", "explore"):
+    if run_mode == "hybrid":
         trace.run_mode = "hybrid_repair"
-        repair_result = await repair_step_with_agent(step, page)
+        repair_result = await repair_step_with_agent(
+            step,
+            page,
+            flow_name=flow_name,
+            flow_goal=flow_goal,
+            step_index=step_idx,
+        )
         if repair_result and repair_result.get("_quota_error"):
             return _result(
                 status="fail",
@@ -684,7 +738,14 @@ async def _execute_single_step(
     )
 
 
-async def repair_step_with_agent(step, page: "Page") -> Optional[dict]:
+async def repair_step_with_agent(
+    step,
+    page: "Page",
+    *,
+    flow_name: str | None = None,
+    flow_goal: str | None = None,
+    step_index: int | None = None,
+) -> Optional[dict]:
     """Send REPAIR_STEP_PROMPT + ARIA context + screenshot to the configured LLM; return repaired action dict."""
     from blop.engine.vision import _check_llm_api_key, _make_vision_message
     if not _check_llm_api_key():
@@ -722,6 +783,12 @@ async def repair_step_with_agent(step, page: "Page") -> Optional[dict]:
             current_url=current_url,
             aria_section=aria_section,
         )
+        prompt += _repair_flow_context_suffix(
+            flow_name=flow_name,
+            flow_goal=flow_goal,
+            step_index=step_index,
+            step=step,
+        )
         prompt += (
             "\nReturn JSON with repair_confidence (0..1) and behavior_risk (0..1) "
             "in addition to any repaired locator/action fields."
@@ -741,6 +808,30 @@ async def repair_step_with_agent(step, page: "Page") -> Optional[dict]:
             return {"_quota_error": True}
 
     return None
+
+
+def _repair_flow_context_suffix(
+    *,
+    flow_name: str | None,
+    flow_goal: str | None,
+    step_index: int | None,
+    step,
+) -> str:
+    parts: list[str] = []
+    if flow_name:
+        parts.append(f"Flow name: {flow_name}")
+    if flow_goal:
+        parts.append(f"Flow goal: {flow_goal}")
+    if step_index is not None:
+        parts.append(f"Current replay step index: {step_index}")
+    if not getattr(step, "selector", None) and not getattr(step, "aria_name", None):
+        parts.append(
+            "This recorded step has weak locator data. Infer the intended target from the flow goal, "
+            "the current page state, and the visible interactive elements."
+        )
+    if not parts:
+        return ""
+    return "\n\nReplay context:\n- " + "\n- ".join(parts)
 
 
 from blop.engine.dom_utils import extract_interactive_nodes_flat as _extract_interactive_nodes_flat

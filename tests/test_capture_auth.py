@@ -117,6 +117,7 @@ async def test_capture_auth_session_rejects_profile_name_with_separators():
     )
 
     assert result["status"] == "error"
+    assert "error" in result
     assert "path separators" in result["note"]
 
 
@@ -130,4 +131,54 @@ async def test_capture_auth_session_rejects_invalid_login_url():
     )
 
     assert result["status"] == "error"
+    assert "error" in result
     assert "http or https" in result["note"]
+
+
+@pytest.mark.asyncio
+async def test_capture_auth_session_returns_requested_profile_name_when_sanitized(tmp_path):
+    from blop.tools.capture_auth import capture_auth_session
+
+    login_url = "https://app.example.com/login"
+    success_url = "https://app.example.com/dashboard"
+    blop_dir = str(tmp_path / ".blop")
+
+    mock_page = AsyncMock()
+    mock_page.goto = AsyncMock()
+    type(mock_page).url = PropertyMock(side_effect=[login_url, login_url, success_url])
+    mock_page.wait_for_load_state = AsyncMock()
+
+    mock_context = AsyncMock()
+    mock_context.new_page.return_value = mock_page
+    mock_context.close = AsyncMock()
+
+    async def fake_storage_state(path=None):
+        import os
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump({"origins": [{"localStorage": []}]}, f)
+
+    mock_context.storage_state = AsyncMock(side_effect=fake_storage_state)
+
+    mock_browser = AsyncMock()
+    mock_browser.new_context.return_value = mock_context
+    mock_browser.close = AsyncMock()
+
+    mock_playwright = MagicMock()
+    mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
+    mock_playwright.__aexit__ = AsyncMock(return_value=None)
+
+    mock_save_auth_profile = AsyncMock()
+
+    with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+        with patch("blop.storage.sqlite.save_auth_profile", mock_save_auth_profile):
+            with patch("blop.tools.capture_auth._BLOP_DIR", blop_dir):
+                result = await capture_auth_session(
+                    profile_name="safe-profile",
+                    login_url=login_url,
+                    timeout_secs=2,
+                )
+
+    assert result["status"] == "captured"
+    assert result["requested_profile_name"] == "safe-profile"

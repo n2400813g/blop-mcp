@@ -118,6 +118,15 @@ async def test_triage_blocker_requires_at_least_one_id():
     assert "required" in result["error"].lower() or "least one" in result["error"].lower()
 
 
+@pytest.mark.asyncio
+async def test_triage_blocker_rejects_conflicting_flow_and_journey_ids():
+    from blop.tools.triage import triage_release_blocker
+
+    result = await triage_release_blocker(flow_id="flow1", journey_id="journey1")
+    assert "error" in result
+    assert "flow_id or journey_id" in result["error"]
+
+
 # ---------------------------------------------------------------------------
 # run_release_check — bad URL inputs
 # ---------------------------------------------------------------------------
