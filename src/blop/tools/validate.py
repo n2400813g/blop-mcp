@@ -8,6 +8,51 @@ from typing import Optional
 from blop.config import BLOP_DB_PATH, BLOP_DEBUG_LOG, runtime_config_issues, validate_app_url
 
 
+def _build_validation_summary(result: dict) -> dict:
+    checks = result.get("checks", [])
+    blockers = result.get("blockers", [])
+    warnings = result.get("warnings", [])
+    return {
+        "passed": sum(1 for check in checks if check.get("passed")),
+        "warning_count": len(warnings),
+        "blocked_count": len(blockers),
+        "total_checks": len(checks),
+    }
+
+
+def _build_validation_headline(result: dict, app_url: str | None, profile_name: str | None) -> str:
+    status = result.get("status", "warnings")
+    warnings = result.get("warnings", [])
+    if status == "blocked":
+        return "Release setup is blocked. Fix the blocking checks before running release-critical flows."
+    if any("expired" in warning.lower() for warning in warnings):
+        return "Release setup is partially ready, but the auth session has expired and must be refreshed."
+    if profile_name and any("could not be resolved" in warning.lower() for warning in warnings):
+        return "Release setup is partially ready, but the selected auth profile is not usable yet."
+    if app_url:
+        return "Release setup looks ready enough to continue with journey discovery and replay."
+    return "Environment checks passed. Validate a specific app_url next to confirm release readiness."
+
+
+def _build_validation_recommended_action(result: dict) -> str:
+    steps = result.get("suggested_next_steps", []) or []
+    if steps:
+        return steps[0]
+    status = result.get("status", "warnings")
+    if status == "blocked":
+        return "Resolve the highest-priority blocker and run validate_release_setup again."
+    if status == "warnings":
+        return "Resolve the top warning and re-check setup before running a release check."
+    return "Discover release-critical journeys and prepare replay coverage."
+
+
+def _augment_validate_result(result: dict, *, app_url: str | None, profile_name: str | None) -> dict:
+    result["check_summary"] = _build_validation_summary(result)
+    result["headline"] = _build_validation_headline(result, app_url, profile_name)
+    result["recommended_action"] = _build_validation_recommended_action(result)
+    return result
+
+
 async def validate_setup(
     app_url: Optional[str] = None,
     profile_name: Optional[str] = None,
@@ -240,13 +285,14 @@ async def validate_setup(
             if "not reachable" in w:
                 suggested_next_steps.append("Ensure your app is running and accessible from this machine.")
 
-    return {
+    result = {
         "status": status,
         "checks": checks,
         "blockers": blockers,
         "warnings": warnings,
         "suggested_next_steps": suggested_next_steps,
     }
+    return _augment_validate_result(result, app_url=app_url, profile_name=profile_name)
 
 
 async def validate_release_setup(
@@ -259,17 +305,46 @@ async def validate_release_setup(
     before running a release check.
     """
     result = await validate_setup(app_url=app_url, profile_name=profile_name)
-    # Adjust suggested_next_steps to reference canonical tool names and arguments.
-    steps = result.get("suggested_next_steps", [])
-    updated_steps = []
-    for step in steps:
-        step = step.replace("discover_test_flows", "discover_critical_journeys")
-        step = step.replace(
-            "Run regression: run_regression_test(app_url='...', flow_ids=['...'])",
-            "Run release check: run_release_check(app_url='...', flow_ids=['...'], mode='replay')",
-        )
-        step = step.replace("run_regression_test", "run_release_check")
-        step = step.replace("flow_ids=['...']", "flow_ids=['...']")
-        updated_steps.append(step)
-    result["suggested_next_steps"] = updated_steps
-    return result
+    status = result.get("status", "warnings")
+
+    canonical_steps: list[str] = []
+    if status == "blocked":
+        canonical_steps = list(result.get("suggested_next_steps", []))
+    elif status == "warnings":
+        if app_url:
+            canonical_steps.append(
+                f"Review release-critical journey coverage: discover_critical_journeys(app_url='{app_url}')"
+            )
+            canonical_steps.append(
+                "Inspect the recorded release-gating journey inventory: read blop://journeys"
+            )
+        if profile_name:
+            canonical_steps.append(
+                f"Re-check blocker evidence after auth issues are fixed: triage_release_blocker(release_id='...', run_id='...')"
+            )
+        else:
+            canonical_steps.append(
+                "If protected journeys gate this release, capture or refresh auth before running the release check."
+            )
+    else:
+        if app_url:
+            canonical_steps.append(
+                f"Discover critical journeys: discover_critical_journeys(app_url='{app_url}')"
+            )
+            canonical_steps.append("Review recorded release-gating journeys: read blop://journeys")
+            canonical_steps.append(
+                "If a release-gating journey is missing, record it with record_test_flow(app_url='...', flow_name='...', goal='...', business_criticality='revenue')"
+            )
+            canonical_steps.append(
+                f"Run the release-confidence check: run_release_check(app_url='{app_url}', flow_ids=['...'], mode='replay')"
+            )
+            canonical_steps.append(
+                "When the run completes, inspect the brief and triage blockers: read blop://release/{release_id}/brief, then call triage_release_blocker(release_id='...') if needed"
+            )
+        else:
+            canonical_steps.append(
+                "Validate a specific release target next: validate_release_setup(app_url='https://your-app.com', profile_name='your_profile')"
+            )
+
+    result["suggested_next_steps"] = canonical_steps or list(result.get("suggested_next_steps", []))
+    return _augment_validate_result(result, app_url=app_url, profile_name=profile_name)

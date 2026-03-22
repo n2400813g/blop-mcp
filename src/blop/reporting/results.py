@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from blop.schemas import FailureCase
 
+_TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "waiting_auth"}
+
 
 def _artifact_paths_for_case(case: dict) -> list[str]:
     paths: list[str] = []
@@ -37,6 +39,122 @@ def _classify_failure_kind(case: dict) -> str:
     return mapping.get(failure_class, "unknown")
 
 
+def explain_run_status(status: str, *, run_id: str = "", top_failure_mode: str | None = None) -> dict:
+    poll_hint = f"Poll get_test_results(run_id='{run_id}')" if run_id else "Poll get_test_results(run_id='...')"
+    guidance = {
+        "queued": {
+            "status_detail": "Run is queued and waiting for execution to begin.",
+            "recommended_next_action": poll_hint,
+            "is_terminal": False,
+        },
+        "running": {
+            "status_detail": "Run is actively replaying recorded flows and collecting evidence.",
+            "recommended_next_action": poll_hint,
+            "is_terminal": False,
+        },
+        "waiting_auth": {
+            "status_detail": "Run is blocked on authentication and will not execute until a valid session is available.",
+            "recommended_next_action": "Refresh auth with capture_auth_session(...) or fix the auth profile, then retry the run.",
+            "is_terminal": True,
+        },
+        "completed": {
+            "status_detail": "Run finished and the final release recommendation is ready for review.",
+            "recommended_next_action": "Review the release recommendation, evidence, and remediation guidance.",
+            "is_terminal": True,
+        },
+        "failed": {
+            "status_detail": "Run terminated with at least one failure condition that needs investigation.",
+            "recommended_next_action": "Inspect the top failed case and captured evidence before retrying.",
+            "is_terminal": True,
+        },
+        "cancelled": {
+            "status_detail": "Run was cancelled before it finished.",
+            "recommended_next_action": "Restart the run when you are ready to continue.",
+            "is_terminal": True,
+        },
+    }
+    result = guidance.get(
+        status,
+        {
+            "status_detail": f"Run is in an unknown state: {status}.",
+            "recommended_next_action": "Inspect the run record and health events for more detail.",
+            "is_terminal": False,
+        },
+    ).copy()
+    if status == "failed":
+        action_overrides = {
+            "auth_session_failure": "Refresh auth, confirm the session lands inside the app, and re-run.",
+            "automation_fragility": "Inspect traces/screenshots, refresh the recorded flow if the UI drifted, and re-run.",
+            "environment_or_infra": "Verify the app, runtime dependencies, and network access before retrying.",
+            "product_regression": "Debug the top failed case, fix the regression, and re-run.",
+            "unknown": "Inspect the top failed case and captured evidence before retrying.",
+        }
+        result["recommended_next_action"] = action_overrides.get(
+            top_failure_mode or "unknown",
+            result["recommended_next_action"],
+        )
+    return result
+
+
+def infer_top_failure_mode(report: dict) -> str:
+    status = report.get("status", "unknown")
+    if status == "waiting_auth":
+        return "waiting_auth"
+
+    auth = report.get("auth_provenance", {}) or {}
+    session_status = auth.get("session_validation_status")
+    if session_status in {"expired_session", "redirected_to_auth", "unresolved_storage_state", "missing_profile", "validation_error"}:
+        return "auth_session_failure"
+
+    failure_kinds = (report.get("coverage_summary", {}) or {}).get("failure_kinds", []) or []
+    if "environment_or_infra" in failure_kinds:
+        return "environment_or_infra"
+    if "product_regression" in failure_kinds:
+        return "product_regression"
+    if "automation_fragility" in failure_kinds:
+        return "automation_fragility"
+
+    if report.get("failed_cases"):
+        return "unknown"
+    return "unknown"
+
+
+def remediation_steps_for_failure_mode(mode: str) -> list[str]:
+    steps = {
+        "waiting_auth": [
+            "Refresh or capture a valid auth session with capture_auth_session(...).",
+            "Validate the profile against the target app_url before retrying the run.",
+            "Re-run the blocked release check once auth lands inside the app.",
+        ],
+        "auth_session_failure": [
+            "Refresh or capture auth again and confirm the session still lands in the authenticated app.",
+            "Run validate_release_setup(app_url='...', profile_name='...') to verify the auth profile before replay.",
+            "Retry the replay after the auth session validates cleanly.",
+        ],
+        "automation_fragility": [
+            "Inspect the top trace and screenshots to confirm whether the UI changed or the selector drifted.",
+            "Refresh the recorded flow if the app surface changed or the old flow is stale.",
+            "Re-run the replay and confirm the repaired flow passes without fallback drift.",
+        ],
+        "environment_or_infra": [
+            "Verify the app is reachable and healthy from this machine.",
+            "Check runtime dependencies, browser availability, and any recent environment/config changes.",
+            "Retry the run once infrastructure issues are resolved.",
+        ],
+        "product_regression": [
+            "Debug the top failed case using its trace, screenshots, and console/network evidence.",
+            "Fix the underlying product issue in the affected journey.",
+            "Re-run the release check to confirm the regression is gone.",
+        ],
+        "unknown": [
+            "Inspect the top failed case and its evidence bundle first.",
+            "Use the failure classification, trace, and screenshots to decide whether this is auth, drift, infra, or product.",
+            "Retry only after the likely cause is addressed.",
+        ],
+    }
+    return steps.get(mode, steps["unknown"])
+
+
 def _compute_release_recommendation(cases: list[FailureCase], status: str) -> dict:
     """Compute a deterministic go/no-go release recommendation from run cases.
 
@@ -55,6 +173,13 @@ def _compute_release_recommendation(cases: list[FailureCase], status: str) -> di
     revenue_failures = [c for c in failed if c.business_criticality == "revenue"]
     activation_failures = [c for c in failed if c.business_criticality == "activation"]
     critical_journey_failures = revenue_failures + activation_failures
+    critical_drifted_passes = [
+        c for c in cases
+        if c.status == "pass"
+        and c.business_criticality in ("revenue", "activation")
+        and getattr(getattr(c, "drift_summary", None), "drift_detected", False)
+        and getattr(getattr(c, "drift_summary", None), "disallowed_fallback_used", [])
+    ]
 
     # Base decision
     policy_blocks: list[str] = []
@@ -64,6 +189,12 @@ def _compute_release_recommendation(cases: list[FailureCase], status: str) -> di
         rationale = (
             f"{len(blockers)} blocker(s) and {len(critical_journey_failures)} critical journey failure(s) detected. "
             "Do not ship until these are resolved."
+        )
+    elif critical_drifted_passes:
+        decision = "INVESTIGATE"
+        rationale = (
+            f"{len(critical_drifted_passes)} critical journey pass(es) required disallowed drift or fallback. "
+            "Review replay fidelity before shipping."
         )
     elif failed:
         decision = "INVESTIGATE"
@@ -114,6 +245,7 @@ def _compute_release_recommendation(cases: list[FailureCase], status: str) -> di
         "rationale": rationale,
         "blocker_count": len(blockers),
         "critical_journey_failures": len(critical_journey_failures),
+        "critical_drifted_passes": len(critical_drifted_passes),
     }
     if policy_blocks:
         result["policy_gates_applied"] = policy_blocks
@@ -152,26 +284,35 @@ def build_decision_summary(report: dict) -> dict:
     top_blockers = [name for name in top_blockers if name][:3]
 
     decision = rec.get("decision", "INVESTIGATE")
-    if report.get("status") in ("queued", "running"):
-        next_recommended_action = f"Poll get_test_results(run_id='{report.get('run_id', '')}') until the run completes."
-    elif decision == "BLOCK":
-        next_recommended_action = "Investigate the top blocker and re-run after a fix."
-    elif decision == "INVESTIGATE":
-        next_recommended_action = "Review failed cases and inspect the highest-signal evidence."
-    else:
-        next_recommended_action = "Review the final release brief and ship if it matches release scope."
+    status_guidance = explain_run_status(
+        report.get("status", "unknown"),
+        run_id=report.get("run_id", ""),
+        top_failure_mode=report.get("top_failure_mode"),
+    )
+    next_recommended_action = report.get("recommended_next_action")
+    if not next_recommended_action:
+        if report.get("status") in ("queued", "running", "waiting_auth"):
+            next_recommended_action = status_guidance["recommended_next_action"]
+        elif decision == "BLOCK":
+            next_recommended_action = "Investigate the top blocker and re-run after a fix."
+        elif decision == "INVESTIGATE":
+            next_recommended_action = "Review failed cases and inspect the highest-signal evidence."
+        else:
+            next_recommended_action = "Review the final release brief and ship if it matches release scope."
 
     return {
         "decision": decision,
         "confidence": rec.get("confidence", "medium"),
         "blocker_count": rec.get("blocker_count", 0),
         "critical_journey_failures": rec.get("critical_journey_failures", 0),
+        "critical_drifted_passes": rec.get("critical_drifted_passes", 0),
         "top_blocker_journeys": top_blockers,
         "verified_journeys": [
             case.get("flow_name", "")
             for case in (report.get("cases", []) or [])
             if case.get("status") == "pass" and case.get("flow_name")
         ][:5],
+        "plan_fidelity": (report.get("drift_summary", {}) or {}).get("plan_fidelity"),
         "next_recommended_action": next_recommended_action,
     }
 
@@ -302,6 +443,46 @@ def build_evidence_quality(report: dict) -> dict:
     }
 
 
+def build_drift_summary(report: dict) -> dict:
+    cases = report.get("cases", []) or []
+    drift_types: list[str] = []
+    allowed_fallback_used: list[str] = []
+    disallowed_fallback_used: list[str] = []
+    surface_match = True
+    assertion_match = True
+    plan_fidelity = "high"
+
+    for case in cases:
+        drift = case.get("drift_summary", {}) or {}
+        for item in drift.get("drift_types", []) or []:
+            if item not in drift_types:
+                drift_types.append(item)
+        for item in drift.get("allowed_fallback_used", []) or []:
+            if item not in allowed_fallback_used:
+                allowed_fallback_used.append(item)
+        for item in drift.get("disallowed_fallback_used", []) or []:
+            if item not in disallowed_fallback_used:
+                disallowed_fallback_used.append(item)
+        if drift.get("surface_match") is False:
+            surface_match = False
+        if drift.get("assertion_match") is False:
+            assertion_match = False
+        if drift.get("plan_fidelity") == "low":
+            plan_fidelity = "low"
+        elif drift.get("plan_fidelity") == "medium" and plan_fidelity != "low":
+            plan_fidelity = "medium"
+
+    return {
+        "drift_detected": bool(drift_types or allowed_fallback_used or disallowed_fallback_used),
+        "drift_types": drift_types,
+        "allowed_fallback_used": allowed_fallback_used,
+        "disallowed_fallback_used": disallowed_fallback_used,
+        "surface_match": surface_match if cases else None,
+        "assertion_match": assertion_match if cases else None,
+        "plan_fidelity": plan_fidelity if cases else "low",
+    }
+
+
 async def build_report(run: dict, cases: list[FailureCase]) -> dict:
     severity_counts: dict[str, int] = {
         "blocker": 0, "high": 0, "medium": 0, "low": 0, "none": 0, "pass": 0, "error": 0
@@ -317,11 +498,17 @@ async def build_report(run: dict, cases: list[FailureCase]) -> dict:
     failed = [c for c in cases if c.status in ("fail", "error", "blocked")]
 
     status = run.get("status", "unknown")
-    extra: dict = {}
+    status_meta = explain_run_status(status, run_id=run.get("run_id", ""))
+    extra: dict = {
+        "status_detail": status_meta["status_detail"],
+        "recommended_next_action": status_meta["recommended_next_action"],
+        "is_terminal": status_meta["is_terminal"],
+        "top_failure_mode": "waiting_auth" if status == "waiting_auth" else "unknown",
+        "recommended_remediation_steps": remediation_steps_for_failure_mode("waiting_auth" if status == "waiting_auth" else "unknown"),
+    }
     if status == "waiting_auth":
         extra["waiting_auth_message"] = (
-            "Run is waiting for auth. The auth profile could not be resolved. "
-            "Check save_auth_profile and ensure your credentials env vars are set, then retry."
+            "Run is waiting for auth. The auth profile could not be resolved or the session needs to be refreshed before replay can start."
         )
 
     # Enrich case dicts with replay metadata, severity label, and healing info
@@ -346,4 +533,5 @@ async def build_report(run: dict, cases: list[FailureCase]) -> dict:
     report["evidence_summary"] = build_evidence_summary(report)
     report["coverage_summary"] = build_coverage_summary(report)
     report["evidence_quality"] = build_evidence_quality(report)
+    report["drift_summary"] = build_drift_summary(report)
     return report

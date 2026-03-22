@@ -10,6 +10,7 @@ from typing import Optional
 from blop.engine import auth as auth_engine
 from blop.engine import classifier, regression as regression_engine
 from blop.engine.logger import get_logger
+from blop.reporting.results import explain_run_status
 from blop.schemas import RunStartedResult
 from blop.storage import sqlite, files as file_store
 
@@ -24,6 +25,21 @@ def _auth_redirect_detected(url: str) -> bool:
     return any(token in lowered for token in ("/login", "/signin", "/sign-in", "/auth", "oauth"))
 
 
+def _execution_plan_summary(flows: list, run_mode: str, profile_name: str | None) -> dict:
+    contracts = [getattr(flow, "intent_contract", None) for flow in flows]
+    target_surfaces = [contract.target_surface for contract in contracts if contract]
+    planning_sources = [contract.planning_source for contract in contracts if contract]
+    required_assertions = sum(len(contract.success_assertions) for contract in contracts if contract)
+    return {
+        "effective_run_mode": run_mode,
+        "profile_name": profile_name,
+        "target_surfaces": list(dict.fromkeys(target_surfaces)) or ["unknown"],
+        "planning_sources": list(dict.fromkeys(planning_sources)) or ["legacy_unstructured"],
+        "legacy_flow_count": sum(1 for contract in contracts if contract is None),
+        "required_assertion_count": required_assertions,
+    }
+
+
 def _start_error(message: str) -> dict:
     return {
         "error": message,
@@ -32,6 +48,46 @@ def _start_error(message: str) -> dict:
         "message": message,
         "flow_count": 0,
         "artifacts_dir": "",
+    }
+
+
+async def _return_waiting_auth(
+    *,
+    run_id: str,
+    app_url: str,
+    profile_name: str | None,
+    flow_ids: list[str],
+    flow_count: int,
+    artifacts_dir: str,
+    headless: bool,
+    run_mode: str,
+    auth_context_payload: dict,
+    message: str,
+) -> dict:
+    await sqlite.create_run(run_id, app_url, profile_name, flow_ids, headless, artifacts_dir, run_mode)
+    await sqlite.update_run_status(run_id, "waiting_auth")
+    await sqlite.save_run_health_event(
+        run_id,
+        "run_queued",
+        {
+            "app_url": app_url,
+            "flow_count": flow_count,
+            "run_mode": auth_context_payload.get("run_mode", "hybrid"),
+            "profile_name": profile_name,
+        },
+    )
+    await sqlite.save_run_health_event(run_id, "auth_context_resolved", auth_context_payload)
+    status_meta = explain_run_status("waiting_auth", run_id=run_id)
+    return {
+        "run_id": run_id,
+        "status": "waiting_auth",
+        "flow_count": flow_count,
+        "artifacts_dir": artifacts_dir,
+        "message": message,
+        "status_detail": status_meta["status_detail"],
+        "recommended_next_action": status_meta["recommended_next_action"],
+        "is_terminal": status_meta["is_terminal"],
+        "workflow_hint": message,
     }
 
 
@@ -219,23 +275,56 @@ async def run_regression_test(
             )
 
     storage_state: Optional[str] = None
+    artifacts_dir = file_store.artifacts_dir(run_id)
     if profile:
         try:
             storage_state = await auth_engine.resolve_storage_state(profile)
         except Exception:
-            # Auth resolution failure — transition to waiting_auth immediately
-            artifacts_dir = file_store.artifacts_dir(run_id)
-            await sqlite.create_run(run_id, app_url, profile_name, flow_ids, headless, artifacts_dir, run_mode)
-            await sqlite.update_run_status(run_id, "waiting_auth")
-            return {
-                "run_id": run_id,
-                "status": "waiting_auth",
-                "flow_count": len(flows),
-                "artifacts_dir": artifacts_dir,
-                "message": f"Auth profile '{profile_name}' could not be resolved. Check save_auth_profile and your credentials.",
+            auth_context_payload = {
+                "profile_name": profile_name,
+                "auth_used": True,
+                "auth_source": getattr(profile, "auth_type", None),
+                "storage_state_path": None,
+                "user_data_dir": getattr(profile, "user_data_dir", None),
+                "session_validation_status": "validation_error",
+                "session_validation_error": "auth resolution failed",
+                "run_mode": run_mode,
             }
+            return await _return_waiting_auth(
+                run_id=run_id,
+                app_url=app_url,
+                profile_name=profile_name,
+                flow_ids=flow_ids,
+                flow_count=len(flows),
+                artifacts_dir=artifacts_dir,
+                headless=headless,
+                run_mode=run_mode,
+                auth_context_payload=auth_context_payload,
+                message=f"Auth profile '{profile_name}' could not be resolved. Refresh the session or credentials, then retry.",
+            )
+        if not storage_state:
+            auth_context_payload = {
+                "profile_name": profile_name,
+                "auth_used": True,
+                "auth_source": getattr(profile, "auth_type", None),
+                "storage_state_path": None,
+                "user_data_dir": getattr(profile, "user_data_dir", None),
+                "session_validation_status": "unresolved_storage_state",
+                "run_mode": run_mode,
+            }
+            return await _return_waiting_auth(
+                run_id=run_id,
+                app_url=app_url,
+                profile_name=profile_name,
+                flow_ids=flow_ids,
+                flow_count=len(flows),
+                artifacts_dir=artifacts_dir,
+                headless=headless,
+                run_mode=run_mode,
+                auth_context_payload=auth_context_payload,
+                message=f"Auth profile '{profile_name}' did not resolve a usable session. Refresh auth before replaying.",
+            )
 
-    artifacts_dir = file_store.artifacts_dir(run_id)
     await sqlite.create_run(run_id, app_url, profile_name, flow_ids, headless, artifacts_dir, run_mode)
     auth_context_payload = {
         "profile_name": profile_name,
@@ -248,10 +337,39 @@ async def run_regression_test(
     if storage_state:
         try:
             session_valid = await auth_engine.validate_auth_session(storage_state, app_url)
-            auth_context_payload["session_validation_status"] = "valid" if session_valid else "redirected_to_auth"
+            auth_context_payload["session_validation_status"] = "valid" if session_valid else "expired_session"
         except Exception as exc:
             auth_context_payload["session_validation_status"] = "validation_error"
             auth_context_payload["session_validation_error"] = str(exc)[:200]
+    if profile and auth_context_payload["session_validation_status"] in {"expired_session", "validation_error"}:
+        await sqlite.update_run_status(run_id, "waiting_auth")
+        await sqlite.save_run_health_event(
+            run_id,
+            "run_queued",
+            {
+                "app_url": app_url,
+                "flow_count": len(flows),
+                "run_mode": run_mode,
+                "profile_name": profile_name,
+            },
+        )
+        await sqlite.save_run_health_event(run_id, "auth_context_resolved", auth_context_payload)
+        status_meta = explain_run_status("waiting_auth", run_id=run_id)
+        if auth_context_payload["session_validation_status"] == "expired_session":
+            message = f"Auth profile '{profile_name}' has an expired session for {app_url}. Refresh auth before replaying."
+        else:
+            message = f"Auth profile '{profile_name}' could not be validated against {app_url}. Re-check auth and retry."
+        return {
+            "run_id": run_id,
+            "status": "waiting_auth",
+            "flow_count": len(flows),
+            "artifacts_dir": artifacts_dir,
+            "message": message,
+            "status_detail": status_meta["status_detail"],
+            "recommended_next_action": status_meta["recommended_next_action"],
+            "is_terminal": status_meta["is_terminal"],
+            "workflow_hint": message,
+        }
     await sqlite.save_run_health_event(
         run_id,
         "run_queued",
@@ -301,10 +419,12 @@ async def run_regression_test(
         flow_count=len(flows),
         artifacts_dir=artifacts_dir,
     ).model_dump()
-    started["workflow_hint"] = (
-        f"Run queued (run_id='{run_id}'). "
-        f"Poll for results: get_test_results(run_id='{run_id}')"
-    )
+    status_meta = explain_run_status("queued", run_id=run_id)
+    started["execution_plan_summary"] = _execution_plan_summary(flows, run_mode, profile_name)
+    started["status_detail"] = status_meta["status_detail"]
+    started["recommended_next_action"] = status_meta["recommended_next_action"]
+    started["is_terminal"] = status_meta["is_terminal"]
+    started["workflow_hint"] = status_meta["recommended_next_action"]
     return started
 
 

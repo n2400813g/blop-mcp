@@ -6,6 +6,7 @@ from urllib.parse import quote
 
 from blop.config import BLOP_DISCOVERY_MAX_PAGES, validate_app_url
 from blop.engine import discovery
+from blop.engine.planner import build_execution_plan
 
 
 async def discover_test_flows(
@@ -55,6 +56,15 @@ async def discover_test_flows(
         exclude_url_pattern=exclude_url_pattern,
         return_inventory=return_inventory,
     )
+    result["execution_plan_summary"] = build_execution_plan(
+        goal_text=business_goal or command or "Discover critical journeys",
+        app_url=app_url,
+        command=command,
+        profile_name=profile_name,
+        planning_source="nl_command" if command else "explicit_goal",
+        assertions=[],
+        run_mode="hybrid",
+    ).model_dump()
     encoded_app = quote(app_url, safe="")
     result["related_v2_resources"] = [
         f"blop://v2/context/{encoded_app}/latest",
@@ -117,11 +127,13 @@ async def get_inventory_resource(app_url: str) -> dict:
 
 async def get_context_graph_resource(app_url: str, profile_name: Optional[str] = None) -> dict:
     from blop.storage.sqlite import get_latest_context_graph
+    from blop.engine.context_graph import get_context_graph_summary
 
     graph = await get_latest_context_graph(app_url, profile_name=profile_name)
     if not graph:
         return {"error": f"No context graph found for {app_url}"}
     payload = graph.model_dump()
+    payload["summary"] = get_context_graph_summary(graph).model_dump()
     payload["related_v2_resources"] = [
         f"blop://v2/context/{quote(app_url, safe='')}/latest",
     ]

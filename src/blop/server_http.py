@@ -1,7 +1,7 @@
 """Optional HTTP SSE streaming server for blop run health events.
 
 Install optional deps:
-    pip install blop[server]
+    pip install blop-mcp[server]
 
 Run:
     blop-http
@@ -58,7 +58,7 @@ def run() -> int:
     if not _HAS_DEPS:
         print(
             "fastapi, uvicorn, and sse-starlette are required.\n"
-            "Install with: pip install blop[server]"
+            "Install with: pip install blop-mcp[server]"
         )
         return 1
     host = os.getenv("BLOP_HTTP_HOST", "0.0.0.0")

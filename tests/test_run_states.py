@@ -46,6 +46,9 @@ async def test_run_regression_creates_queued_run():
 
     assert result["status"] == "queued"
     assert result["flow_count"] == 2
+    assert "status_detail" in result
+    assert "recommended_next_action" in result
+    assert result["is_terminal"] is False
     mock_create_run.assert_called_once()
     event_types = [call.args[1] for call in mock_save_event.await_args_list]
     assert "run_queued" in event_types
@@ -119,6 +122,8 @@ async def test_auth_resolution_failure_returns_waiting_auth():
     assert result["status"] == "waiting_auth"
     assert "message" in result
     assert "prod" in result["message"]
+    assert result["is_terminal"] is True
+    assert "auth" in result["status_detail"].lower()
 
 
 @pytest.mark.asyncio
@@ -138,6 +143,45 @@ async def test_missing_profile_name_returns_structured_error():
     assert result["status"] == "error"
     assert "error" in result
     assert "missing_profile" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_expired_session_returns_waiting_auth_before_queueing_execution():
+    from blop.tools.regression import run_regression_test
+    from blop.schemas import AuthProfile
+
+    mock_profile = AuthProfile(
+        profile_name="prod",
+        auth_type="storage_state",
+        storage_state_path="/tmp/prod.json",
+    )
+
+    create_run = AsyncMock()
+    update_status = AsyncMock()
+    save_event = AsyncMock()
+
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}):
+        with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=mock_profile):
+            with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=make_flow("flow1")):
+                with patch("blop.engine.auth.resolve_storage_state", new_callable=AsyncMock, return_value="/tmp/prod.json"):
+                    with patch("blop.engine.auth.validate_auth_session", new_callable=AsyncMock, return_value=False):
+                        with patch("blop.storage.sqlite.create_run", create_run):
+                            with patch("blop.storage.sqlite.update_run_status", update_status):
+                                with patch("blop.storage.sqlite.save_run_health_event", save_event):
+                                    with patch("blop.storage.files.artifacts_dir", return_value="/tmp/runs/r1"):
+                                        result = await run_regression_test(
+                                            app_url="https://example.com/app",
+                                            flow_ids=["flow1"],
+                                            profile_name="prod",
+                                        )
+
+    assert result["status"] == "waiting_auth"
+    assert "expired session" in result["message"].lower()
+    assert result["is_terminal"] is True
+    create_run.assert_called_once()
+    update_status.assert_awaited_with(result["run_id"], "waiting_auth")
+    auth_events = [call for call in save_event.await_args_list if call.args[1] == "auth_context_resolved"]
+    assert auth_events[0].args[2]["session_validation_status"] == "expired_session"
 
 
 @pytest.mark.asyncio
@@ -293,3 +337,5 @@ async def test_get_test_results_includes_waiting_auth_message():
     assert report["status"] == "waiting_auth"
     assert "waiting_auth_message" in report
     assert len(report["waiting_auth_message"]) > 0
+    assert report["is_terminal"] is True
+    assert "status_detail" in report

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from blop.schemas import FlowStep, RecordedFlow
+from blop.schemas import FlowStep, IntentContract, RecordedFlow
 
 
 def make_flow(flow_id: str = "flow1", goal: str = "Test the page") -> RecordedFlow:
@@ -23,6 +23,19 @@ def make_flow(flow_id: str = "flow1", goal: str = "Test the page") -> RecordedFl
             FlowStep(step_id=1, action="assert", description="page loads"),
         ],
         created_at=datetime.now(timezone.utc).isoformat(),
+        intent_contract=IntentContract(
+            goal_text=goal,
+            goal_type="milestone",
+            target_surface="authenticated_app",
+            success_assertions=["page loads"],
+            must_interact=["navigate"],
+            forbidden_shortcuts=["goal_fallback_without_surface_match"],
+            scope="authed",
+            business_criticality="other",
+            planning_source="explicit_goal",
+            expected_url_patterns=["https://example.com"],
+            allowed_fallbacks=["hybrid_repair"],
+        ),
     )
 
 
@@ -79,6 +92,8 @@ async def test_execute_flow_pass():
 
     assert case.status == "pass"
     assert case.flow_id == "flow1"
+    assert case.drift_summary.drift_detected is True
+    assert "plan_drift" in case.drift_summary.drift_types
 
 
 @pytest.mark.asyncio
@@ -118,6 +133,25 @@ async def test_execute_flow_fail_on_error_keyword():
                     )
 
     assert case.status == "fail"
+
+
+def test_build_drift_summary_flags_goal_fallback_when_not_allowed():
+    from blop.engine.regression import _build_drift_summary
+
+    flow = make_flow(goal="Open settings")
+    drift = _build_drift_summary(
+        flow=flow,
+        status="pass",
+        replay_mode="goal_fallback",
+        assertion_results=[],
+        failure_reason_codes=[],
+        rerecorded=False,
+        actual_landing_url="https://example.com/settings",
+    )
+
+    assert drift.drift_detected is True
+    assert "plan_drift" in drift.drift_types
+    assert "goal_fallback" in drift.disallowed_fallback_used
 
 
 @pytest.mark.asyncio

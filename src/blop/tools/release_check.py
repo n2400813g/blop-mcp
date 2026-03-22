@@ -8,6 +8,8 @@ from typing import Literal, Optional
 
 from blop.config import validate_app_url
 from blop.engine.logger import get_logger
+from blop.reporting.results import explain_run_status
+from blop.schemas import ReleaseCheckRequest
 from blop.storage import sqlite
 
 _log = get_logger("tools.release_check")
@@ -44,6 +46,60 @@ def _confidence_score_from_label(label: str) -> dict:
     return {"value": mapping.get(label, 0.6), "label": label}
 
 
+def _queued_release_check_result(
+    *,
+    release_id: str,
+    run_id: str,
+    status: str,
+    flow_ids: list[str],
+    selected_flows: list,
+    profile_name: str | None,
+    run_mode: str,
+    criticality_filter: list[str],
+) -> dict:
+    status_meta = explain_run_status(status, run_id=run_id)
+    return {
+        "release_id": release_id,
+        "run_id": run_id,
+        "status": status,
+        "risk": {"value": 50, "level": "medium"},
+        "confidence": {"value": 0.5, "label": "medium"},
+        "decision": "INVESTIGATE",
+        "blocker_journeys": [],
+        "business_impact": "Release check queued. Critical journeys have not finished executing yet.",
+        "prioritized_actions": [
+            {
+                "priority": 1,
+                "action": "Poll the release check until it reaches a terminal status.",
+                "owner_hint": None,
+                "evidence_ref": run_id,
+            }
+        ],
+        "resource_links": {
+            "brief": f"blop://release/{release_id}/brief",
+            "artifacts": f"blop://release/{release_id}/artifacts",
+            "incidents": f"blop://release/{release_id}/incidents",
+        },
+        "flow_count": len(flow_ids),
+        "selected_flows": _summarize_selected_flows(selected_flows),
+        "execution_plan_summary": _summarize_execution_plan(selected_flows, run_mode, profile_name),
+        "active_gating_policy": {
+            "mode": "replay",
+            "criticality_filter": criticality_filter,
+            "default_release_gates": ["revenue", "activation"],
+        },
+        "recommended_next_step": {
+            "tool": "get_test_results",
+            "arguments": {"run_id": run_id},
+            "reason": status_meta["recommended_next_action"],
+        },
+        "status_detail": status_meta["status_detail"],
+        "recommended_next_action": status_meta["recommended_next_action"],
+        "is_terminal": status_meta["is_terminal"],
+        "workflow_hint": status_meta["recommended_next_action"],
+    }
+
+
 def _summarize_selected_flows(flows: list) -> list[dict]:
     summaries: list[dict] = []
     for flow in flows[:5]:
@@ -56,6 +112,17 @@ def _summarize_selected_flows(flows: list) -> list[dict]:
             }
         )
     return summaries
+
+
+def _summarize_execution_plan(flows: list, run_mode: str, profile_name: str | None) -> dict:
+    contracts = [getattr(flow, "intent_contract", None) for flow in flows]
+    return {
+        "effective_run_mode": run_mode,
+        "profile_name": profile_name,
+        "target_surfaces": list(dict.fromkeys(contract.target_surface for contract in contracts if contract)) or ["unknown"],
+        "planning_sources": list(dict.fromkeys(contract.planning_source for contract in contracts if contract)) or ["legacy_unstructured"],
+        "legacy_flow_count": sum(1 for contract in contracts if contract is None),
+    }
 
 
 def _build_release_check_result(
@@ -191,29 +258,42 @@ async def run_release_check(
         headless: Run browser headlessly (default True).
         run_mode: Replay mode — "hybrid" (default), "strict_steps", or "goal_fallback".
     """
-    url_err = validate_app_url(app_url)
+    try:
+        request = ReleaseCheckRequest.model_validate(
+            {
+                "app_url": app_url,
+                "journey_ids": journey_ids,
+                "flow_ids": flow_ids,
+                "profile_name": profile_name,
+                "mode": mode,
+                "criticality_filter": criticality_filter or ["revenue", "activation"],
+                "release_id": release_id,
+                "headless": headless,
+                "run_mode": run_mode,
+            }
+        )
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    url_err = validate_app_url(request.app_url)
     if url_err:
         return {"error": url_err}
 
-    if journey_ids and flow_ids:
-        return {"error": "Pass only one of flow_ids or journey_ids. journey_ids is a deprecated alias for flow_ids."}
+    release_id = request.release_id or uuid.uuid4().hex
+    effective_flow_ids = request.flow_ids if request.flow_ids is not None else request.journey_ids
 
-    release_id = release_id or uuid.uuid4().hex
-    criticality_filter = criticality_filter or ["revenue", "activation"]
-    effective_flow_ids = flow_ids if flow_ids is not None else journey_ids
-
-    if mode == "targeted":
-        return await _run_targeted(app_url, effective_flow_ids, profile_name, release_id, headless)
+    if request.mode == "targeted":
+        return await _run_targeted(request.app_url, effective_flow_ids, request.profile_name, release_id, request.headless)
 
     # Default: replay mode
     return await _run_replay(
-        app_url=app_url,
+        app_url=request.app_url,
         flow_ids=effective_flow_ids,
-        profile_name=profile_name,
-        criticality_filter=criticality_filter,
+        profile_name=request.profile_name,
+        criticality_filter=request.criticality_filter,
         release_id=release_id,
-        headless=headless,
-        run_mode=run_mode,
+        headless=request.headless,
+        run_mode=request.run_mode,
     )
 
 
@@ -268,29 +348,16 @@ async def _run_replay(
     status = run_result.get("status", "queued")
 
     # run_regression_test is fire-and-forget; return a queued result with links
-    result = {
-        "release_id": release_id,
-        "run_id": run_id,
-        "status": status,
-        "flow_count": len(flow_ids),
-        "selected_flows": _summarize_selected_flows(selected_flows),
-        "active_gating_policy": {
-            "mode": "replay",
-            "criticality_filter": criticality_filter,
-            "default_release_gates": ["revenue", "activation"],
-        },
-        "resource_links": {
-            "brief": f"blop://release/{release_id}/brief",
-            "artifacts": f"blop://release/{release_id}/artifacts",
-            "incidents": f"blop://release/{release_id}/incidents",
-        },
-        "recommended_next_step": {
-            "tool": "get_test_results",
-            "arguments": {"run_id": run_id},
-            "reason": "Poll the queued release check until it reaches a terminal status.",
-        },
-        "workflow_hint": f"Release check queued. Next: get_test_results(run_id='{run_id}').",
-    }
+    result = _queued_release_check_result(
+        release_id=release_id,
+        run_id=run_id,
+        status=status,
+        flow_ids=flow_ids,
+        selected_flows=selected_flows,
+        profile_name=profile_name,
+        run_mode=run_mode,
+        criticality_filter=criticality_filter,
+    )
 
     # Best-effort persist a preliminary brief
     try:
@@ -370,6 +437,7 @@ async def _run_targeted(
 
     result = _build_release_check_result(synthetic_run, release_id, app_url)
     await _save_release_brief(result, app_url)
+    status_meta = explain_run_status(result["status"], run_id=result["run_id"], top_failure_mode="unknown")
 
     result["mode"] = "targeted"
     result["evaluation_summary"] = eval_result.get("summary", [])
@@ -389,4 +457,8 @@ async def _run_targeted(
             else "Review the release brief and ship if it matches scope."
         ),
     }
+    result["status_detail"] = status_meta["status_detail"]
+    result["recommended_next_action"] = status_meta["recommended_next_action"]
+    result["is_terminal"] = status_meta["is_terminal"]
+    result["workflow_hint"] = status_meta["recommended_next_action"]
     return result

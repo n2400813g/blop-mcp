@@ -45,6 +45,9 @@ async def test_package_authenticated_saas_baseline_builds_strict_step_flows(tmp_
     assert flow_two is not None
     assert flow_one.run_mode_override == "strict_steps"
     assert flow_two.run_mode_override == "strict_steps"
+    assert flow_one.intent_contract is not None
+    assert flow_one.intent_contract.planning_source == "baseline_recipe"
+    assert flow_one.intent_contract.target_surface in {"authenticated_app", "editor", "billing", "unknown"}
     assert flow_one.steps[1].aria_role == "button"
     assert flow_one.steps[-1].structured_assertion.assertion_type == "url_contains"
     assert flow_two.steps[-1].structured_assertion.assertion_type == "text_present"

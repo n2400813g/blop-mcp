@@ -248,6 +248,7 @@ async def _migrate(db) -> None:
         (18, "risk_calibration", "blocker_count", "INTEGER DEFAULT 0"),
         (19, "release_snapshots", "brief_json", "TEXT"),
         (20, "release_snapshots", "run_id", "TEXT"),
+        (21, "recorded_flows", "intent_contract_json", "TEXT"),
     ]
 
     current_version = await _get_schema_version(db)
@@ -325,8 +326,8 @@ async def save_flow(flow: RecordedFlow) -> None:
             """
             INSERT OR REPLACE INTO recorded_flows
             (flow_id, flow_name, app_url, goal, steps_json, created_at, assertions_json, entry_url,
-             spa_hints_json, business_criticality, run_mode_override)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             spa_hints_json, business_criticality, run_mode_override, intent_contract_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 flow.flow_id,
@@ -340,6 +341,7 @@ async def save_flow(flow: RecordedFlow) -> None:
                 flow.spa_hints.model_dump_json() if getattr(flow, "spa_hints", None) else None,
                 flow.business_criticality,
                 flow.run_mode_override,
+                flow.intent_contract.model_dump_json() if getattr(flow, "intent_contract", None) else None,
             ),
         )
         await db.commit()
@@ -348,14 +350,28 @@ async def save_flow(flow: RecordedFlow) -> None:
 async def get_flow(flow_id: str) -> RecordedFlow | None:
     from blop.schemas import FlowStep, SpaHints
     async with aiosqlite.connect(_db_path()) as db:
-        async with db.execute(
-            """SELECT flow_id, flow_name, app_url, goal, steps_json, created_at,
-                      assertions_json, entry_url, spa_hints_json, business_criticality, run_mode_override
-               FROM recorded_flows WHERE flow_id = ?""",
-            (flow_id,),
-        ) as cursor:
-            row = await cursor.fetchone()
-            if row:
+        row = None
+        try:
+            async with db.execute(
+                """SELECT flow_id, flow_name, app_url, goal, steps_json, created_at,
+                          assertions_json, entry_url, spa_hints_json, business_criticality, run_mode_override,
+                          intent_contract_json
+                   FROM recorded_flows WHERE flow_id = ?""",
+                (flow_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        except Exception as exc:
+            if "intent_contract_json" not in str(exc):
+                raise
+            async with db.execute(
+                """SELECT flow_id, flow_name, app_url, goal, steps_json, created_at,
+                          assertions_json, entry_url, spa_hints_json, business_criticality, run_mode_override
+                   FROM recorded_flows WHERE flow_id = ?""",
+                (flow_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+
+        if row:
                 steps_data = json.loads(row[4])
                 steps = []
                 for s in steps_data:
@@ -387,6 +403,14 @@ async def get_flow(flow_id: str) -> RecordedFlow | None:
                     except Exception:
                         _log.debug("failed to parse spa_hints for flow", exc_info=True)
 
+                intent_contract = None
+                if row[11]:
+                    try:
+                        from blop.schemas import IntentContract
+                        intent_contract = IntentContract.model_validate_json(row[11])
+                    except Exception:
+                        _log.debug("failed to parse intent_contract_json for flow", exc_info=True)
+
                 return RecordedFlow(
                     flow_id=row[0],
                     flow_name=row[1],
@@ -399,27 +423,38 @@ async def get_flow(flow_id: str) -> RecordedFlow | None:
                     spa_hints=spa_hints,
                     business_criticality=row[9] or "other",
                     run_mode_override=row[10] if len(row) > 10 else None,
+                    intent_contract=intent_contract,
                 )
     return None
 
 
 async def list_flows() -> list[dict]:
     async with aiosqlite.connect(_db_path()) as db:
-        async with db.execute(
-            "SELECT flow_id, flow_name, app_url, goal, created_at, run_mode_override FROM recorded_flows ORDER BY created_at DESC"
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [
-                {
-                    "flow_id": r[0],
-                    "flow_name": r[1],
-                    "app_url": r[2],
-                    "goal": r[3],
-                    "created_at": r[4],
-                    "run_mode_override": r[5] if len(r) > 5 else None,
-                }
-                for r in rows
-            ]
+        rows = []
+        try:
+            async with db.execute(
+                "SELECT flow_id, flow_name, app_url, goal, created_at, run_mode_override, intent_contract_json FROM recorded_flows ORDER BY created_at DESC"
+            ) as cursor:
+                rows = await cursor.fetchall()
+        except Exception as exc:
+            if "intent_contract_json" not in str(exc):
+                raise
+            async with db.execute(
+                "SELECT flow_id, flow_name, app_url, goal, created_at, run_mode_override FROM recorded_flows ORDER BY created_at DESC"
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [
+            {
+                "flow_id": r[0],
+                "flow_name": r[1],
+                "app_url": r[2],
+                "goal": r[3],
+                "created_at": r[4],
+                "run_mode_override": r[5] if len(r) > 5 else None,
+                "has_intent_contract": bool(r[6]) if len(r) > 6 else False,
+            }
+            for r in rows
+        ]
 
 
 async def create_run(

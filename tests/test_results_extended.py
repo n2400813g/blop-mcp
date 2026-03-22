@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from blop.schemas import AuthProfile, FailureCase
+from blop.schemas import AuthProfile, DriftSummary, FailureCase, IntentContract
 from blop.tools import results
 
 
@@ -188,6 +188,9 @@ async def test_get_test_results_adds_summary_first_fields():
     assert out["auth_provenance"]["landed_authenticated"] is True
     assert out["auth_provenance"]["landing_url"] == "https://example.com/checkout"
     assert out["run_environment"]["headless"] is True
+    assert out["top_failure_mode"] == "automation_fragility"
+    assert len(out["recommended_remediation_steps"]) == 3
+    assert out["is_terminal"] is True
     assert "cases" in out
     assert "failed_cases" in out
 
@@ -314,3 +317,105 @@ async def test_get_test_results_success_report_includes_coverage_proof():
     assert out["auth_provenance"]["landing_page_title"] == "Untitled Project"
     assert out["auth_provenance"]["landed_authenticated"] is True
     assert out["run_environment"]["headless"] is False
+    assert out["top_failure_mode"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_get_test_results_downgrades_drifted_critical_passes():
+    run = {
+        "run_id": "run-drift",
+        "status": "completed",
+        "started_at": "2026-03-19T10:00:00Z",
+        "completed_at": "2026-03-19T10:02:00Z",
+        "artifacts_dir": "/tmp/runs/run-drift",
+        "run_mode": "hybrid",
+        "app_url": "https://example.com",
+        "next_actions": [],
+        "profile_name": None,
+        "headless": True,
+    }
+    cases = [
+        FailureCase(
+            case_id="case-drift-1",
+            run_id="run-drift",
+            flow_id="flow-1",
+            flow_name="checkout",
+            status="pass",
+            severity="none",
+            business_criticality="revenue",
+            intent_contract=IntentContract(
+                goal_text="Complete checkout",
+                goal_type="transaction",
+                target_surface="authenticated_app",
+                success_assertions=["Order confirmation shown"],
+                must_interact=["navigate", "click_primary"],
+                forbidden_shortcuts=["goal_fallback_without_surface_match"],
+                scope="authed",
+                business_criticality="revenue",
+                planning_source="explicit_goal",
+                expected_url_patterns=["/checkout"],
+                allowed_fallbacks=["hybrid_repair"],
+            ),
+            drift_summary=DriftSummary(
+                drift_detected=True,
+                drift_types=["plan_drift"],
+                disallowed_fallback_used=["goal_fallback"],
+                surface_match=True,
+                assertion_match=True,
+                plan_fidelity="low",
+            ),
+        )
+    ]
+
+    with patch("blop.storage.sqlite.get_run", new_callable=AsyncMock, return_value=run):
+        with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=cases):
+            with patch("blop.storage.sqlite.list_run_health_events", new_callable=AsyncMock, return_value=[]):
+                out = await results.get_test_results("run-drift")
+
+    assert out["decision_summary"]["decision"] == "INVESTIGATE"
+    assert out["decision_summary"]["critical_drifted_passes"] == 1
+
+
+@pytest.mark.asyncio
+async def test_get_test_results_waiting_auth_uses_auth_status_guidance():
+    run = {
+        "run_id": "run-auth",
+        "status": "waiting_auth",
+        "started_at": "2026-03-19T10:00:00Z",
+        "completed_at": None,
+        "artifacts_dir": "/tmp/runs/run-auth",
+        "run_mode": "hybrid",
+        "app_url": "https://example.com",
+        "next_actions": [],
+        "profile_name": "prod",
+        "headless": True,
+    }
+    events = [
+        {
+            "event_id": "evt-auth",
+            "run_id": "run-auth",
+            "event_type": "auth_context_resolved",
+            "payload": {
+                "profile_name": "prod",
+                "auth_used": True,
+                "auth_source": "storage_state",
+                "storage_state_path": "/tmp/prod.json",
+                "session_validation_status": "expired_session",
+            },
+            "created_at": "2026-03-19T10:00:01Z",
+        }
+    ]
+
+    with patch("blop.storage.sqlite.get_run", new_callable=AsyncMock, return_value=run):
+        with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=[]):
+            with patch("blop.storage.sqlite.list_run_health_events", new_callable=AsyncMock, return_value=events):
+                with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=None):
+                    out = await results.get_test_results("run-auth")
+
+    assert out["status"] == "waiting_auth"
+    assert out["top_failure_mode"] == "waiting_auth"
+    assert "expired session" in out["waiting_auth_message"].lower()
+    assert out["is_terminal"] is True
+    assert "capture_auth_session" in " ".join(out["recommended_remediation_steps"])
+    assert out["drift_summary"]["drift_detected"] is True
+    assert out["drift_summary"]["plan_fidelity"] == "low"

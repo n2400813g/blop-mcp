@@ -33,6 +33,9 @@ async def test_validate_all_pass_returns_ready():
     assert result["status"] == "ready"
     assert result["blockers"] == []
     assert result["warnings"] == []
+    assert "headline" in result
+    assert "recommended_action" in result
+    assert result["check_summary"]["total_checks"] >= 3
     assert any(c["name"] == "GOOGLE_API_KEY" and c["passed"] for c in result["checks"])
     assert any(c["name"] == "chromium_installed" and c["passed"] for c in result["checks"])
     assert any(c["name"] == "sqlite_db" and c["passed"] for c in result["checks"])
@@ -250,6 +253,7 @@ async def test_validate_release_setup_delegates_to_validate_setup():
                 result_release = await validate_release_setup()
 
     assert result_setup["status"] == result_release["status"]
+    assert result_release["headline"] == result_setup["headline"]
 
 
 @pytest.mark.asyncio
@@ -281,3 +285,34 @@ async def test_validate_profile_valid_passes():
     auth_check = next((c for c in result["checks"] if c["name"] == "auth_profile"), None)
     assert auth_check is not None
     assert auth_check["passed"]
+
+
+@pytest.mark.asyncio
+async def test_validate_expired_storage_state_surfaces_primary_action():
+    from blop.tools.validate import validate_setup
+    from blop.schemas import AuthProfile
+
+    mock_browser = AsyncMock()
+    mock_playwright = AsyncMock()
+    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
+    mock_playwright.__aexit__ = AsyncMock(return_value=False)
+    mock_playwright.chromium.launch.return_value = mock_browser
+
+    mock_profile = AuthProfile(
+        profile_name="prod",
+        auth_type="storage_state",
+        storage_state_path="/tmp/prod.json",
+    )
+
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+        with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+            with patch("blop.storage.sqlite.init_db", new_callable=AsyncMock):
+                with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=mock_profile):
+                    with patch("blop.engine.auth.resolve_storage_state_for_profile", new_callable=AsyncMock, return_value="/tmp/prod.json"):
+                        with patch("blop.engine.auth.validate_auth_session", new_callable=AsyncMock, return_value=False):
+                            result = await validate_setup(app_url="https://example.com", profile_name="prod")
+
+    assert result["status"] == "warnings"
+    assert "expired" in " ".join(result["warnings"]).lower()
+    assert "capture_auth_session" in result["recommended_action"]
+    assert "expired" in result["headline"].lower()

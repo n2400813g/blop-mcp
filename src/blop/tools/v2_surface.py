@@ -22,7 +22,18 @@ from datetime import datetime, timedelta, timezone
 from statistics import quantiles
 from urllib.parse import quote
 
-from blop.engine.context_graph import diff_context_graph
+from blop.engine.context_graph import (
+    build_impact_summary,
+    build_failure_neighborhood,
+    diff_context_graph,
+    find_journey_summary,
+    get_context_graph_summary,
+    get_impacted_journeys,
+    get_next_checks_for_release_scope,
+    get_uncovered_critical_journeys,
+    list_journey_summaries,
+    summarize_release_scope,
+)
 from blop.engine.secrets import mask_text
 from blop.schemas import (
     CorrelationMatch,
@@ -460,8 +471,8 @@ async def capture_context(
     Only triggers a lightweight plan_flows_from_inventory call when intent_focus is set.
     """
     from blop.engine.discovery import inventory_site, plan_flows_from_inventory
-    from blop.engine.context_graph import build_context_graph
-    from blop.storage.sqlite import get_latest_context_graph, save_context_graph
+    from blop.engine.context_graph import build_context_graph, get_context_graph_summary
+    from blop.storage.sqlite import get_flow, get_latest_context_graph, list_flows, save_context_graph
 
     inventory = await inventory_site(
         app_url=app_url,
@@ -492,14 +503,24 @@ async def capture_context(
                 flows = []
 
     previous_graph = await get_latest_context_graph(app_url, profile_name=profile_name)
+    flow_refs = await list_flows()
+    recorded_flows = []
+    for flow_ref in flow_refs:
+        if flow_ref.get("app_url") != app_url:
+            continue
+        flow_obj = await get_flow(flow_ref["flow_id"])
+        if flow_obj is not None:
+            recorded_flows.append(flow_obj)
     current_graph = build_context_graph(
         app_url=app_url,
         inventory=inventory,
         flows=flows,
         profile_name=profile_name,
+        recorded_flows=recorded_flows,
     )
     graph_diff = diff_context_graph(previous_graph, current_graph)
     await save_context_graph(current_graph)
+    summary = get_context_graph_summary(current_graph)
 
     return {
         "graph_id": current_graph.graph_id,
@@ -508,6 +529,10 @@ async def capture_context(
         "node_count": len(current_graph.nodes),
         "edge_count": len(current_graph.edges),
         "archetype": current_graph.archetype,
+        "critical_journey_count": summary.critical_journey_count,
+        "covered_critical_journey_count": summary.covered_critical_journey_count,
+        "uncovered_critical_journeys": summary.uncovered_critical_journeys,
+        "auth_boundary_summary": summary.auth_boundary_summary.model_dump(),
         "diff_summary": {
             "previous_graph_id": graph_diff.previous_graph_id,
             "added_nodes": len(graph_diff.added_nodes),
@@ -537,25 +562,8 @@ async def compare_context(
         return {"error": "Graph IDs do not match app_url"}
 
     diff = diff_context_graph(baseline, candidate)
-    lens = impact_lens or ["revenue", "activation"]
-    impact_summary = []
-    for criticality in lens:
-        affected = 0
-        for node in candidate.nodes:
-            if node.node_type != "intent":
-                continue
-            if (node.metadata or {}).get("business_criticality", "other") != criticality:
-                continue
-            affected += 1
-        raw_risk = (affected * 5) + (len(diff.added_nodes) * 1.2) + (len(diff.removed_nodes) * 1.6)
-        risk_level = _severity_from_score(min(100.0, raw_risk))
-        impact_summary.append(
-            {
-                "criticality": criticality,
-                "risk_level": risk_level,
-                "affected_journeys": affected,
-            }
-        )
+    release_scope = summarize_release_scope(baseline, candidate)
+    impact_summary = [item.model_dump() for item in build_impact_summary(baseline, candidate, impact_lens)]
 
     return {
         "app_url": app_url,
@@ -568,6 +576,7 @@ async def compare_context(
             "removed_edges": diff.removed_edges,
             "confidence_delta": diff.confidence_delta,
         },
+        "release_scope": release_scope.model_dump(),
         "impact_summary": impact_summary,
     }
 
@@ -606,8 +615,11 @@ async def assess_release_risk(
             impact_lens=["revenue", "activation", "retention", "support", "other"],
         )
         if not compare.get("error"):
-            diff = compare["structural_diff"]
-            context_risk = min(40.0, (len(diff["added_nodes"]) * 1.2) + (len(diff["removed_nodes"]) * 1.8))
+            release_scope = compare.get("release_scope", {})
+            impacted_count = len(release_scope.get("changed_journeys", []))
+            uncovered_count = len(release_scope.get("newly_uncovered_journeys", []))
+            auth_boundary_changed = bool(release_scope.get("auth_boundary_changed"))
+            context_risk = min(40.0, (impacted_count * 8.0) + (uncovered_count * 12.0) + (8.0 if auth_boundary_changed else 0.0))
             for item in compare["impact_summary"][:5]:
                 top_risks.append(
                     {
@@ -616,8 +628,19 @@ async def assess_release_risk(
                         "criticality": item["criticality"],
                         "evidence": [
                             f"affected_journeys={item['affected_journeys']}",
+                            f"changed_journeys={len(item.get('changed_journeys', []))}",
+                            f"newly_uncovered={len(item.get('newly_uncovered_journeys', []))}",
                             f"context_diff:{baseline.graph_id}->{candidate.graph_id}",
                         ],
+                    }
+                )
+            for journey_name in release_scope.get("newly_uncovered_journeys", [])[:3]:
+                top_risks.append(
+                    {
+                        "risk_id": uuid.uuid4().hex,
+                        "title": f"{journey_name} is no longer covered by a recorded journey",
+                        "criticality": "activation" if "signup" in journey_name.lower() else "other",
+                        "evidence": [f"context_diff:{baseline.graph_id}->{candidate.graph_id}"],
                     }
                 )
 
@@ -768,6 +791,7 @@ async def cluster_incidents(
     window: str = "7d",
     min_cluster_size: int = 2,
 ) -> dict:
+    graph = await sqlite.get_latest_context_graph(app_url)
     selected_run_ids = run_ids or []
     if not selected_run_ids:
         since_iso = _window_to_since_iso(window)
@@ -797,6 +821,12 @@ async def cluster_incidents(
         if len(members) < min_cluster_size:
             continue
         criticality = sorted({m.business_criticality for m in members})
+        primary_case = members[0]
+        neighborhood = build_failure_neighborhood(
+            graph,
+            flow_name=primary_case.flow_name,
+            flow_id=primary_case.flow_id,
+        )
         max_sev = max((SEVERITY_ORDER.get(m.severity, 1) for m in members), default=1)
         severity = "blocker" if max_sev >= 4 else "high" if max_sev >= 3 else "medium" if max_sev >= 2 else "low"
         cluster_id = f"cluster_{uuid.uuid5(uuid.NAMESPACE_URL, app_url + key).hex[:20]}"
@@ -812,7 +842,21 @@ async def cluster_incidents(
             evidence_refs=[f"run:{m.run_id}/case:{m.case_id}" for m in members[:10]],
             member_case_ids=[m.case_id for m in members],
             status="open",
-            metadata={"cluster_key": key, "member_count": len(members)},
+            metadata={
+                "cluster_key": key,
+                "member_count": len(members),
+                "linked_journey": neighborhood.get("journey"),
+                "journey_key": neighborhood.get("journey_key"),
+                "entry_routes": neighborhood.get("entry_routes", []),
+                "areas": neighborhood.get("areas", []),
+                "auth_required": neighborhood.get("auth_required", False),
+                "coverage_status": neighborhood.get("coverage_status", "unknown"),
+                "next_checks": get_next_checks_for_release_scope(
+                    graph,
+                    failed_journey_labels=[primary_case.flow_name],
+                    limit=3,
+                ),
+            },
         )
         await sqlite.save_incident_cluster(cluster)
         saved_clusters.append(cluster)
@@ -845,11 +889,19 @@ async def generate_remediation(
             if c.trace_path:
                 evidence.append(c.trace_path)
             evidence.extend(c.screenshots[:2])
+    neighborhood = cluster.metadata or {}
+    journey_label = neighborhood.get("linked_journey")
+    entry_routes = neighborhood.get("entry_routes", [])
+    next_checks = neighborhood.get("next_checks", [])
+    areas = neighborhood.get("areas", [])
 
     # Default template values
     owner_hints: list[str] = []
     if include_owner_hints:
-        owner_hints = [f"Likely owner: team responsible for flow domain '{cluster.title.split('#')[0]}'."]
+        owner_hints = [
+            f"Likely owner: team responsible for area '{areas[0]}'." if areas
+            else f"Likely owner: team responsible for flow domain '{cluster.title.split('#')[0]}'."
+        ]
     fix_hypotheses: list[str] = []
     if include_fix_hypotheses:
         fix_hypotheses = [
@@ -857,6 +909,10 @@ async def generate_remediation(
             "Page transition timing issue; increase settle/wait condition before interaction.",
             "Auth/session precondition missing in the flow setup.",
         ]
+        if neighborhood.get("auth_required"):
+            fix_hypotheses.insert(0, "Auth boundary likely changed; verify session bootstrap and protected-route landing.")
+        if neighborhood.get("coverage_status") != "recorded" and journey_label:
+            fix_hypotheses.append(f"Add or refresh recorded release-gating coverage for {journey_label}.")
 
     # Try Gemini for richer fix hypotheses and owner hints
     if (include_owner_hints or include_fix_hypotheses) and os.getenv("GOOGLE_API_KEY"):
@@ -878,7 +934,7 @@ async def generate_remediation(
                 severity=cluster.severity,
                 affected_flows=cluster.affected_flows,
                 criticality_buckets=", ".join(cluster.affected_criticality),
-                evidence=evidence_text,
+                evidence=evidence_text + (f"\nJourney: {journey_label}" if journey_label else ""),
                 console_errors=console_errors,
                 network_errors=network_errors,
             )
@@ -895,13 +951,22 @@ async def generate_remediation(
         except Exception:
             pass  # fall back to template values
 
+    journey_line = f"- Journey neighborhood: {journey_label}\n" if journey_label else ""
+    routes_line = f"- Entry routes: {', '.join(entry_routes[:3])}\n" if entry_routes else ""
+    next_checks_block = "### Next checks\n" + "\n".join([f"- {item}" for item in next_checks[:5]]) + "\n" if next_checks else ""
     issue_draft = (
         f"## {cluster.title}\n\n"
         f"- Severity: **{cluster.severity}**\n"
         f"- Affected flows: {cluster.affected_flows}\n"
         f"- Criticality buckets: {', '.join(cluster.affected_criticality)}\n\n"
-        f"### Repro\n" + "\n".join([f"{idx + 1}. {step}" for idx, step in enumerate(repro_steps)]) + "\n\n"
-        f"### Evidence\n" + "\n".join([f"- {ref}" for ref in evidence[:12]]) + "\n"
+        + journey_line
+        + routes_line
+        + "### Repro\n"
+        + "\n".join([f"{idx + 1}. {step}" for idx, step in enumerate(repro_steps)])
+        + "\n\n### Evidence\n"
+        + "\n".join([f"- {ref}" for ref in evidence[:12]])
+        + "\n\n"
+        + next_checks_block
     )
     draft = RemediationDraft(
         cluster_id=cluster.cluster_id,
@@ -968,6 +1033,8 @@ async def get_correlation_report(
 ) -> dict:
     clusters = await sqlite.list_open_incident_clusters(app_url, limit=300)
     signals = await sqlite.list_telemetry_signals(app_url, limit=2000)
+    graph = await sqlite.get_latest_context_graph(app_url)
+    known_journeys = {journey.journey_key: journey for journey in list_journey_summaries(graph)} if graph else {}
 
     # Resolve cluster first/last seen run_ids to actual timestamps (batch, cached)
     cluster_timestamps: dict[str, tuple[str | None, str | None]] = {}
@@ -989,8 +1056,12 @@ async def get_correlation_report(
         cluster_timestamps[cluster.cluster_id] = (first_ts, last_ts)
 
     matches: list[CorrelationMatch] = []
+    enriched_matches: list[dict] = []
     for cluster in clusters:
         first_ts, last_ts = cluster_timestamps.get(cluster.cluster_id, (None, None))
+        cluster_meta = cluster.metadata or {}
+        cluster_journey = (cluster_meta.get("journey_key") or "").lower()
+        cluster_routes = [route.lower() for route in cluster_meta.get("entry_routes", [])]
         for signal in signals[:200]:
             signal_ts = signal.get("ts", "")
             temporal = _temporal_overlap(signal_ts, first_ts, last_ts)
@@ -998,26 +1069,41 @@ async def get_correlation_report(
             base = 0.3 if temporal else 0.05
             if signal.get("journey_key") and signal["journey_key"].lower() in cluster.title.lower():
                 base += 0.3
+            if signal.get("journey_key") and cluster_journey and signal["journey_key"].lower() == cluster_journey:
+                base += 0.2
             if signal.get("route") and signal["route"].lower() in cluster.title.lower():
+                base += 0.2
+            if signal.get("route") and any(signal["route"].lower() in route for route in cluster_routes):
                 base += 0.2
             if cluster.severity in ("high", "blocker") and signal.get("signal_type") in ("error_rate", "conversion"):
                 base += 0.15
             confidence = round(min(base, 0.99), 2)
             if confidence < min_confidence:
                 continue
-            matches.append(
-                CorrelationMatch(
-                    cluster_id=cluster.cluster_id,
-                    telemetry_signal=f"{signal.get('signal_type')}@{signal.get('ts')}",
-                    confidence=confidence,
-                    business_impact_estimate=(
-                        "Possible measurable customer impact in critical journey."
-                        if cluster.severity in ("high", "blocker")
-                        else "Potential localized impact."
-                    ),
-                )
+            journey_context = known_journeys.get(signal.get("journey_key") or "")
+            impact_estimate = (
+                f"Possible measurable customer impact in {journey_context.business_criticality} journey."
+                if journey_context
+                else "Possible measurable customer impact in critical journey."
+                if cluster.severity in ("high", "blocker")
+                else "Potential localized impact."
             )
-    out = {"window": window, "matches": [m.model_dump() for m in matches[:100]]}
+            match = CorrelationMatch(
+                cluster_id=cluster.cluster_id,
+                telemetry_signal=f"{signal.get('signal_type')}@{signal.get('ts')}",
+                confidence=confidence,
+                business_impact_estimate=impact_estimate,
+            )
+            matches.append(match)
+            enriched_matches.append(
+                {
+                    **match.model_dump(),
+                    "journey_key": signal.get("journey_key"),
+                    "route": signal.get("route"),
+                    "linked_journey": cluster_meta.get("linked_journey"),
+                }
+            )
+    out = {"window": window, "matches": enriched_matches[:100]}
     await sqlite.save_correlation_report(app_url=app_url, window=window, report=out)
     return out
 
@@ -1039,87 +1125,35 @@ async def suggest_flows_for_diff(
             "note": "No context graph found. Run blop_v2_capture_context first.",
         }
 
-    # Extract meaningful path segments from changed files
-    stopwords = {
-        "src", "app", "lib", "pages", "components", "utils", "js", "ts",
-        "tsx", "jsx", "index", "test", "spec", "stories", "style", "css",
-        "scss", "mod", "pkg", "go", "py",
-    }
-    raw_segments: list[str] = []
-    for path in changed_files:
-        for part in re.split(r"[/._\-]", path):
-            if len(part) >= 3 and part.lower() not in stopwords:
-                raw_segments.append(part.lower())
-    if changed_routes:
-        for route in changed_routes:
-            for part in re.split(r"[/._\-]", route):
-                if len(part) >= 3:
-                    raw_segments.append(part.lower())
-    changed_segments = list(dict.fromkeys(raw_segments))  # dedup, preserve order
-
-    criticality_weights = _default_criticality_weights()
-
-    # Score route nodes by segment overlap with changed_segments
-    route_scores: dict[str, float] = {}
-    for node in graph.nodes:
-        if node.node_type != "route":
-            continue
-        score = sum(1.0 for seg in changed_segments if seg in node.label.lower())
-        if score > 0:
-            route_scores[node.node_id] = score
-
-    # Find intent nodes connected to high-scoring routes via supports_intent edges
-    intent_scores: dict[str, float] = {}
-    for edge in graph.edges:
-        if edge.edge_type != "supports_intent":
-            continue
-        route_score = route_scores.get(edge.source_id, 0.0)
-        if route_score > 0:
-            intent_id = edge.target_id
-            intent_scores[intent_id] = intent_scores.get(intent_id, 0.0) + route_score
-
-    # Build intent → criticality map
-    intent_meta: dict[str, dict] = {}
-    for node in graph.nodes:
-        if node.node_type == "intent":
-            intent_meta[node.node_id] = node.metadata or {}
-
-    # Rank by (score * criticality_weight) DESC
-    ranked: list[tuple[float, str]] = []
-    for intent_id, score in intent_scores.items():
-        bc = intent_meta.get(intent_id, {}).get("business_criticality", "other")
-        w = criticality_weights.get(bc, 0.3)
-        ranked.append((score * w, intent_id))
-    ranked.sort(key=lambda x: x[0], reverse=True)
-
-    # Match intent labels to recorded flows
-    flows = await sqlite.list_flows()
-    flow_by_name: dict[str, dict] = {f["flow_name"]: f for f in flows if f.get("app_url") == app_url}
+    impacted = get_impacted_journeys(
+        graph=graph,
+        changed_files=changed_files,
+        changed_routes=changed_routes,
+        limit=limit,
+    )
+    changed_segments = []
+    for item in impacted:
+        for segment in item.matched_segments:
+            if segment not in changed_segments:
+                changed_segments.append(segment)
 
     suggestions: list[dict] = []
     suggested_flow_ids: list[str] = []
-
-    for score, intent_id in ranked[:limit]:
-        intent_label = intent_id.replace("intent:", "")
-        bc = intent_meta.get(intent_id, {}).get("business_criticality", "other")
-        goal = intent_meta.get(intent_id, {}).get("goal", "")
-        matched_flow = flow_by_name.get(intent_label)
-
-        suggestion: dict = {
-            "intent_label": intent_label,
-            "business_criticality": bc,
-            "match_score": round(score, 2),
-            "rationale": (
-                f"Changed segments {[s for s in changed_segments if any(s in n.label.lower() for n in graph.nodes if n.node_type == 'route')][:3]} "
-                f"overlap with route nodes connected to '{intent_label}' intent (score={score:.1f})"
-            ),
-            "goal": goal,
+    for item in impacted:
+        suggestion = {
+            "intent_label": item.label,
+            "business_criticality": item.business_criticality,
+            "coverage_status": item.coverage_status,
+            "match_score": round(item.impact_score, 2),
+            "matched_segments": item.matched_segments,
+            "entry_routes": item.entry_routes,
+            "rationale": item.rationale,
+            "goal": item.goal,
         }
-        if matched_flow:
-            suggestion["flow_id"] = matched_flow["flow_id"]
-            suggestion["flow_name"] = matched_flow["flow_name"]
-            suggested_flow_ids.append(matched_flow["flow_id"])
-
+        if item.flow_id:
+            suggestion["flow_id"] = item.flow_id
+            suggestion["flow_name"] = item.flow_name
+            suggested_flow_ids.append(item.flow_id)
         suggestions.append(suggestion)
 
     return {
@@ -1151,39 +1185,36 @@ async def autogenerate_flows(
             "note": "No context graph found. Run blop_v2_capture_context first.",
         }
 
-    # All recorded flow names for this app
-    flows = await sqlite.list_flows()
-    recorded_names: set[str] = {f["flow_name"] for f in flows if f.get("app_url") == app_url}
-
-    criticality_weights = _default_criticality_weights()
-
-    # Collect intent nodes without a matching recorded flow
-    candidates: list[tuple[float, object]] = []
-    for node in graph.nodes:
-        if node.node_type != "intent":
-            continue
-        flow_name = node.label
-        if flow_name in recorded_names:
-            continue
-        bc = (node.metadata or {}).get("business_criticality", "other")
-        if criticality_filter and bc not in criticality_filter:
-            continue
-        w = criticality_weights.get(bc, 0.3)
-        candidates.append((w * node.confidence, node))
-
-    candidates.sort(key=lambda x: x[0], reverse=True)
+    journeys = get_uncovered_critical_journeys(graph)
+    if criticality_filter:
+        journeys = [journey for journey in journeys if journey.business_criticality in criticality_filter]
+    uncovered_other = []
+    if len(journeys) < limit:
+        summary = get_context_graph_summary(graph)
+        all_journeys = summary.top_journeys + get_uncovered_critical_journeys(graph)
+        seen = {journey.journey_key for journey in journeys}
+        for journey in all_journeys:
+            if journey.journey_key in seen or journey.coverage_status == "recorded":
+                continue
+            if criticality_filter and journey.business_criticality not in criticality_filter:
+                continue
+            uncovered_other.append(journey)
+            seen.add(journey.journey_key)
+    candidates = (journeys + uncovered_other)[:limit]
 
     synthesized: list[dict] = []
     recorded_flow_ids: list[str] = []
 
-    for _, node in candidates[:limit]:
-        bc = (node.metadata or {}).get("business_criticality", "other")
-        goal = (node.metadata or {}).get("goal", f"Complete the {node.label} flow on {app_url}")
+    for journey in candidates[:limit]:
+        bc = journey.business_criticality
+        goal = journey.goal or f"Complete the {journey.label} flow on {app_url}"
         flow_spec: dict = {
-            "flow_name": node.label,
+            "flow_name": journey.label,
             "goal": goal,
-            "starting_url": app_url,
+            "starting_url": journey.entry_routes[0] if journey.entry_routes else app_url,
             "business_criticality": bc,
+            "coverage_status": journey.coverage_status,
+            "entry_routes": journey.entry_routes,
         }
 
         if auto_record:
@@ -1191,7 +1222,7 @@ async def autogenerate_flows(
                 from blop.tools.record import record_test_flow
                 result = await record_test_flow(
                     app_url=app_url,
-                    flow_name=node.label,
+                    flow_name=journey.label,
                     goal=goal,
                     profile_name=profile_name,
                     business_criticality=bc,
@@ -1223,6 +1254,7 @@ async def get_context_latest_resource(app_url: str) -> dict:
         "created_at": graph.created_at,
         "node_count": len(graph.nodes),
         "edge_count": len(graph.edges),
+        "summary": get_context_graph_summary(graph).model_dump(),
         "metadata": graph.metadata,
     }
     return _resource_envelope(app_url, data)

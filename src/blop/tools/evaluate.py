@@ -17,6 +17,7 @@ from blop.engine.flow_builder import (
     build_recorded_flow,
     build_steps_from_agent_actions,
 )
+from blop.engine.planner import build_execution_plan, build_intent_contract
 from blop.storage import sqlite, files as file_store
 
 
@@ -488,6 +489,16 @@ def _generate_summary_from_result(raw_result: str, task: str, pass_fail: str) ->
     return bullets
 
 
+def _has_meaningful_eval_steps(agent_steps: list[AgentStepInfo]) -> bool:
+    for step in agent_steps:
+        desc = (step.get("description") or "").lower()
+        if any(token in desc for token in ("click element (index", "type \"", "navigate ->")):
+            continue
+        if desc.strip():
+            return True
+    return False
+
+
 async def _promote_to_recorded_flow(
     app_url: str,
     task: str,
@@ -498,6 +509,8 @@ async def _promote_to_recorded_flow(
     """Convert evaluation agent steps into a RecordedFlow and persist it."""
     if not agent_steps:
         return None
+    if not _has_meaningful_eval_steps(agent_steps):
+        return None
 
     name = flow_name or f"eval_{run_id[:8]}"
     steps = build_steps_from_agent_actions(
@@ -506,6 +519,13 @@ async def _promote_to_recorded_flow(
         agent_steps=agent_steps,
         map_action=_map_eval_action,
     )
+    execution_plan = build_execution_plan(
+        goal_text=task,
+        app_url=app_url,
+        planning_source="legacy_unstructured",
+        assertions=[task],
+        run_mode="hybrid",
+    )
     flow = build_recorded_flow(
         flow_name=name,
         app_url=app_url,
@@ -513,6 +533,7 @@ async def _promote_to_recorded_flow(
         steps=steps,
         assertions_json=[task],
         entry_url=app_url,
+        intent_contract=build_intent_contract(execution_plan),
     )
     await sqlite.save_flow(flow)
     return flow.flow_id

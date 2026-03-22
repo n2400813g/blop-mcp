@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Callable, Optional, TypedDict
 
-from blop.schemas import FlowStep, RecordedFlow, SpaHints
+from blop.schemas import FlowStep, IntentContract, RecordedFlow, SpaHints
 
 
 class AgentStepInfo(TypedDict, total=False):
@@ -25,6 +25,7 @@ def build_recorded_flow(
     entry_url: Optional[str] = None,
     business_criticality: str = "other",
     spa_hints: Optional[SpaHints] = None,
+    intent_contract: Optional[IntentContract] = None,
     run_mode_override: Optional[str] = None,
 ) -> RecordedFlow:
     """Create a canonical RecordedFlow payload used by multiple tool paths."""
@@ -38,6 +39,7 @@ def build_recorded_flow(
         entry_url=entry_url or app_url,
         business_criticality=business_criticality,
         spa_hints=spa_hints or SpaHints(),
+        intent_contract=intent_contract,
         run_mode_override=run_mode_override,
     )
 

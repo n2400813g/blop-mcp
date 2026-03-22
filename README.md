@@ -15,6 +15,7 @@ Compatible MCP clients: **Cursor**, **Claude Code**, and other clients that supp
 - [Why blop vs generic AI testing agents](#why-blop-vs-generic-ai-testing-agents)
 - [Before you start](#before-you-start--what-youll-need)
 - [Install](#installation--step-by-step)
+- [Release packaging](#release-packaging)
 - [Configure and connect](#configure-and-connect-blop)
 - [Production setup](#production-setup-local-managed-stdio)
 - [5-minute quickstart](#your-first-mcp-native-run-in-5-minutes)
@@ -109,6 +110,30 @@ playwright install chromium --with-deps --no-shell
 ```
 
 You should see no errors. If you do, check the [Troubleshooting](#troubleshooting) section below.
+
+## Release packaging
+
+`blop-mcp` now supports a standard Python distribution path for PyPI publishing while preserving the `blop` and `blop-mcp` CLI commands.
+
+Local maintainer smoke check:
+
+```bash
+uv pip install -e ".[dev]"
+python -m build
+python -m venv /tmp/blop-dist-smoke
+source /tmp/blop-dist-smoke/bin/activate
+pip install dist/*.whl
+blop --help
+blop-mcp --help
+```
+
+This should build both the sdist and wheel, install the wheel into a clean environment, and verify the console entrypoints start.
+
+Release instructions:
+
+- Build and verify distributions locally using the smoke check above.
+- Upload the verified artifacts to PyPI with `python -m twine upload dist/*`.
+- Full maintainer notes: [`docs/releasing.md`](docs/releasing.md)
 
 ---
 
