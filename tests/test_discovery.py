@@ -1,11 +1,14 @@
 """Tests for engine/discovery.py."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from blop.schemas import SiteInventory
 
 
 @pytest.fixture
@@ -35,6 +38,176 @@ def mock_playwright_stack():
     return mock_playwright, mock_browser, mock_context, mock_page
 
 
+class _FakeAccessibility:
+    def __init__(self, page):
+        self._page = page
+
+    async def snapshot(self, interesting_only: bool = True):
+        data = self._page.site_map.get(self._page.url, {})
+        return data.get("accessibility")
+
+
+class _FakePage:
+    def __init__(self, site_map: dict, *, goto_log: list[str], delays: dict[str, float], failures: set[str]):
+        self.site_map = site_map
+        self.goto_log = goto_log
+        self.delays = delays
+        self.failures = failures
+        self.url = ""
+        self.accessibility = _FakeAccessibility(self)
+
+    async def goto(self, url: str, **kwargs):
+        self.goto_log.append(url)
+        delay = self.delays.get(url, 0.0)
+        if delay:
+            await asyncio.sleep(delay)
+        if url in self.failures:
+            raise RuntimeError(f"boom:{url}")
+        self.url = url
+
+    async def wait_for_function(self, *args, **kwargs):
+        return None
+
+    async def wait_for_timeout(self, *args, **kwargs):
+        return None
+
+    async def wait_for_selector(self, *args, **kwargs):
+        return None
+
+    async def aria_snapshot(self):
+        return None
+
+    async def evaluate(self, script: str):
+        data = self.site_map.get(self.url, {})
+        if "button, [role=\"button\"]" in script:
+            return data.get("buttons", [])
+        if "Array.from(document.querySelectorAll('a[href]'))" in script and "href: el.href" in script:
+            return data.get("links", [])
+        if "Array.from(document.querySelectorAll('form'))" in script:
+            return data.get("forms", [])
+        if "Array.from(document.querySelectorAll('h1, h2, h3'))" in script:
+            return data.get("headings", [])
+        if "new URL(el.href).pathname" in script:
+            return data.get("routes", [])
+        return []
+
+    async def close(self):
+        return None
+
+
+class _FakeContext:
+    def __init__(self, site_map: dict, *, goto_log: list[str], delays: dict[str, float], failures: set[str]):
+        self.site_map = site_map
+        self.goto_log = goto_log
+        self.delays = delays
+        self.failures = failures
+
+    async def new_page(self):
+        return _FakePage(
+            self.site_map,
+            goto_log=self.goto_log,
+            delays=self.delays,
+            failures=self.failures,
+        )
+
+    async def close(self):
+        return None
+
+
+class _FakeBrowser:
+    def __init__(self, site_map: dict, *, goto_log: list[str], delays: dict[str, float], failures: set[str]):
+        self.site_map = site_map
+        self.goto_log = goto_log
+        self.delays = delays
+        self.failures = failures
+        self.new_context_calls: list[dict] = []
+
+    async def new_context(self, **kwargs):
+        self.new_context_calls.append(kwargs)
+        return _FakeContext(
+            self.site_map,
+            goto_log=self.goto_log,
+            delays=self.delays,
+            failures=self.failures,
+        )
+
+    async def close(self):
+        return None
+
+
+class _FakePlaywright:
+    def __init__(self, browser: _FakeBrowser):
+        self.browser = browser
+        self.chromium = MagicMock()
+        self.chromium.launch = AsyncMock(return_value=browser)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+def _site_graph() -> dict[str, dict]:
+    return {
+        "https://example.com": {
+            "buttons": [{"text": "Dashboard", "href": "/billing"}],
+            "links": [
+                {"text": "Billing", "href": "https://example.com/billing"},
+                {"text": "Settings", "href": "https://example.com/settings"},
+                {"text": "Docs", "href": "https://example.com/docs"},
+            ],
+            "forms": [],
+            "headings": ["Home"],
+            "routes": ["/billing", "/settings", "/docs"],
+            "accessibility": {"role": "WebArea", "children": [{"role": "button", "name": "Dashboard", "children": []}]},
+        },
+        "https://example.com/billing": {
+            "buttons": [{"text": "Upgrade", "href": "/billing/details"}],
+            "links": [{"text": "Plan details", "href": "https://example.com/billing/details"}],
+            "forms": [],
+            "headings": ["Billing"],
+            "routes": ["/billing/details"],
+            "accessibility": {"role": "WebArea", "children": [{"role": "button", "name": "Upgrade", "children": []}]},
+        },
+        "https://example.com/settings": {
+            "buttons": [{"text": "Profile", "href": None}],
+            "links": [],
+            "forms": [{"action": "https://example.com/settings", "inputs": [{"type": "text", "name": "name", "placeholder": "Name", "label": ""}]}],
+            "headings": ["Settings"],
+            "routes": [],
+            "accessibility": {"role": "WebArea", "children": [{"role": "button", "name": "Profile", "children": []}]},
+        },
+        "https://example.com/docs": {
+            "buttons": [{"text": "API Reference", "href": None}],
+            "links": [],
+            "forms": [],
+            "headings": ["Docs"],
+            "routes": [],
+            "accessibility": {"role": "WebArea", "children": [{"role": "button", "name": "API Reference", "children": []}]},
+        },
+        "https://example.com/billing/details": {
+            "buttons": [{"text": "Pay now", "href": None}],
+            "links": [],
+            "forms": [],
+            "headings": ["Details"],
+            "routes": [],
+            "accessibility": {"role": "WebArea", "children": [{"role": "button", "name": "Pay now", "children": []}]},
+        },
+    }
+
+
+def _fake_playwright_for_site(site_map: dict, *, delays: dict[str, float] | None = None, failures: set[str] | None = None):
+    goto_log: list[str] = []
+    browser = _FakeBrowser(
+        site_map,
+        goto_log=goto_log,
+        delays=delays or {},
+        failures=failures or set(),
+    )
+    return _FakePlaywright(browser), browser, goto_log
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("init_test_db")
 async def test_discover_flows_returns_fallback_without_api_key(mock_playwright_stack):
@@ -50,6 +223,44 @@ async def test_discover_flows_returns_fallback_without_api_key(mock_playwright_s
     flows = result["flows"]
     assert len(flows) >= 3
     assert all("flow_name" in f and "goal" in f for f in flows)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("init_test_db")
+async def test_discover_flows_fallback_spreads_public_site_across_sections():
+    from blop.engine.discovery import discover_flows
+
+    inventory = SiteInventory(
+        app_url="https://testpages.eviltester.com/",
+        routes=[
+            "/",
+            "/pages/input-elements/text-inputs/",
+            "/pages/input-elements/basic-inputs/",
+            "/pages/forms/html5-form-example/",
+            "/pages/navigation/page-links/",
+            "/apps/notes/simplenotes.html",
+        ],
+        buttons=[],
+        links=[],
+        forms=[],
+        headings=[],
+        auth_signals=[],
+        business_signals=[],
+        page_structures={},
+        crawled_pages=12,
+    )
+
+    with patch.dict(os.environ, {}, clear=True):
+        with patch("blop.engine.discovery.inventory_site", new_callable=AsyncMock, return_value=inventory):
+            result = await discover_flows("https://testpages.eviltester.com/")
+
+    flow_names = [flow["flow_name"] for flow in result["flows"]]
+    goals = [flow["goal"] for flow in result["flows"]]
+    assert "page_loads" in flow_names
+    assert any("explore_pages_input_elements" == name for name in flow_names)
+    assert any("explore_pages_forms" == name for name in flow_names)
+    assert any("explore_pages_navigation" == name for name in flow_names)
+    assert any("/pages/forms/html5-form-example/" in goal for goal in goals)
 
 
 @pytest.mark.asyncio
@@ -255,6 +466,105 @@ async def test_get_page_structure_returns_interactive_nodes(mock_playwright_stac
     assert result["requested_url"] == "https://example.com/pricing"
     assert result["interactive_node_count"] == 2
     assert any(node["name"] == "Upgrade" for node in result["interactive_nodes"])
+
+
+@pytest.mark.asyncio
+async def test_inventory_site_parallel_and_single_worker_match_core_inventory(monkeypatch):
+    from blop.engine.discovery import inventory_site
+
+    site_map = _site_graph()
+    fake_playwright, _, _ = _fake_playwright_for_site(site_map)
+
+    monkeypatch.setattr("blop.engine.discovery.BLOP_DISCOVERY_CONCURRENCY", 1)
+    with patch("playwright.async_api.async_playwright", return_value=fake_playwright):
+        sequential = await inventory_site("https://example.com", max_depth=2, max_pages=5)
+
+    fake_playwright_parallel, _, _ = _fake_playwright_for_site(site_map)
+    monkeypatch.setattr("blop.engine.discovery.BLOP_DISCOVERY_CONCURRENCY", 3)
+    with patch("playwright.async_api.async_playwright", return_value=fake_playwright_parallel):
+        parallel = await inventory_site("https://example.com", max_depth=2, max_pages=5)
+
+    assert sequential.routes == parallel.routes
+    assert sequential.buttons == parallel.buttons
+    assert sequential.links == parallel.links
+    assert sequential.forms == parallel.forms
+    assert sequential.headings == parallel.headings
+    assert sequential.page_structures == parallel.page_structures
+
+
+@pytest.mark.asyncio
+async def test_inventory_site_prefers_distinct_sections_before_deeper_routes(monkeypatch):
+    from blop.engine.discovery import inventory_site
+
+    site_map = _site_graph()
+    fake_playwright, _, goto_log = _fake_playwright_for_site(site_map)
+
+    monkeypatch.setattr("blop.engine.discovery.BLOP_DISCOVERY_CONCURRENCY", 1)
+    with patch("playwright.async_api.async_playwright", return_value=fake_playwright):
+        await inventory_site("https://example.com", max_depth=2, max_pages=5)
+
+    assert goto_log.index("https://example.com/settings") < goto_log.index("https://example.com/billing/details")
+
+
+@pytest.mark.asyncio
+async def test_inventory_site_reuses_storage_state_for_worker_contexts(monkeypatch):
+    from blop.engine.discovery import inventory_site
+
+    site_map = _site_graph()
+    fake_playwright, browser, _ = _fake_playwright_for_site(site_map)
+
+    monkeypatch.setattr("blop.engine.discovery.BLOP_DISCOVERY_CONCURRENCY", 3)
+    with patch("playwright.async_api.async_playwright", return_value=fake_playwright):
+        with patch("blop.engine.discovery.resolve_storage_state_for_profile", new_callable=AsyncMock, return_value="/tmp/auth.json"):
+            await inventory_site("https://example.com", max_depth=2, max_pages=5, profile_name="prod")
+
+    assert len(browser.new_context_calls) >= 2
+    assert all(call.get("storage_state") == "/tmp/auth.json" for call in browser.new_context_calls)
+
+
+@pytest.mark.asyncio
+async def test_inventory_site_worker_failure_isolated(monkeypatch):
+    from blop.engine.discovery import inventory_site
+
+    site_map = _site_graph()
+    fake_playwright, _, _ = _fake_playwright_for_site(site_map, failures={"https://example.com/billing"})
+
+    monkeypatch.setattr("blop.engine.discovery.BLOP_DISCOVERY_CONCURRENCY", 3)
+    with patch("playwright.async_api.async_playwright", return_value=fake_playwright):
+        inventory = await inventory_site("https://example.com", max_depth=2, max_pages=5)
+
+    assert inventory.crawled_pages >= 2
+    assert inventory.crawl_metadata["error_count"] == 1
+    assert "/settings" in inventory.routes
+
+
+@pytest.mark.asyncio
+async def test_inventory_site_parallel_mock_benchmark_is_faster(monkeypatch):
+    from blop.engine.discovery import inventory_site
+
+    site_map = _site_graph()
+    delays = {
+        "https://example.com": 0.05,
+        "https://example.com/billing": 0.05,
+        "https://example.com/settings": 0.05,
+        "https://example.com/docs": 0.05,
+    }
+
+    fake_playwright_seq, _, _ = _fake_playwright_for_site(site_map, delays=delays)
+    monkeypatch.setattr("blop.engine.discovery.BLOP_DISCOVERY_CONCURRENCY", 1)
+    start = time.perf_counter()
+    with patch("playwright.async_api.async_playwright", return_value=fake_playwright_seq):
+        await inventory_site("https://example.com", max_depth=1, max_pages=4)
+    sequential_time = time.perf_counter() - start
+
+    fake_playwright_par, _, _ = _fake_playwright_for_site(site_map, delays=delays)
+    monkeypatch.setattr("blop.engine.discovery.BLOP_DISCOVERY_CONCURRENCY", 3)
+    start = time.perf_counter()
+    with patch("playwright.async_api.async_playwright", return_value=fake_playwright_par):
+        await inventory_site("https://example.com", max_depth=1, max_pages=4)
+    parallel_time = time.perf_counter() - start
+
+    assert parallel_time < sequential_time * 0.8
 
 
 def test_parse_flow_list_accepts_python_literal_style_output():

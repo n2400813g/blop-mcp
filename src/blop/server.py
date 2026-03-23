@@ -54,6 +54,9 @@ async def _safe_call(handler, /, tool_name: Optional[str] = None, **kwargs) -> d
             _tool,
             type(e).__name__,
             extra={
+                "event": "tool_exception",
+                "tool": _tool,
+                "error_type": type(e).__name__,
                 "error": str(e),
                 "run_id": kwargs.get("run_id"),
                 "flow_id": kwargs.get("flow_id"),
@@ -2048,7 +2051,8 @@ async def health_resource() -> dict:
     """Server health check: DB reachability, LLM key, Chromium, active run count."""
     import shutil
     from datetime import datetime, timezone
-    from blop.config import check_llm_api_key
+    from blop.config import check_llm_api_key, runtime_posture_snapshot
+    from blop.storage import files as file_store
 
     has_key, _key_name = check_llm_api_key()
     chromium_ok = bool(
@@ -2063,12 +2067,20 @@ async def health_resource() -> dict:
     except Exception:
         pass
     active_runs = sum(1 for t in regression._RUN_TASKS.values() if not t.done())
+    posture = runtime_posture_snapshot()
+    path_checks = {
+        "runs_dir_resolves_absolute": file_store._runs_dir().is_absolute(),
+        "debug_log_parent_configured": bool(posture["paths"]["debug_log"]),
+        "db_path_absolute": posture["paths"]["db_path_absolute"],
+    }
     return {
         "status": "ready" if (has_key and db_ok) else "degraded",
         "db_reachable": db_ok,
         "llm_key_present": has_key,
         "chromium_found": chromium_ok,
         "active_run_count": active_runs,
+        "runtime_posture": posture,
+        "path_checks": path_checks,
         "ts": datetime.now(timezone.utc).isoformat(),
     }
 

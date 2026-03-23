@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from blop.engine.context_graph import find_journey_summary, get_context_graph_summary
+from blop.reporting.results import describe_flow_staleness
 from blop.schemas import CriticalJourney, ReleaseBrief
 from blop.storage import sqlite
 
@@ -11,6 +12,7 @@ async def journeys_resource() -> dict:
     flows = await sqlite.list_flows()
     journeys = []
     graph_cache: dict[tuple[str, str | None], object] = {}
+    stale_release_gating_count = 0
     for f in flows:
         flow_obj = await sqlite.get_flow(f["flow_id"])
         criticality = getattr(flow_obj, "business_criticality", "other") if flow_obj else "other"
@@ -34,15 +36,35 @@ async def journeys_resource() -> dict:
             "auth_required": journey_summary.auth_required if journey_summary else False,
             "confidence": 1.0 if flow_obj else 0.7,
         }).model_dump()
+        staleness = describe_flow_staleness(f.get("created_at"))
+        if staleness["stale"] and criticality in ("revenue", "activation"):
+            stale_release_gating_count += 1
         journeys.append({
             **canonical,
             "created_at": f.get("created_at"),
             "coverage_status": journey_summary.coverage_status if journey_summary else "recorded",
             "entry_routes": journey_summary.entry_routes if journey_summary else [],
+            "stale_recording": staleness["stale"],
+            "recording_age_days": staleness["age_days"],
+            "staleness_threshold_days": staleness["staleness_threshold_days"],
+            "stale_warning": staleness["warning"],
+            "recommended_next_action": (
+                "Refresh this journey with record_test_flow(...) before using it for release gating."
+                if staleness["stale"]
+                else "Journey recording is recent enough for replay."
+            ),
         })
+    workflow_hint = "Review recorded release-gating journeys and run run_release_check(...) once the coverage set looks complete."
+    if stale_release_gating_count:
+        workflow_hint = (
+            f"{stale_release_gating_count} release-gating journey(s) look stale. "
+            "Refresh those recordings before trusting replay failures or shipping decisions."
+        )
     return {
         "journeys": journeys,
         "total": len(journeys),
+        "stale_release_gating_count": stale_release_gating_count,
+        "workflow_hint": workflow_hint,
     }
 
 

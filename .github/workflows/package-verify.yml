@@ -1,0 +1,33 @@
+name: Package Verify
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+
+jobs:
+  package-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build distributions
+        run: uv run --with build python -m build
+
+      - name: Smoke install built wheel
+        run: |
+          python -m venv /tmp/blop-dist-smoke
+          . /tmp/blop-dist-smoke/bin/activate
+          pip install dist/*.whl
+          blop --help
+          blop-mcp --help

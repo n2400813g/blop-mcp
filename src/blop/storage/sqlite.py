@@ -485,6 +485,62 @@ async def create_run(
         await db.commit()
 
 
+async def create_run_with_initial_events(
+    run_id: str,
+    app_url: str,
+    profile_name: str | None,
+    flow_ids: list[str],
+    headless: bool,
+    artifacts_dir: str,
+    run_mode: str,
+    status: str,
+    run_queued_payload: dict,
+    auth_context_payload: dict,
+) -> None:
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(
+            """
+            INSERT INTO runs (run_id, app_url, profile_name, flow_ids_json, status, started_at, headless, artifacts_dir, run_mode)
+            VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
+            """,
+            (
+                run_id,
+                app_url,
+                profile_name,
+                json.dumps(flow_ids),
+                status,
+                1 if headless else 0,
+                artifacts_dir,
+                run_mode,
+            ),
+        )
+        await db.execute(
+            """
+            INSERT INTO run_health_events (event_id, run_id, event_type, payload_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                run_id,
+                "run_queued",
+                json.dumps(run_queued_payload),
+            ),
+        )
+        await db.execute(
+            """
+            INSERT INTO run_health_events (event_id, run_id, event_type, payload_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                run_id,
+                "auth_context_resolved",
+                json.dumps(auth_context_payload),
+            ),
+        )
+        await db.commit()
+
+
 async def update_run_status(run_id: str, status: str) -> None:
     """Update only the status of a run (lightweight state-machine transition)."""
     async with aiosqlite.connect(_db_path()) as db:

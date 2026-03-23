@@ -8,6 +8,7 @@ import json
 import os
 import re
 import time
+from urllib.parse import urlparse
 from typing import Optional, TYPE_CHECKING
 
 from blop.schemas import FailureCase, RecordedFlow, ReplayStepResult, ReplayTrace, StabilityFingerprint
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 
 from blop.config import BLOP_AUTO_HEAL_MIN_CONFIDENCE as AUTO_HEAL_MIN_CONFIDENCE
 from blop.config import BLOP_AUTO_HEAL_MAX_BEHAVIOR_RISK as AUTO_HEAL_MAX_BEHAVIOR_RISK
+from blop.config import BLOP_REPLAY_CONCURRENCY
 from blop.config import BLOP_STEP_TIMEOUT_SECS
 from blop.schemas import DriftSummary
 
@@ -63,8 +65,44 @@ def _aria_consistency(step) -> float:
     return round(min(1.0, score), 4)
 
 
-def _should_auto_heal(repair_confidence: float, behavior_risk: float) -> bool:
-    return repair_confidence >= AUTO_HEAL_MIN_CONFIDENCE and behavior_risk <= AUTO_HEAL_MAX_BEHAVIOR_RISK
+def _required_heal_confidence(action: str | None, selector_entropy: float) -> float:
+    required = float(AUTO_HEAL_MIN_CONFIDENCE)
+    action_penalties = {
+        "click": 0.05,
+        "fill": 0.08,
+        "select": 0.08,
+        "upload": 0.1,
+        "drag": 0.12,
+    }
+    required += action_penalties.get((action or "").lower(), 0.0)
+    if selector_entropy >= 0.45:
+        required += 0.05
+    return round(min(0.98, required), 4)
+
+
+def _allowed_heal_behavior_risk(action: str | None) -> float:
+    allowed = float(AUTO_HEAL_MAX_BEHAVIOR_RISK)
+    action_penalties = {
+        "fill": 0.05,
+        "select": 0.05,
+        "upload": 0.08,
+        "drag": 0.1,
+    }
+    allowed -= action_penalties.get((action or "").lower(), 0.0)
+    return round(max(0.05, allowed), 4)
+
+
+def _should_auto_heal(
+    repair_confidence: float,
+    behavior_risk: float,
+    *,
+    action: str | None = None,
+    selector_entropy: float = 0.0,
+) -> bool:
+    return (
+        repair_confidence >= _required_heal_confidence(action, selector_entropy)
+        and behavior_risk <= _allowed_heal_behavior_risk(action)
+    )
 
 
 async def _save_navigation_health_event(
@@ -86,6 +124,7 @@ async def _save_navigation_health_event(
             "case_id": case_id,
             "flow_id": flow.flow_id,
             "flow_name": flow.flow_name,
+            "entry_area_key": _flow_entry_area_key(flow),
             "expected_url": expected_url,
             "landed_url": landed_url,
             "page_title": page_title,
@@ -95,8 +134,17 @@ async def _save_navigation_health_event(
     )
 
 
-def _infer_surface_from_url(url: str) -> str:
+def _infer_surface_from_url(url: str, *, expected_surface: str | None = None) -> str:
     lowered = (url or "").lower()
+    parsed = urlparse(url or "")
+    path = (parsed.path or "/").lower()
+    segments = [segment for segment in path.split("/") if segment]
+    public_markers = {
+        "pages", "reference", "docs", "blog", "help", "support",
+        "challenges", "tutorial", "tutorials", "guide", "guides",
+        "about", "contact", "examples",
+    }
+    app_markers = {"dashboard", "workspace", "project", "projects", "console", "admin"}
     if "/editor" in lowered:
         return "editor"
     if any(token in lowered for token in ("/pricing", "/billing", "/plans", "/upgrade")):
@@ -104,6 +152,12 @@ def _infer_surface_from_url(url: str) -> str:
     if any(token in lowered for token in ("/settings", "/account", "/profile")):
         return "settings"
     if any(token in lowered for token in ("/login", "/signin", "/auth", "oauth")):
+        return "public_site"
+    if path in {"", "/"}:
+        return "public_site"
+    if any(segment in public_markers for segment in segments):
+        return "public_site"
+    if expected_surface == "public_site" and not any(segment in app_markers for segment in segments):
         return "public_site"
     if lowered:
         return "authenticated_app"
@@ -147,7 +201,10 @@ def _build_drift_summary(
     disallowed_fallback_used: list[str] = []
     notes: list[str] = []
 
-    actual_surface = _infer_surface_from_url(actual_landing_url or "")
+    actual_surface = _infer_surface_from_url(
+        actual_landing_url or "",
+        expected_surface=intent.target_surface,
+    )
     surface_match = None
     if actual_landing_url:
         surface_match = actual_surface == intent.target_surface or (
@@ -392,6 +449,10 @@ async def execute_recorded_flow(
                 _log.debug("browser close failed", exc_info=True)
 
     result_case = _trace_to_failure_case(trace, flow, run_id, case_id)
+    if result_case.status == "blocked" and storage_state:
+        from blop.engine.auth import invalidate_validated_session_cache
+
+        invalidate_validated_session_cache(storage_state_path=storage_state)
 
     # Soft heal: persist healed selectors back into the recorded flow
     if result_case.healed_steps:
@@ -761,13 +822,22 @@ async def _execute_single_step(
         if repair_result:
             repair_confidence = float(repair_result.get("repair_confidence", 0.6))
             behavior_risk = float(repair_result.get("behavior_risk", 0.35))
-            if not _should_auto_heal(repair_confidence, behavior_risk):
+            selector_entropy = _selector_entropy(step.selector)
+            required_confidence = _required_heal_confidence(step.action, selector_entropy)
+            allowed_risk = _allowed_heal_behavior_risk(step.action)
+            if not _should_auto_heal(
+                repair_confidence,
+                behavior_risk,
+                action=step.action,
+                selector_entropy=selector_entropy,
+            ):
                 return _result(
                     status="fail",
                     replay_mode="agent_repair",
                     error=(
                         "Repair proposed but not auto-applied (confidence/risk threshold not met): "
-                        f"confidence={repair_confidence:.2f}, risk={behavior_risk:.2f}"
+                        f"confidence={repair_confidence:.2f}, required={required_confidence:.2f}, "
+                        f"risk={behavior_risk:.2f}, allowed={allowed_risk:.2f}"
                     ),
                     repair_confidence=repair_confidence,
                     failure_reason="repair_rejected",
@@ -1494,9 +1564,13 @@ async def run_flows(
     run_mode: str = "hybrid",
     auto_rerecord: bool = False,
     profile_name: Optional[str] = None,
+    execution_metadata: dict[str, dict] | None = None,
 ) -> list[FailureCase]:
-    """Execute all flows in parallel (semaphore=3 with tracing, 5 without)."""
+    """Execute all flows in parallel with bounded worker slots and section-aware ordering."""
     import uuid as _uuid
+
+    if not flows:
+        return []
 
     # Playwright tracing with DOM snapshots is memory-intensive; reduce concurrency
     # whenever at least one flow will execute in step-replay mode.
@@ -1504,25 +1578,47 @@ async def run_flows(
         (getattr(flow, "run_mode_override", None) or run_mode) != "goal_fallback"
         for flow in flows
     )
-    semaphore = asyncio.Semaphore(3 if _tracing_active else 5)
+    default_workers = 3 if _tracing_active else 5
+    worker_count = max(1, min(BLOP_REPLAY_CONCURRENCY or default_workers, len(flows)))
+    ordered_flows = _interleave_flows_by_entry_area(flows)
+    results: list[FailureCase | Exception | None] = [None] * len(flows)
+    original_positions = {flow.flow_id: idx for idx, flow in enumerate(flows)}
+    queue: asyncio.Queue[tuple[int, RecordedFlow]] = asyncio.Queue()
 
-    async def run_one(flow: RecordedFlow) -> FailureCase:
-        async with semaphore:
+    for flow in ordered_flows:
+        await queue.put((original_positions[flow.flow_id], flow))
+
+    async def run_one(worker_slot: int) -> None:
+        while True:
+            try:
+                original_idx, flow = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            if execution_metadata is not None:
+                execution_metadata[flow.flow_id] = {
+                    "worker_slot": worker_slot,
+                    "entry_area_key": _flow_entry_area_key(flow),
+                }
             cid = _uuid.uuid4().hex
-            return await execute_flow(
-                flow=flow,
-                app_url=app_url,
-                run_id=run_id,
-                case_id=cid,
-                storage_state=storage_state,
-                headless=headless,
-                max_steps=max_steps,
-                run_mode=run_mode,
-                auto_rerecord=auto_rerecord,
-                profile_name=profile_name,
-            )
+            try:
+                results[original_idx] = await execute_flow(
+                    flow=flow,
+                    app_url=app_url,
+                    run_id=run_id,
+                    case_id=cid,
+                    storage_state=storage_state,
+                    headless=headless,
+                    max_steps=max_steps,
+                    run_mode=run_mode,
+                    auto_rerecord=auto_rerecord,
+                    profile_name=profile_name,
+                )
+            except Exception as exc:
+                results[original_idx] = exc
+            finally:
+                queue.task_done()
 
-    results = await asyncio.gather(*[run_one(f) for f in flows], return_exceptions=True)
+    await asyncio.gather(*(run_one(worker_slot) for worker_slot in range(1, worker_count + 1)))
 
     cases: list[FailureCase] = []
     for i, result in enumerate(results):
@@ -1543,7 +1639,40 @@ async def run_flows(
                 replay_mode="orchestration_error",
                 failure_reason_codes=["orchestration_error"],
             ))
-        else:
+        elif result is not None:
             cases.append(result)
 
     return cases
+
+
+def _flow_entry_area_key(flow: RecordedFlow) -> str:
+    candidate = getattr(flow, "entry_url", None) or ""
+    if not candidate:
+        for step in getattr(flow, "steps", []):
+            if getattr(step, "action", None) == "navigate":
+                candidate = getattr(step, "value", None) or getattr(step, "url_after", None) or ""
+                if candidate:
+                    break
+    parsed = urlparse(candidate or getattr(flow, "app_url", "") or "")
+    path = parsed.path or "/"
+    segments = [segment for segment in path.split("/") if segment]
+    return segments[0].lower() if segments else "/"
+
+
+def _interleave_flows_by_entry_area(flows: list[RecordedFlow]) -> list[RecordedFlow]:
+    area_order: list[str] = []
+    buckets: dict[str, list[RecordedFlow]] = {}
+    for flow in flows:
+        area_key = _flow_entry_area_key(flow)
+        if area_key not in buckets:
+            buckets[area_key] = []
+            area_order.append(area_key)
+        buckets[area_key].append(flow)
+
+    interleaved: list[RecordedFlow] = []
+    while any(buckets.get(area_key) for area_key in area_order):
+        for area_key in area_order:
+            bucket = buckets.get(area_key) or []
+            if bucket:
+                interleaved.append(bucket.pop(0))
+    return interleaved

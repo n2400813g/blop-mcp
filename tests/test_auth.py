@@ -151,6 +151,57 @@ async def test_env_login_invalid_cached_session_falls_back_when_validation_enabl
 
 
 @pytest.mark.asyncio
+async def test_validate_auth_session_uses_cache_for_same_path_and_mtime(tmp_path):
+    from blop.engine import auth as auth_engine
+
+    state_file = tmp_path / "auth_state.json"
+    state_file.write_text("{}")
+
+    uncached = AsyncMock(return_value=True)
+    with patch.object(auth_engine, "_validate_auth_session_uncached", uncached):
+        first = await auth_engine.validate_auth_session(str(state_file), "https://example.com")
+        second = await auth_engine.validate_auth_session(str(state_file), "https://example.com")
+
+    assert first is True
+    assert second is True
+    uncached.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_validate_auth_session_mtime_change_forces_revalidation(tmp_path):
+    from blop.engine import auth as auth_engine
+
+    state_file = tmp_path / "auth_state.json"
+    state_file.write_text("{}")
+
+    uncached = AsyncMock(side_effect=[True, True])
+    with patch.object(auth_engine, "_validate_auth_session_uncached", uncached):
+        assert await auth_engine.validate_auth_session(str(state_file), "https://example.com") is True
+        state_file.write_text('{"updated": true}')
+        assert await auth_engine.validate_auth_session(str(state_file), "https://example.com") is True
+
+    assert uncached.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_validate_auth_session_false_result_invalidates_cache(tmp_path):
+    from blop.engine import auth as auth_engine
+
+    state_file = tmp_path / "auth_state.json"
+    state_file.write_text("{}")
+
+    uncached = AsyncMock(side_effect=[True, False, True])
+    with patch.object(auth_engine, "_validate_auth_session_uncached", uncached):
+        assert await auth_engine.validate_auth_session(str(state_file), "https://example.com") is True
+        assert await auth_engine.validate_auth_session(str(state_file), "https://example.com") is True
+        auth_engine.invalidate_validated_session_cache(storage_state_path=str(state_file), app_url="https://example.com")
+        assert await auth_engine.validate_auth_session(str(state_file), "https://example.com") is False
+        assert await auth_engine.validate_auth_session(str(state_file), "https://example.com") is True
+
+    assert uncached.await_count == 3
+
+
+@pytest.mark.asyncio
 async def test_env_login_social_only_page_returns_none_without_selector_retries(env_login_profile):
     from blop.engine.auth import resolve_storage_state
 

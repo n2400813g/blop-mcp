@@ -252,6 +252,7 @@ class SiteInventory:
     business_signals: list[str]
     page_structures: dict[str, list[dict]] = field(default_factory=dict)
     crawled_pages: int = 0
+    crawl_metadata: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -265,6 +266,7 @@ class SiteInventory:
             "business_signals": self.business_signals,
             "page_structures": self.page_structures,
             "crawled_pages": self.crawled_pages,
+            "crawl_metadata": self.crawl_metadata,
         }
 
 

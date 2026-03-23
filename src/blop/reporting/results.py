@@ -1,9 +1,51 @@
 """Aggregate run data into structured RunResult report."""
 from __future__ import annotations
 
+import os
+from datetime import datetime, timezone
+
 from blop.schemas import FailureCase
 
 _TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "waiting_auth"}
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def describe_flow_staleness(created_at: str | None) -> dict:
+    threshold_days = int(os.getenv("BLOP_FLOW_STALE_DAYS", "14"))
+    created_dt = _parse_iso_datetime(created_at)
+    if not created_dt:
+        return {
+            "stale": False,
+            "staleness_threshold_days": threshold_days,
+            "age_days": None,
+            "warning": None,
+        }
+
+    age_days = max(0.0, (datetime.now(timezone.utc) - created_dt).total_seconds() / 86400)
+    stale = age_days >= threshold_days
+    warning = None
+    if stale:
+        warning = (
+            f"Recording is {int(age_days)} day(s) old, which exceeds the {threshold_days}-day staleness threshold. "
+            "Refresh the flow before trusting replay results."
+        )
+    return {
+        "stale": stale,
+        "staleness_threshold_days": threshold_days,
+        "age_days": round(age_days, 1),
+        "warning": warning,
+    }
 
 
 def _artifact_paths_for_case(case: dict) -> list[str]:
@@ -119,6 +161,54 @@ def infer_top_failure_mode(report: dict) -> str:
     return "unknown"
 
 
+def describe_failure_classification(report: dict) -> dict:
+    mode = report.get("top_failure_mode") or infer_top_failure_mode(report)
+    coverage = report.get("coverage_summary", {}) or {}
+    drift = report.get("drift_summary", {}) or {}
+    auth = report.get("auth_provenance", {}) or {}
+    status = report.get("status", "unknown")
+    auth_status_suffix = ""
+    if auth.get("session_validation_status"):
+        auth_status_suffix = f" ({auth['session_validation_status']})"
+
+    rationale_map = {
+        "waiting_auth": "Replay did not start because auth could not be validated before execution.",
+        "auth_session_failure": (
+            f"Replay evidence points to auth/session issues{auth_status_suffix}."
+        ),
+        "automation_fragility": "Failures align with replay drift or selector fragility rather than a confirmed product bug.",
+        "environment_or_infra": "Failures look environmental, infrastructural, or runtime-related rather than journey-specific.",
+        "product_regression": "Evidence points to an actual product behavior regression in a tested journey.",
+        "unknown": "The run failed, but the current evidence does not support a confident classification yet.",
+    }
+    confidence = "medium"
+    if mode in {"waiting_auth", "auth_session_failure"} and auth.get("session_validation_status"):
+        confidence = "high"
+    elif mode in {"environment_or_infra", "product_regression", "automation_fragility"} and coverage.get("failure_kinds"):
+        confidence = "high"
+    elif status in _TERMINAL_RUN_STATUSES and report.get("failed_cases"):
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    supporting_signals: list[str] = []
+    if auth.get("session_validation_status") and auth.get("session_validation_status") != "valid":
+        supporting_signals.append(f"auth:{auth['session_validation_status']}")
+    for kind in coverage.get("failure_kinds", []) or []:
+        supporting_signals.append(f"failure_kind:{kind}")
+    if drift.get("drift_detected"):
+        supporting_signals.append("drift_detected")
+    for drift_type in (drift.get("drift_types", []) or [])[:2]:
+        supporting_signals.append(f"drift_type:{drift_type}")
+
+    return {
+        "primary": mode,
+        "confidence": confidence,
+        "rationale": rationale_map.get(mode, rationale_map["unknown"]),
+        "supporting_signals": supporting_signals[:5],
+    }
+
+
 def remediation_steps_for_failure_mode(mode: str) -> list[str]:
     steps = {
         "waiting_auth": [
@@ -153,6 +243,30 @@ def remediation_steps_for_failure_mode(mode: str) -> list[str]:
         ],
     }
     return steps.get(mode, steps["unknown"])
+
+
+def build_failure_links(report: dict) -> dict:
+    artifact_refs = list((report.get("evidence_summary", {}) or {}).get("top_artifact_refs", []) or [])
+    resource_refs = list(report.get("related_v2_resources", []) or [])
+    release_id = report.get("release_id")
+    run_id = report.get("run_id")
+    if release_id:
+        for ref in [
+            f"blop://release/{release_id}/brief",
+            f"blop://release/{release_id}/artifacts",
+            f"blop://release/{release_id}/incidents",
+        ]:
+            if ref not in resource_refs:
+                resource_refs.append(ref)
+    if run_id:
+        triage_hint = f"triage_release_blocker(run_id='{run_id}')"
+    else:
+        triage_hint = None
+    return {
+        "artifacts": artifact_refs[:5],
+        "resources": resource_refs[:5],
+        "triage_hint": triage_hint,
+    }
 
 
 def _compute_release_recommendation(cases: list[FailureCase], status: str) -> dict:
@@ -261,6 +375,14 @@ def _severity_label(case: FailureCase) -> str:
     return sev
 
 
+def _healing_confidence_label(repair_confidence: float) -> str:
+    if repair_confidence >= 0.85:
+        return "high"
+    if repair_confidence >= 0.65:
+        return "medium"
+    return "low"
+
+
 def _enrich_case(c: FailureCase) -> dict:
     """Return a case payload enriched with reporting metadata."""
     d = c.model_dump()
@@ -269,6 +391,14 @@ def _enrich_case(c: FailureCase) -> dict:
     d["healed_step_count"] = len(c.healed_steps or [])
     d["was_rerecorded"] = c.rerecorded
     d["failure_kind"] = _classify_failure_kind(d)
+    d["healing_confidence_label"] = _healing_confidence_label(getattr(c, "repair_confidence", 0.0))
+    d["healing_review_required"] = bool(
+        getattr(c, "healing_decision", "none") == "propose_patch"
+        or (
+            getattr(c, "healing_decision", "none") == "auto_heal"
+            and _healing_confidence_label(getattr(c, "repair_confidence", 0.0)) == "low"
+        )
+    )
     return d
 
 
@@ -440,6 +570,40 @@ def build_evidence_quality(report: dict) -> dict:
         "trace_case_count": trace_case_count,
         "assertion_backed_case_count": assertion_backed_case_count,
         "confidence_drivers": confidence_drivers,
+    }
+
+
+def build_replay_trust_summary(report: dict) -> dict:
+    cases = report.get("cases", []) or []
+    auto_heal_cases = [case for case in cases if case.get("healing_decision") == "auto_heal"]
+    review_required_cases = [case for case in cases if case.get("healing_review_required")]
+    stale_cases = [case for case in cases if (case.get("flow_staleness", {}) or {}).get("stale")]
+    repair_confidences = [
+        float(case.get("repair_confidence", 0.0))
+        for case in cases
+        if float(case.get("repair_confidence", 0.0)) > 0
+    ]
+    avg_repair_confidence = (
+        round(sum(repair_confidences) / len(repair_confidences), 4)
+        if repair_confidences
+        else 0.0
+    )
+    if review_required_cases:
+        summary = "Replay relied on low-confidence healing or proposed patches. Review the affected journey before trusting the result."
+    elif stale_cases:
+        summary = "Replay used stale recordings. Refresh those journeys before using this as a release gate."
+    elif auto_heal_cases:
+        summary = "Replay auto-healed selectors within the trust threshold."
+    else:
+        summary = "Replay followed the recorded journey plan without risky healing."
+
+    return {
+        "auto_heal_case_count": len(auto_heal_cases),
+        "review_required_case_count": len(review_required_cases),
+        "stale_recording_case_count": len(stale_cases),
+        "avg_repair_confidence": avg_repair_confidence,
+        "golden_path_ready": not review_required_cases and not stale_cases,
+        "summary": summary,
     }
 
 

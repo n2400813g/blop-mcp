@@ -31,10 +31,12 @@ async def test_migrate_advances_version_on_duplicate_column_error():
         with patch("blop.storage.sqlite._set_schema_version", new=AsyncMock()) as set_version:
             await sqlite._migrate(db)
 
-    # Starting at version 16 now runs migrations 17, 18, 19, and 20, all with duplicate-column errors
-    assert set_version.await_count == 4
+    # Starting at version 16 now runs migrations 17, 18, 19, 20, and 21,
+    # all of which should still advance the version on duplicate-column errors.
+    assert set_version.await_count == 5
     calls = set_version.await_args_list
     assert calls[0].args == (db, 17)
     assert calls[1].args == (db, 18)
     assert calls[2].args == (db, 19)
     assert calls[3].args == (db, 20)
+    assert calls[4].args == (db, 21)

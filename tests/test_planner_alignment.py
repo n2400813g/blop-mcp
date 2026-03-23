@@ -42,3 +42,15 @@ def test_build_intent_contract_blocks_goal_fallback_by_default():
 
     assert "goal_fallback_without_surface_match" in contract.forbidden_shortcuts
     assert "hybrid_repair" in contract.allowed_fallbacks
+
+
+def test_build_execution_plan_anchors_same_domain_public_goal_to_explicit_url():
+    plan = build_execution_plan(
+        goal_text="Navigate to https://testpages.eviltester.com/pages/input-elements/text-inputs/ and verify the text inputs are usable.",
+        app_url="https://testpages.eviltester.com/",
+        business_criticality="activation",
+    )
+
+    assert plan.effective_auth_expectation == "anonymous"
+    assert plan.target_surface == "public_site"
+    assert plan.expected_landing_url_patterns[0] == "https://testpages.eviltester.com/pages/input-elements/text-inputs/"

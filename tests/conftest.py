@@ -14,6 +14,7 @@ def reset_module_state_between_tests():
         from blop.engine import auth as auth_engine
 
         auth_engine._auth_cache.clear()
+        auth_engine._validated_session_cache.clear()
         auth_engine._login_locks.clear()
     except Exception:
         pass
@@ -47,6 +48,7 @@ def reset_module_state_between_tests():
         from blop.engine import auth as auth_engine
 
         auth_engine._auth_cache.clear()
+        auth_engine._validated_session_cache.clear()
         auth_engine._login_locks.clear()
     except Exception:
         pass

@@ -165,6 +165,48 @@ async def test_run_lifecycle():
 
 
 @pytest.mark.asyncio
+async def test_create_run_with_initial_events_persists_transactional_startup():
+    run_id = uuid.uuid4().hex
+    queued_payload = {
+        "app_url": "https://example.com",
+        "flow_count": 2,
+        "run_mode": "hybrid",
+        "profile_name": "prod",
+        "startup_timing_ms": {"flow_lookup": 10, "auth_resolve": 5, "auth_validate": 3, "db_persist": 0, "total_launch": 0},
+    }
+    auth_payload = {
+        "profile_name": "prod",
+        "auth_used": True,
+        "auth_source": "storage_state",
+        "storage_state_path": "/tmp/auth.json",
+        "user_data_dir": None,
+        "session_validation_status": "valid",
+        "startup_timing_ms": {"flow_lookup": 10, "auth_resolve": 5, "auth_validate": 3, "db_persist": 0, "total_launch": 0},
+    }
+
+    await sqlite.create_run_with_initial_events(
+        run_id=run_id,
+        app_url="https://example.com",
+        profile_name="prod",
+        flow_ids=["flow-1", "flow-2"],
+        headless=True,
+        artifacts_dir="/tmp/artifacts",
+        run_mode="hybrid",
+        status="queued",
+        run_queued_payload=queued_payload,
+        auth_context_payload=auth_payload,
+    )
+
+    run = await sqlite.get_run(run_id)
+    events = await sqlite.list_run_health_events(run_id)
+    assert run is not None
+    assert run["status"] == "queued"
+    event_types = [event["event_type"] for event in events]
+    assert "run_queued" in event_types
+    assert "auth_context_resolved" in event_types
+
+
+@pytest.mark.asyncio
 async def test_list_runs():
     run_id = uuid.uuid4().hex
     await sqlite.create_run(run_id, "https://example.com", None, [], True, "/tmp/a", "hybrid")

@@ -113,30 +113,31 @@ async def test_risk_analytics_includes_internal_validation_signals():
 
     with patch("blop.storage.sqlite.list_runs", new_callable=AsyncMock, return_value=runs):
         with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=[]):
-            with patch(
-                "blop.storage.sqlite.list_telemetry_signals",
-                new_callable=AsyncMock,
-                return_value=[
-                    {
-                        "signal_id": "sig-1",
-                        "app_url": "https://example.com",
-                        "source": "custom",
-                        "ts": "2026-03-19T10:00:00Z",
-                        "signal_type": "custom",
-                        "journey_key": None,
-                        "route": None,
-                        "value": 1.0,
-                        "unit": "count",
-                        "tags": {
-                            "surface": "validate",
-                            "bucket": "network_transient_infra",
-                            "status": "warning",
-                            "reason_code": "app_url_reachable",
-                        },
-                    }
-                ],
-            ):
-                out = await results.get_risk_analytics(limit_runs=30)
+            with patch("blop.storage.sqlite.list_risk_calibration", new_callable=AsyncMock, return_value=[]):
+                with patch(
+                    "blop.storage.sqlite.list_telemetry_signals",
+                    new_callable=AsyncMock,
+                    return_value=[
+                        {
+                            "signal_id": "sig-1",
+                            "app_url": "https://example.com",
+                            "source": "custom",
+                            "ts": "2026-03-19T10:00:00Z",
+                            "signal_type": "custom",
+                            "journey_key": None,
+                            "route": None,
+                            "value": 1.0,
+                            "unit": "count",
+                            "tags": {
+                                "surface": "validate",
+                                "bucket": "network_transient_infra",
+                                "status": "warning",
+                                "reason_code": "app_url_reachable",
+                            },
+                        }
+                    ],
+                ):
+                    out = await results.get_risk_analytics(limit_runs=30)
 
     assert out["stability_buckets"]["network_transient_infra"]["count"] == 1
     assert out["surface_bucket_breakdown"]["validate"]["network_transient_infra"] == 1
