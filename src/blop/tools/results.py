@@ -7,6 +7,13 @@ from urllib.parse import quote
 from blop.engine.context_graph import get_context_graph_summary, get_next_checks_for_release_scope
 from blop.reporting import results as reporting
 from blop.schemas import FailureCase
+from blop.stability import (
+    build_bucket_measurement_summary,
+    build_stability_gate_summary,
+    classify_case_stability,
+    classify_report_stability,
+    describe_flow_staleness,
+)
 from blop.storage import sqlite
 
 
@@ -76,6 +83,63 @@ async def _build_auth_provenance(run: dict, events: list[dict]) -> dict:
     return _apply_event_payloads(provenance)
 
 
+async def _annotate_case_flow_staleness(cases: list[dict]) -> list[dict]:
+    for case in cases:
+        flow_id = case.get("flow_id")
+        if not flow_id:
+            continue
+        try:
+            flow = await sqlite.get_flow(flow_id)
+        except Exception:
+            flow = None
+        created_at = getattr(flow, "created_at", None) if flow else None
+        case["flow_recorded_at"] = created_at
+        case["flow_staleness"] = describe_flow_staleness(created_at)
+    return cases
+
+
+def _annotate_stability_fields(report: dict) -> dict:
+    auth_provenance = report.get("auth_provenance", {}) or {}
+    case_by_id: dict[str, dict] = {}
+    bucket_counts: dict[str, int] = {}
+    blocker_bucket_counts: dict[str, int] = {}
+    measured_failures = 0
+    for collection_name in ("cases", "failed_cases"):
+        updated: list[dict] = []
+        for case in report.get(collection_name, []) or []:
+            stability = classify_case_stability(case, auth_provenance=auth_provenance)
+            merged = {**case, **stability}
+            if merged.get("status") in ("fail", "error", "blocked"):
+                measured_failures += 1
+                bucket = merged.get("stability_bucket")
+                if bucket:
+                    bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+                    if merged.get("severity") == "blocker":
+                        blocker_bucket_counts[bucket] = blocker_bucket_counts.get(bucket, 0) + 1
+            case_id = merged.get("case_id")
+            if case_id:
+                case_by_id[case_id] = merged
+            updated.append(merged)
+        report[collection_name] = updated
+    if report.get("failed_cases"):
+        report["cases"] = [
+            case_by_id.get(case.get("case_id"), case)
+            for case in report.get("cases", []) or []
+        ]
+
+    top_level = classify_report_stability(report)
+    report.update(top_level)
+    if top_level["stability_bucket"] == "unknown_unclassified":
+        report["unknown_classification_gaps"] = top_level.get("unknown_classification_gaps", [])
+    report["stability_gate_summary"] = build_stability_gate_summary(report)
+    report["stability_measurement"] = build_bucket_measurement_summary(
+        bucket_counts,
+        blocker_bucket_counts=blocker_bucket_counts,
+        total_failures=measured_failures,
+    )
+    return report
+
+
 def _waiting_auth_message(auth_provenance: dict, profile_name: str | None) -> str:
     session_status = auth_provenance.get("session_validation_status")
     name = profile_name or auth_provenance.get("profile_name") or "the selected profile"
@@ -115,6 +179,25 @@ def _annotate_staleness(rec: dict, completed_at: str | None, run_status: str) ->
             "Re-run for a fresh recommendation."
         )
     return rec
+
+
+def _build_stale_flow_guidance(report: dict) -> str | None:
+    failed_cases = report.get("failed_cases", []) or []
+    cases = failed_cases or (report.get("cases", []) or [])
+    stale_cases = [
+        case for case in cases
+        if isinstance(case, dict) and (case.get("flow_staleness", {}) or {}).get("stale")
+    ]
+    if not stale_cases:
+        return None
+    journey_names = [case.get("flow_name", "") for case in stale_cases if case.get("flow_name")]
+    if journey_names:
+        joined = ", ".join(journey_names[:2])
+        suffix = " and other stale recordings" if len(journey_names) > 2 else ""
+        return (
+            f"Refresh the stale recording for {joined}{suffix}, then re-run replay to confirm whether the failure is real."
+        )
+    return "Refresh stale recorded flows before trusting replay failures."
 
 
 async def get_test_results(run_id: str) -> dict:
@@ -212,6 +295,30 @@ async def get_test_results(run_id: str) -> dict:
     report["evidence_summary"] = reporting.build_evidence_summary(report)
     report["coverage_summary"] = reporting.build_coverage_summary(report)
     report["evidence_quality"] = reporting.build_evidence_quality(report)
+    report["cases"] = await _annotate_case_flow_staleness(report.get("cases", []) or [])
+    report["failed_cases"] = await _annotate_case_flow_staleness(report.get("failed_cases", []) or [])
+    report = _annotate_stability_fields(report)
+    report["replay_trust_summary"] = reporting.build_replay_trust_summary(report)
+    report["failure_classification"] = reporting.describe_failure_classification(report)
+    report["failure_links"] = reporting.build_failure_links(report)
+    if report.get("bucket_recovery_recipe"):
+        report["bucket_next_action"] = report["bucket_recovery_recipe"][0]
+    if report.get("stability_bucket") == "unknown_unclassified":
+        unknown_gaps = report.get("unknown_classification_gaps", []) or []
+        if unknown_gaps:
+            report["unknown_next_observation"] = unknown_gaps[0]
+    stale_guidance = _build_stale_flow_guidance(report)
+    if stale_guidance:
+        report["stale_flow_guidance"] = stale_guidance
+        if report["top_failure_mode"] == "automation_fragility":
+            report["recommended_next_action"] = stale_guidance
+            report["workflow_hint"] = stale_guidance
+    elif report["replay_trust_summary"]["review_required_case_count"] and report["top_failure_mode"] == "automation_fragility":
+        report["recommended_next_action"] = report["replay_trust_summary"]["summary"]
+        report["workflow_hint"] = report["replay_trust_summary"]["summary"]
+    elif report.get("bucket_next_action") and report.get("status") in ("failed", "completed", "waiting_auth"):
+        report["recommended_next_action"] = report["bucket_next_action"]
+        report["workflow_hint"] = report["bucket_next_action"]
 
     return report
 
@@ -375,6 +482,11 @@ async def get_risk_analytics(limit_runs: int = 30) -> dict:
         "support": {"total": 0, "failed": 0},
         "other": {"total": 0, "failed": 0},
     }
+    stability_buckets: dict[str, dict[str, object]] = {}
+    per_surface_buckets: dict[str, dict[str, int]] = {}
+    blocker_bucket_counts: dict[str, int] = {}
+    unknown_count = 0
+    total_failures = 0
 
     for run_id in run_ids:
         cases = await sqlite.list_cases_for_run(run_id)
@@ -393,6 +505,49 @@ async def get_risk_analytics(limit_runs: int = 30) -> dict:
                 # Transition proxy: flow_name + failure step index.
                 transition_key = f"{case.flow_name}:transition_to_step_{case.step_failure_index}"
                 failing_transitions[transition_key] = failing_transitions.get(transition_key, 0) + 1
+
+            if case.status in ("fail", "error", "blocked"):
+                flow = await sqlite.get_flow(case.flow_id)
+                case_payload = case.model_dump()
+                case_payload["flow_staleness"] = describe_flow_staleness(getattr(flow, "created_at", None) if flow else None)
+                stability = classify_case_stability(case_payload)
+                bucket = stability["stability_bucket"]
+                bucket_record = stability_buckets.setdefault(
+                    bucket,
+                    {"count": 0, "rate": None, "top_journeys": []},
+                )
+                bucket_record["count"] = int(bucket_record["count"]) + 1
+                top_journeys = list(bucket_record["top_journeys"])
+                if case.flow_name and case.flow_name not in top_journeys:
+                    top_journeys.append(case.flow_name)
+                bucket_record["top_journeys"] = top_journeys[:5]
+                if case.severity == "blocker":
+                    blocker_bucket_counts[bucket] = blocker_bucket_counts.get(bucket, 0) + 1
+                total_failures += 1
+                if bucket == "unknown_unclassified":
+                    unknown_count += 1
+
+    for app_url in {run.get("app_url") for run in runs if run.get("app_url")}:
+        if not app_url:
+            continue
+        signals = await sqlite.list_telemetry_signals(app_url, limit=500)
+        for signal in signals:
+            tags = signal.get("tags", {}) or {}
+            bucket = tags.get("bucket")
+            surface = tags.get("surface")
+            status = tags.get("status")
+            if not bucket or status == "pass":
+                continue
+            bucket_record = stability_buckets.setdefault(
+                bucket,
+                {"count": 0, "rate": None, "top_journeys": []},
+            )
+            bucket_record["count"] = int(bucket_record["count"]) + 1
+            per_surface = per_surface_buckets.setdefault(surface or "unknown", {})
+            per_surface[bucket] = per_surface.get(bucket, 0) + 1
+            total_failures += 1
+            if bucket == "unknown_unclassified":
+                unknown_count += 1
 
     flaky_leaderboard = sorted(
         [{"key": k, "count": v} for k, v in flaky_steps.items()],
@@ -433,12 +588,22 @@ async def get_risk_analytics(limit_runs: int = 30) -> dict:
             for k, v in calibration_totals.items()
         },
     }
+    for bucket, stats in stability_buckets.items():
+        stats["rate"] = round(int(stats["count"]) / total_failures, 4) if total_failures else None
 
     return {
         "analyzed_runs": len(run_ids),
         "flaky_steps_leaderboard": flaky_leaderboard,
         "failing_transitions": transition_leaderboard,
         "business_risk": business_risk_summary,
+        "stability_buckets": stability_buckets,
+        "unknown_unclassified_rate": round(unknown_count / total_failures, 4) if total_failures else None,
+        "stability_measurement": build_bucket_measurement_summary(
+            {bucket: int(stats["count"]) for bucket, stats in stability_buckets.items()},
+            blocker_bucket_counts=blocker_bucket_counts,
+            total_failures=total_failures,
+        ),
+        "surface_bucket_breakdown": per_surface_buckets,
         "calibration_summary": calibration_summary,
         "related_v2_resources": [
             "blop://v2/contracts/tools",

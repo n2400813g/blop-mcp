@@ -19,6 +19,8 @@ Compatible MCP clients: **Cursor**, **Claude Code**, and other clients that supp
 - [Configure and connect](#configure-and-connect-blop)
 - [Production setup](#production-setup-local-managed-stdio)
 - [5-minute quickstart](#your-first-mcp-native-run-in-5-minutes)
+- [Auth session guidance](#auth-session-guidance)
+- [Production Client Quickstarts](#production-client-quickstarts)
 - [Business-context QA scenarios](#real-world-testing-scenarios-for-b2b-saas)
 - [MCP resources + v2 surface](#mcp-resources--v2-surface-summary)
 - [Troubleshooting](#troubleshooting)
@@ -256,7 +258,39 @@ That is the canonical MVP loop: validate, discover, record, replay, and triage.
 4. **Execute:** run `run_release_check` in `replay` mode against recorded flows.
 5. **Triage:** use `triage_release_blocker` plus `blop://release/*` resources to turn failures into decisions.
 
-`targeted` mode is still available for one-off exploratory checks, but it is a shortcut, not the golden path for release gating.
+`targeted` mode is still available for one-off exploratory checks, but it is a shortcut, not the golden path for release gating. For larger public sites, you can raise its one-shot budget with `BLOP_TARGETED_MAX_STEPS` (default `40`).
+
+## Auth session guidance
+
+For protected apps, the most reliable path is:
+
+1. Capture auth with `capture_auth_session(...)`
+2. Run `validate_release_setup(app_url="https://your-app.com", profile_name="your_profile")`
+3. Only then launch `run_release_check(..., mode="replay")`
+
+If a run returns `waiting_auth` or validation says the session is expired:
+
+- Re-run `capture_auth_session(...)` to refresh the saved session.
+- Re-run `validate_release_setup(...)` to confirm the session lands inside the app.
+- Retry the replay only after validation is clean.
+
+If failure output points to stale recordings, refresh the affected journey with `record_test_flow(...)` before trusting replay failures as real regressions.
+
+## Production Client Quickstarts
+
+Canonical MCP-client setup guides:
+
+- Cursor: [`docs/quickstart_cursor.md`](docs/quickstart_cursor.md)
+- Claude Code: [`docs/quickstart_claude_code.md`](docs/quickstart_claude_code.md)
+- Codex-compatible clients: [`docs/quickstart_codex.md`](docs/quickstart_codex.md)
+
+Operational references:
+
+- Production baseline: [`docs/production_setup.md`](docs/production_setup.md)
+- Operator failure guide: [`docs/operator_failures.md`](docs/operator_failures.md)
+- Stability measurement lives in existing outputs: `get_test_results(...)` includes per-run bucket summaries and `get_risk_analytics(...)` aggregates top buckets, blocker buckets, and highest-pain instability classes.
+- Compatibility and deprecation policy: [`docs/compatibility_policy.md`](docs/compatibility_policy.md)
+- Release notes template: [`docs/release_notes_template.md`](docs/release_notes_template.md)
 
 ### Release Readiness Brief (recommended output)
 
@@ -732,9 +766,11 @@ run_regression_test(
 
 | Mode | What it does | When to use |
 |------|-------------|-------------|
-| `hybrid` *(default)* | Tries saved steps first; if a selector breaks, AI repairs that single step | Best for most cases |
+| `hybrid` *(default)* | Tries saved steps first; if a selector breaks, AI repairs that single step | Best for most replay runs |
 | `strict_steps` | Follows saved steps exactly — fails immediately if anything doesn't match | CI/CD where you want strict enforcement |
-| `goal_fallback` | Ignores saved steps, replays using only the original goal description | When the UI has changed significantly |
+| `goal_fallback` | Ignores saved steps, replays using only the original goal description | Drift recovery only, not the normal release gate |
+
+For release gating, prefer `run_release_check(..., mode="replay")` with recorded `flow_ids`. `goal_fallback` is useful for recovery and diagnosis when a recorded flow has drifted too far, but it should not be the default ship/no-ship path.
 
 ---
 
@@ -784,6 +820,11 @@ get_test_results("your-run-id-here")
 - `strict_steps` — selector matched, step ran exactly as recorded
 - `hybrid_repair` — original selector broke, AI found the element another way
 - `goal_fallback` — step-by-step replay failed entirely, fell back to full agent replay
+
+Look for replay trust cues in the response:
+- `replay_trust_summary` tells you whether replay stayed on the golden path or needs manual review.
+- `failure_classification` explains whether the failure looks like auth, drift, infra, or product.
+- `stale_flow_guidance` appears when an old recording should be refreshed before trusting the failure.
 
 ---
 

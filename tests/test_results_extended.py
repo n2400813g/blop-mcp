@@ -67,6 +67,7 @@ async def test_risk_analytics_with_cases():
         flow_id="f3",
         flow_name="billing",
         status="error",
+        failure_class="env_issue",
         business_criticality="revenue",
         step_failure_index=1,
     )
@@ -81,7 +82,9 @@ async def test_risk_analytics_with_cases():
             new_callable=AsyncMock,
             side_effect=list_cases_side_effect,
         ):
-            out = await results.get_risk_analytics(limit_runs=30)
+            with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=None):
+                with patch("blop.storage.sqlite.list_telemetry_signals", new_callable=AsyncMock, return_value=[]):
+                    out = await results.get_risk_analytics(limit_runs=30)
 
     assert out["analyzed_runs"] == 2
     assert out["business_risk"]["revenue"]["total"] == 2
@@ -90,6 +93,8 @@ async def test_risk_analytics_with_cases():
     assert out["business_risk"]["activation"]["failed"] == 0
     assert "flaky_steps_leaderboard" in out
     assert "failing_transitions" in out
+    assert out["stability_buckets"]["unknown_unclassified"]["count"] == 1
+    assert out["stability_buckets"]["environment_runtime_misconfig"]["count"] == 1
 
 
 @pytest.mark.asyncio
@@ -100,6 +105,41 @@ async def test_risk_analytics_empty():
     assert out["analyzed_runs"] == 0
     assert out["business_risk"]["revenue"]["total"] == 0
     assert out["business_risk"]["revenue"]["failed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_risk_analytics_includes_internal_validation_signals():
+    runs = [{"run_id": "run1", "app_url": "https://example.com"}]
+
+    with patch("blop.storage.sqlite.list_runs", new_callable=AsyncMock, return_value=runs):
+        with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=[]):
+            with patch(
+                "blop.storage.sqlite.list_telemetry_signals",
+                new_callable=AsyncMock,
+                return_value=[
+                    {
+                        "signal_id": "sig-1",
+                        "app_url": "https://example.com",
+                        "source": "custom",
+                        "ts": "2026-03-19T10:00:00Z",
+                        "signal_type": "custom",
+                        "journey_key": None,
+                        "route": None,
+                        "value": 1.0,
+                        "unit": "count",
+                        "tags": {
+                            "surface": "validate",
+                            "bucket": "network_transient_infra",
+                            "status": "warning",
+                            "reason_code": "app_url_reachable",
+                        },
+                    }
+                ],
+            ):
+                out = await results.get_risk_analytics(limit_runs=30)
+
+    assert out["stability_buckets"]["network_transient_infra"]["count"] == 1
+    assert out["surface_bucket_breakdown"]["validate"]["network_transient_infra"] == 1
 
 
 @pytest.mark.asyncio
@@ -130,6 +170,8 @@ async def test_get_test_results_adds_summary_first_fields():
             screenshots=["/tmp/runs/run-summary/screenshots/1.png"],
             trace_path="/tmp/runs/run-summary/traces/case-1.zip",
             failure_class="test_fragility",
+            healing_decision="propose_patch",
+            repair_confidence=0.62,
         )
     ]
     auth_profile = AuthProfile(
@@ -171,7 +213,8 @@ async def test_get_test_results_adds_summary_first_fields():
         with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=cases):
             with patch("blop.storage.sqlite.list_run_health_events", new_callable=AsyncMock, return_value=events):
                 with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=auth_profile):
-                    out = await results.get_test_results("run-summary")
+                    with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=None):
+                        out = await results.get_test_results("run-summary")
 
     assert out["decision_summary"]["decision"] == "BLOCK"
     assert out["decision_summary"]["top_blocker_journeys"] == ["checkout"]
@@ -191,8 +234,69 @@ async def test_get_test_results_adds_summary_first_fields():
     assert out["top_failure_mode"] == "automation_fragility"
     assert len(out["recommended_remediation_steps"]) == 3
     assert out["is_terminal"] is True
+    assert out["failure_classification"]["primary"] == "automation_fragility"
+    assert out["failure_links"]["artifacts"] == [
+        "/tmp/runs/run-summary/screenshots/1.png",
+        "/tmp/runs/run-summary/traces/case-1.zip",
+    ]
+    assert out["failure_links"]["triage_hint"] == "triage_release_blocker(run_id='run-summary')"
+    assert out["replay_trust_summary"]["review_required_case_count"] == 1
+    assert out["replay_trust_summary"]["golden_path_ready"] is False
+    assert out["stability_bucket"] == "selector_healing_failure"
+    assert out["bucket_confidence"] == "high"
+    assert out["bucket_next_action"] == "Inspect the failed step and repair evidence."
+    assert out["failed_cases"][0]["stability_bucket"] == "selector_healing_failure"
+    assert out["stability_gate_summary"]["review_required_buckets"] == ["selector_healing_failure"]
+    assert out["stability_measurement"]["top_bucket_counts"][0]["bucket"] == "selector_healing_failure"
+    assert out["stability_measurement"]["most_common_blocker_buckets"][0]["bucket"] == "selector_healing_failure"
     assert "cases" in out
     assert "failed_cases" in out
+
+
+@pytest.mark.asyncio
+async def test_get_test_results_stale_flow_guidance_prioritizes_refresh():
+    run = {
+        "run_id": "run-stale",
+        "status": "failed",
+        "started_at": "2026-03-19T10:00:00Z",
+        "completed_at": "2026-03-19T10:02:00Z",
+        "artifacts_dir": "/tmp/runs/run-stale",
+        "run_mode": "hybrid",
+        "app_url": "https://example.com",
+        "next_actions": ["Inspect top failed case"],
+        "profile_name": None,
+        "headless": True,
+    }
+    cases = [
+        FailureCase(
+            case_id="case-stale-1",
+            run_id="run-stale",
+            flow_id="flow-stale",
+            flow_name="checkout",
+            status="fail",
+            severity="high",
+            business_criticality="revenue",
+            screenshots=["/tmp/runs/run-stale/screenshots/1.png"],
+            trace_path="/tmp/runs/run-stale/traces/case-stale-1.zip",
+            failure_class="test_fragility",
+        )
+    ]
+    events: list[dict] = []
+    stale_flow = type("FlowStub", (), {"created_at": "2026-02-20T10:00:00Z"})()
+
+    with patch("blop.storage.sqlite.get_run", new_callable=AsyncMock, return_value=run):
+        with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=cases):
+            with patch("blop.storage.sqlite.list_run_health_events", new_callable=AsyncMock, return_value=events):
+                with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=None):
+                    with patch.dict("os.environ", {"BLOP_FLOW_STALE_DAYS": "14"}):
+                        with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=stale_flow):
+                            out = await results.get_test_results("run-stale")
+
+    assert out["stale_flow_guidance"].startswith("Refresh the stale recording")
+    assert out["recommended_next_action"] == out["stale_flow_guidance"]
+    assert out["workflow_hint"] == out["stale_flow_guidance"]
+    assert out["stability_bucket"] == "stale_flow_drift"
+    assert out["failed_cases"][0]["stability_bucket"] == "stale_flow_drift"
 
 
 @pytest.mark.asyncio
@@ -295,7 +399,8 @@ async def test_get_test_results_success_report_includes_coverage_proof():
         with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=cases):
             with patch("blop.storage.sqlite.list_run_health_events", new_callable=AsyncMock, return_value=events):
                 with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=auth_profile):
-                    out = await results.get_test_results("run-pass")
+                    with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=None):
+                        out = await results.get_test_results("run-pass")
 
     assert out["decision_summary"]["decision"] == "SHIP"
     assert out["decision_summary"]["verified_journeys"] == [
@@ -318,6 +423,7 @@ async def test_get_test_results_success_report_includes_coverage_proof():
     assert out["auth_provenance"]["landed_authenticated"] is True
     assert out["run_environment"]["headless"] is False
     assert out["top_failure_mode"] == "unknown"
+    assert out["stability_bucket"] is None
 
 
 @pytest.mark.asyncio
@@ -370,7 +476,8 @@ async def test_get_test_results_downgrades_drifted_critical_passes():
     with patch("blop.storage.sqlite.get_run", new_callable=AsyncMock, return_value=run):
         with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=cases):
             with patch("blop.storage.sqlite.list_run_health_events", new_callable=AsyncMock, return_value=[]):
-                out = await results.get_test_results("run-drift")
+                with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=None):
+                    out = await results.get_test_results("run-drift")
 
     assert out["decision_summary"]["decision"] == "INVESTIGATE"
     assert out["decision_summary"]["critical_drifted_passes"] == 1
@@ -410,7 +517,8 @@ async def test_get_test_results_waiting_auth_uses_auth_status_guidance():
         with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=[]):
             with patch("blop.storage.sqlite.list_run_health_events", new_callable=AsyncMock, return_value=events):
                 with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=None):
-                    out = await results.get_test_results("run-auth")
+                    with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=None):
+                        out = await results.get_test_results("run-auth")
 
     assert out["status"] == "waiting_auth"
     assert out["top_failure_mode"] == "waiting_auth"
@@ -419,3 +527,83 @@ async def test_get_test_results_waiting_auth_uses_auth_status_guidance():
     assert "capture_auth_session" in " ".join(out["recommended_remediation_steps"])
     assert out["drift_summary"]["drift_detected"] is True
     assert out["drift_summary"]["plan_fidelity"] == "low"
+    assert out["stability_bucket"] == "auth_session_failure"
+    assert out["bucket_confidence"] == "high"
+    assert out["stability_gate_summary"]["blocking_buckets"] == ["auth_session_failure"]
+
+
+@pytest.mark.asyncio
+async def test_get_test_results_unknown_bucket_includes_classification_gaps():
+    run = {
+        "run_id": "run-unknown",
+        "status": "failed",
+        "started_at": "2026-03-19T10:00:00Z",
+        "completed_at": "2026-03-19T10:02:00Z",
+        "artifacts_dir": "/tmp/runs/run-unknown",
+        "run_mode": "hybrid",
+        "app_url": "https://example.com",
+        "next_actions": [],
+        "profile_name": None,
+        "headless": True,
+    }
+    cases = [
+        FailureCase(
+            case_id="case-unknown-1",
+            run_id="run-unknown",
+            flow_id="flow-unknown",
+            flow_name="checkout",
+            status="fail",
+            severity="high",
+            business_criticality="revenue",
+        )
+    ]
+
+    with patch("blop.storage.sqlite.get_run", new_callable=AsyncMock, return_value=run):
+        with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=cases):
+            with patch("blop.storage.sqlite.list_run_health_events", new_callable=AsyncMock, return_value=[]):
+                with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=None):
+                    with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=None):
+                        out = await results.get_test_results("run-unknown")
+
+    assert out["stability_bucket"] == "unknown_unclassified"
+    assert out["bucket_confidence"] == "low"
+    assert out["unknown_classification_gaps"]
+    assert out["unknown_next_observation"] == out["unknown_classification_gaps"][0]
+    assert out["failed_cases"][0]["unknown_classification_gaps"]
+
+
+@pytest.mark.asyncio
+async def test_risk_analytics_returns_bucket_measurement_summary():
+    runs = [{"run_id": "run-1", "app_url": "https://example.com"}]
+    cases = [
+        FailureCase(
+            run_id="run-1",
+            flow_id="flow-auth",
+            flow_name="checkout",
+            status="fail",
+            severity="blocker",
+            failure_class="auth_failure",
+            business_criticality="revenue",
+        ),
+        FailureCase(
+            run_id="run-1",
+            flow_id="flow-drift",
+            flow_name="settings",
+            status="fail",
+            severity="high",
+            failure_class="test_fragility",
+            healing_decision="propose_patch",
+            business_criticality="support",
+        ),
+    ]
+
+    with patch("blop.storage.sqlite.list_runs", new_callable=AsyncMock, return_value=runs):
+        with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=cases):
+            with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=None):
+                with patch("blop.storage.sqlite.list_telemetry_signals", new_callable=AsyncMock, return_value=[]):
+                    with patch("blop.storage.sqlite.list_risk_calibration", new_callable=AsyncMock, return_value=[]):
+                        out = await results.get_risk_analytics(limit_runs=30)
+
+    assert out["stability_measurement"]["top_bucket_counts"][0]["bucket"] == "auth_session_failure"
+    assert out["stability_measurement"]["most_common_blocker_buckets"][0]["bucket"] == "auth_session_failure"
+    assert out["stability_measurement"]["highest_pain_buckets"][0]["pain_score"] >= 1
