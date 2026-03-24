@@ -1267,6 +1267,7 @@ async def debug_test_case(run_id: str, case_id: str) -> dict:
 async def validate_setup(
     app_url: Optional[str] = None,
     profile_name: Optional[str] = None,
+    check_mobile: bool = False,
 ) -> dict:
     """[DEPRECATED — use validate_release_setup] Check all preconditions before running tests.
 
@@ -1276,6 +1277,7 @@ async def validate_setup(
     Args:
         app_url: Optional URL to check reachability
         profile_name: Optional auth profile name to validate
+        check_mobile: If True, also checks Appium server reachability for mobile testing
 
     Returns:
         dict with status ("ready" | "warnings" | "blocked"), checks, blockers, warnings
@@ -1284,6 +1286,7 @@ async def validate_setup(
         return await validate.validate_setup(
             app_url=app_url,
             profile_name=profile_name,
+            check_mobile=check_mobile,
         )
     except Exception as e:
         return {"error": str(e)}

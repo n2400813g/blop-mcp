@@ -111,7 +111,7 @@ def classify_case_stability(
         bucket = "product_regression"
         confidence = "high"
         evidence.append("failure_class:product_bug")
-    elif failure_class == "env_issue":
+    elif failure_class in {"env_issue", "install_failure"}:
         if _looks_like_install_issue(failure_reason_codes, network_errors, console_errors):
             bucket = "install_or_upgrade_failure"
             confidence = "medium"
@@ -123,7 +123,19 @@ def classify_case_stability(
         else:
             bucket = "environment_runtime_misconfig"
             confidence = "medium"
-            evidence.append("failure_class:env_issue")
+            evidence.append(f"failure_class:{failure_class}")
+    elif failure_class == "startup_failure":
+        bucket = "install_or_upgrade_failure"
+        confidence = "medium"
+        evidence.append("failure_class:startup_failure")
+    elif failure_class == "navigation_crash":
+        bucket = "product_regression"
+        confidence = "medium"
+        evidence.append("failure_class:navigation_crash")
+    elif _looks_like_install_issue(failure_reason_codes, network_errors, console_errors):
+        bucket = "install_or_upgrade_failure"
+        confidence = "medium"
+        evidence.append("signals:install_issue")
     elif _looks_like_network_issue(failure_reason_codes, network_errors, console_errors):
         bucket = "network_transient_infra"
         confidence = "medium"
@@ -132,6 +144,10 @@ def classify_case_stability(
         bucket = "selector_healing_failure"
         confidence = "medium"
         evidence.append("drift:plan_drift")
+    elif case.get("status") in ("fail", "error"):
+        bucket = "product_regression"
+        confidence = "low"
+        evidence.append("status:fail_no_other_signals")
 
     if healing_decision == "auto_heal" and bucket == "selector_healing_failure":
         evidence.append("healing:auto_heal")

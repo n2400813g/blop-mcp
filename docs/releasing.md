@@ -15,12 +15,53 @@ Before cutting a release:
 
 ## Stability exit criteria
 
-Use these release gates before shipping:
+Use this checklist before shipping. All five items must be satisfied or explicitly waived.
 
-- `install_or_upgrade_failure` in smoke coverage is a release blocker.
-- `auth_session_failure` in any release-gating journey is a release blocker.
-- `unknown_unclassified` in release smoke is a release blocker unless explicitly waived.
-- `stale_flow_drift` and `selector_healing_failure` mean replay trust is reduced; refresh or re-record before trusting a green release decision.
+### 1. Stability gate status — no blocking buckets
+
+Run `get_risk_analytics()` and confirm:
+- `stability_buckets` contains no `install_or_upgrade_failure` entries (or the count is zero).
+- `stability_buckets` contains no `unknown_unclassified` entries, **or** `unknown_unclassified_rate` is below `0.20` (20 % of total failures).
+- `auth_session_failure` is not present in release-gating journeys.
+
+A `stability_gate_summary.release_blocked_by_stability = true` result from any `run_release_check(...)` is a hard block.
+
+### 2. Smoke scenario status — all scenarios green
+
+The following test scenarios must pass (no live browser required):
+
+```bash
+uv run pytest tests/test_stability_validation.py -v
+# Covers: stale_flow_drift, auth_session_failure, selector_healing_failure,
+#          environment_runtime_misconfig, install_or_upgrade_failure, network_transient_infra
+#          release gate summary blocking logic
+
+uv run pytest tests/test_release_policy.py -v
+# Covers: ReleasePolicy gate evaluation, SHIP/INVESTIGATE/BLOCK decisions,
+#          stability bucket integration, SQLite policy persistence
+
+uv run pytest tests/test_sqlite_migrations.py -v
+# Covers: migration idempotency, fresh install entrypoint resolution,
+#          npm wizard shebang, non-duplicate migration error propagation
+```
+
+### 3. Policy gate status — no BLOCK from release policy
+
+For apps with recorded flows, `run_release_check(app_url=...)` must return `decision` of `SHIP` or `INVESTIGATE`, not `BLOCK`, for revenue and activation flows. A `BLOCK` decision must be resolved before shipping.
+
+### 4. Unknown failure ratio — below 20 %
+
+`get_risk_analytics()` must return `unknown_unclassified_rate` ≤ `0.20`. If the ratio is above this threshold, inspect `unknown_classification_gaps` on the affected cases and re-run after adding missing evidence (trace, screenshots, failure_reason_codes).
+
+### 5. Auth session validity
+
+For any auth-dependent flows in the release scope, `validate_setup(app_url=..., profile_name=...)` must return `status: ready` (not `blocked`). A `waiting_auth` or `auth_session_failure` on a release-gating journey is a hard block.
+
+### Non-blocking review items
+
+These do not block release but must be logged and actioned in the next cycle:
+- `stale_flow_drift` — refresh the recording before trusting the green result.
+- `selector_healing_failure` — refresh or re-record before trusting replay output.
 
 ## Local build and smoke check
 

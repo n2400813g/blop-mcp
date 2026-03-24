@@ -106,7 +106,20 @@ async def record_test_flow(
     profile_name: Optional[str] = None,
     command: Optional[str] = None,
     business_criticality: str = "other",
+    platform: str = "web",
+    mobile_target: Optional[dict] = None,
 ) -> dict:
+    # Route mobile flows to the mobile engine
+    if platform in ("ios", "android"):
+        return await _record_mobile_flow(
+            app_id=app_url,
+            flow_name=flow_name,
+            goal=goal,
+            business_criticality=business_criticality,
+            platform=platform,
+            mobile_target=mobile_target or {},
+        )
+
     url_err = validate_app_url(app_url)
     if url_err:
         return {"error": url_err}
@@ -273,3 +286,63 @@ async def record_test_flow(
             f"Next: run_release_check(app_url='{app_url}', flow_ids=['{flow.flow_id}'], mode='replay')"
         )
     return result
+
+
+async def _record_mobile_flow(
+    *,
+    app_id: str,
+    flow_name: str,
+    goal: str,
+    business_criticality: str,
+    platform: str,
+    mobile_target: dict,
+) -> dict:
+    """Route to the mobile recording engine."""
+    import uuid
+    from blop.schemas import MobileDeviceTarget
+
+    if not app_id or not app_id.strip():
+        return {"error": "app_url (app_id) is required for mobile flows (use bundle ID or package name)"}
+    if not flow_name or not flow_name.strip():
+        return {"error": "flow_name is required"}
+    if not goal or not goal.strip():
+        return {"error": "goal is required"}
+
+    try:
+        target = MobileDeviceTarget(platform=platform, app_id=app_id, **mobile_target)
+    except Exception as exc:
+        return {"error": f"Invalid mobile_target: {exc}"}
+
+    run_id = uuid.uuid4().hex
+
+    try:
+        from blop.engine.mobile.recording import record_mobile_flow
+        flow = await record_mobile_flow(
+            app_id=app_id,
+            platform=platform,
+            goal=goal,
+            mobile_target=target,
+            run_id=run_id,
+            flow_name=flow_name,
+            business_criticality=business_criticality,
+        )
+    except RuntimeError as exc:
+        return {"error": str(exc)}
+    except Exception as exc:
+        return {"error": f"Mobile recording failed: {exc}"}
+
+    await sqlite.save_flow(flow)
+
+    return {
+        "flow_id": flow.flow_id,
+        "flow_name": flow_name,
+        "step_count": len(flow.steps),
+        "status": "recorded",
+        "platform": platform,
+        "app_id": app_id,
+        "artifacts_dir": file_store.artifacts_dir(flow.flow_id),
+        "workflow_hint": (
+            f"Mobile flow '{flow_name}' recorded on {platform} ({len(flow.steps)} steps). "
+            f"Next: run_regression_test(app_url='{app_id}', flow_ids=['{flow.flow_id}'], platform='{platform}')"
+        ),
+    }

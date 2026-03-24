@@ -93,7 +93,7 @@ async def test_risk_analytics_with_cases():
     assert out["business_risk"]["activation"]["failed"] == 0
     assert "flaky_steps_leaderboard" in out
     assert "failing_transitions" in out
-    assert out["stability_buckets"]["unknown_unclassified"]["count"] == 1
+    assert out["stability_buckets"]["product_regression"]["count"] == 1
     assert out["stability_buckets"]["environment_runtime_misconfig"]["count"] == 1
 
 
@@ -553,7 +553,7 @@ async def test_get_test_results_unknown_bucket_includes_classification_gaps():
             run_id="run-unknown",
             flow_id="flow-unknown",
             flow_name="checkout",
-            status="fail",
+            status="blocked",
             severity="high",
             business_criticality="revenue",
         )

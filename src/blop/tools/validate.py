@@ -163,6 +163,7 @@ async def _record_validation_observations(result: dict, app_url: str | None) -> 
 async def validate_setup(
     app_url: Optional[str] = None,
     profile_name: Optional[str] = None,
+    check_mobile: bool = False,
 ) -> dict:
     checks: list[dict] = []
     blockers: list[str] = []
@@ -336,6 +337,25 @@ async def validate_setup(
             checks.append({"name": "auth_profile", "passed": False, "message": f"Auth profile check failed: {exc}"})
             warnings.append(f"Auth profile validation error: {exc}")
 
+    # 6. Appium server reachability (mobile, optional)
+    if check_mobile:
+        try:
+            from blop.engine.mobile.driver import check_appium_reachable
+            appium_ok, appium_msg = await check_appium_reachable()
+            checks.append({"name": "appium_server", "passed": appium_ok, "message": appium_msg})
+            if not appium_ok:
+                warnings.append(
+                    f"Appium server not reachable: {appium_msg}. "
+                    "Start it with: appium (requires npm install -g appium)"
+                )
+        except ImportError:
+            checks.append({
+                "name": "appium_server",
+                "passed": False,
+                "message": "Mobile extra not installed — run: pip install blop-mcp[mobile]",
+            })
+            warnings.append("Mobile extra not installed. Run: pip install blop-mcp[mobile]")
+
     if blockers:
         status = "blocked"
     elif warnings:
@@ -382,7 +402,17 @@ async def validate_setup(
             suggested_next_steps.append(
                 "Get results: get_test_results(run_id='...')"
             )
-    elif status == "warnings":
+    # Mobile-specific guidance
+    if check_mobile:
+        appium_failed = any(not c.get("passed") for c in checks if c.get("name") == "appium_server")
+        if appium_failed:
+            if any("not installed" in w for w in warnings):
+                suggested_next_steps.insert(0, "Install mobile extra: pip install blop-mcp[mobile]")
+            else:
+                suggested_next_steps.insert(0, "Start Appium: appium (then re-run validate_setup(check_mobile=True))")
+                suggested_next_steps.insert(1, "See docs/mobile_setup.md for full mobile prerequisites")
+
+    if status == "warnings":
         auth_warning = any("auth" in w.lower() or "session" in w.lower() for w in warnings)
         if auth_warning:
             suggested_next_steps.append(

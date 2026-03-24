@@ -19,6 +19,14 @@ _REVENUE_ACTIVATION = {"revenue", "activation"}
 
 _SPA_TIMEOUT_KEYWORDS = ("timeout", "waiting for selector", "element not found", "no element matching")
 _SPA_GOAL_KEYWORDS = ("editor", "project", "workspace", "canvas", "dashboard", "open", "enter", "video")
+_DOM_FRAGILITY_KEYWORDS = (
+    "detached from document",
+    "element is detached",
+    "stale element reference",
+    "element no longer attached",
+    "mutation observer",
+    "node is detached",
+)
 
 
 def classify_failure_class(case: FailureCase) -> tuple[Optional[str], float]:
@@ -50,6 +58,9 @@ def classify_failure_class(case: FailureCase) -> tuple[Optional[str], float]:
         "spa_not_ready",
         "repair_rejected",
         "llm_quota_error",
+        "element_detached",
+        "stale_element",
+        "dom_mutation",
     }
     if reason_codes.intersection(fragility_codes):
         return "test_fragility", 0.81
@@ -60,6 +71,8 @@ def classify_failure_class(case: FailureCase) -> tuple[Optional[str], float]:
         *[r.lower() for r in case.repro_steps],
         *[e.lower() for e in case.console_errors[:5]],
     ])
+    if any(kw in error_text for kw in _DOM_FRAGILITY_KEYWORDS):
+        return "test_fragility", 0.80
     has_timeout_error = any(kw in error_text for kw in _SPA_TIMEOUT_KEYWORDS)
     has_spa_goal = any(kw in case.flow_name.lower() for kw in _SPA_GOAL_KEYWORDS)
     # Failure very early in a hybrid replay = navigation/loading issue, not product bug
