@@ -254,4 +254,4 @@ async def _execute_action(driver, action_dict: dict, platform: str) -> bool:
     except Exception:
         return False
 
-    return True
+    return False
