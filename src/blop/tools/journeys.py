@@ -86,6 +86,7 @@ async def discover_critical_journeys(
         "journey_count": len(journeys),
         "release_gating_count": len(gated),
         "recommended_flow_ids": recommended_flow_ids,
+        "crawl_diagnostics": result.get("crawl_diagnostics", {}),
         "id_contract": {
             "journey_id": "planning identifier only; do not pass to execution tools",
             "flow_id": "recorded flow identifier; pass to run_release_check(flow_ids=[...]) or triage_release_blocker(flow_id=...)",

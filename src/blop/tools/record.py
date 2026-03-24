@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from urllib.parse import urlparse
 from typing import Optional
 
 from blop.config import validate_app_url
@@ -8,10 +10,93 @@ from blop.engine.flow_builder import build_recorded_flow
 from blop.engine.planner import build_execution_plan, build_intent_contract
 from blop.engine import recording
 from blop.engine.logger import get_logger
+from blop.reporting.results import describe_flow_staleness
 from blop.schemas import RecordedFlowResult
 from blop.storage import sqlite, files as file_store
 
 _log = get_logger("tools.record")
+
+
+def _extract_goal_urls(goal: str) -> list[str]:
+    matches = re.findall(r"https?://[^\s'\"),]+", goal or "")
+    urls: list[str] = []
+    for match in matches:
+        cleaned = match.rstrip(".,;:")
+        if cleaned and cleaned not in urls:
+            urls.append(cleaned)
+    return urls
+
+
+def _select_entry_url(app_url: str, goal: str, steps) -> str:
+    goal_urls = _extract_goal_urls(goal)
+    app_host = (urlparse(app_url).netloc or "").lower()
+    for candidate in goal_urls:
+        host = (urlparse(candidate).netloc or "").lower()
+        if host and host == app_host:
+            return candidate
+    for step in steps:
+        if getattr(step, "action", None) != "navigate":
+            continue
+        candidate = getattr(step, "value", None) or getattr(step, "url_after", None)
+        if not candidate or candidate == app_url:
+            continue
+        host = (urlparse(candidate).netloc or "").lower()
+        if host and host == app_host:
+            return candidate
+    return app_url
+
+
+def _ensure_assertion_steps(steps, goal: str):
+    has_assert_step = any(getattr(step, "action", None) == "assert" for step in steps)
+    if has_assert_step:
+        return steps
+    from blop.schemas import FlowStep
+    from blop.engine.recording import _build_public_page_assertions
+
+    entry_url = _select_entry_url(
+        next((getattr(step, "value", None) for step in steps if getattr(step, "action", None) == "navigate"), None) or "",
+        goal,
+        steps,
+    )
+    synthesized = _build_public_page_assertions(
+        goal=goal,
+        current_url=entry_url,
+        page_title="",
+        heading_text=None,
+    )
+    next_step_id = max((getattr(step, "step_id", 0) for step in steps), default=-1) + 1
+    if synthesized:
+        for description, structured in synthesized:
+            steps.append(
+                FlowStep(
+                    step_id=next_step_id,
+                    action="assert",
+                    description=description,
+                    value=description,
+                    structured_assertion=structured,
+                )
+            )
+            next_step_id += 1
+        return steps
+
+    synthesized_assertion = f"Page shows expected content for: {goal}"
+    steps.append(
+        FlowStep(
+            step_id=next_step_id,
+            action="assert",
+            description=synthesized_assertion,
+            value=synthesized_assertion,
+        )
+    )
+    return steps
+
+
+async def _find_refresh_candidate(app_url: str, flow_name: str) -> dict | None:
+    existing = await sqlite.list_flows()
+    for flow in existing:
+        if flow.get("app_url") == app_url and flow.get("flow_name") == flow_name:
+            return flow
+    return None
 
 
 async def record_test_flow(
@@ -21,7 +106,20 @@ async def record_test_flow(
     profile_name: Optional[str] = None,
     command: Optional[str] = None,
     business_criticality: str = "other",
+    platform: str = "web",
+    mobile_target: Optional[dict] = None,
 ) -> dict:
+    # Route mobile flows to the mobile engine
+    if platform in ("ios", "android"):
+        return await _record_mobile_flow(
+            app_id=app_url,
+            flow_name=flow_name,
+            goal=goal,
+            business_criticality=business_criticality,
+            platform=platform,
+            mobile_target=mobile_target or {},
+        )
+
     url_err = validate_app_url(app_url)
     if url_err:
         return {"error": url_err}
@@ -65,6 +163,8 @@ async def record_test_flow(
     if storage_state is None:
         storage_state = await auth_engine.auto_storage_state_from_env()
 
+    refresh_candidate = await _find_refresh_candidate(app_url, flow_name)
+
     import uuid
     run_id = uuid.uuid4().hex
 
@@ -75,6 +175,8 @@ async def record_test_flow(
         headless=False,
         run_id=run_id,
     )
+    steps = _ensure_assertion_steps(steps, goal)
+    entry_url = _select_entry_url(app_url, goal, steps)
 
     # Collect assertion texts from assert steps
     assertions_json = [
@@ -124,7 +226,7 @@ async def record_test_flow(
     recording_drift: list[str] = []
     if execution_plan.target_surface == "editor" and not any("/editor" in (s.value or "").lower() for s in steps if s.action == "navigate"):
         recording_drift.append("surface_drift")
-    if execution_plan.goal_type != "exploration" and not assertions_json:
+    if intent_contract.goal_type != "exploration" and not assertions_json:
         recording_drift.append("assertion_drift")
     generic_only_steps = [
         s for s in steps
@@ -139,7 +241,7 @@ async def record_test_flow(
         goal=goal,
         steps=steps,
         assertions_json=assertions_json,
-        entry_url=app_url,
+        entry_url=entry_url,
         business_criticality=bc,
         spa_hints=spa_hints,
         intent_contract=intent_contract,
@@ -163,8 +265,84 @@ async def record_test_flow(
         "assertion_count": len(assertions_json),
         "legacy_unstructured": "legacy_unstructured" in recording_drift,
     }
-    result["workflow_hint"] = (
-        f"Flow '{flow_name}' recorded ({len(steps)} steps). "
-        f"Next: run_release_check(app_url='{app_url}', flow_ids=['{flow.flow_id}'], mode='replay')"
-    )
+    if refresh_candidate:
+        previous_staleness = describe_flow_staleness(refresh_candidate.get("created_at"))
+        result["refresh_summary"] = {
+            "refresh_detected": True,
+            "previous_flow_id": refresh_candidate.get("flow_id"),
+            "previous_created_at": refresh_candidate.get("created_at"),
+            "previous_recording_age_days": previous_staleness["age_days"],
+            "previous_recording_stale": previous_staleness["stale"],
+            "supersedes_previous_recording": True,
+        }
+        result["workflow_hint"] = (
+            f"Flow '{flow_name}' was refreshed and supersedes {refresh_candidate.get('flow_id')}. "
+            f"Next: use flow_ids=['{flow.flow_id}'] with run_release_check(app_url='{app_url}', mode='replay')."
+        )
+    else:
+        result["refresh_summary"] = {"refresh_detected": False}
+        result["workflow_hint"] = (
+            f"Flow '{flow_name}' recorded ({len(steps)} steps). "
+            f"Next: run_release_check(app_url='{app_url}', flow_ids=['{flow.flow_id}'], mode='replay')"
+        )
     return result
+
+
+async def _record_mobile_flow(
+    *,
+    app_id: str,
+    flow_name: str,
+    goal: str,
+    business_criticality: str,
+    platform: str,
+    mobile_target: dict,
+) -> dict:
+    """Route to the mobile recording engine."""
+    import uuid
+    from blop.schemas import MobileDeviceTarget
+
+    if not app_id or not app_id.strip():
+        return {"error": "app_url (app_id) is required for mobile flows (use bundle ID or package name)"}
+    if not flow_name or not flow_name.strip():
+        return {"error": "flow_name is required"}
+    if not goal or not goal.strip():
+        return {"error": "goal is required"}
+
+    try:
+        target = MobileDeviceTarget(platform=platform, app_id=app_id, **mobile_target)
+    except Exception as exc:
+        return {"error": f"Invalid mobile_target: {exc}"}
+
+    run_id = uuid.uuid4().hex
+
+    try:
+        from blop.engine.mobile.recording import record_mobile_flow
+        flow = await record_mobile_flow(
+            app_id=app_id,
+            platform=platform,
+            goal=goal,
+            mobile_target=target,
+            run_id=run_id,
+            flow_name=flow_name,
+            business_criticality=business_criticality,
+        )
+    except RuntimeError as exc:
+        return {"error": str(exc)}
+    except Exception as exc:
+        return {"error": f"Mobile recording failed: {exc}"}
+
+    await sqlite.save_flow(flow)
+
+    return {
+        "flow_id": flow.flow_id,
+        "flow_name": flow_name,
+        "step_count": len(flow.steps),
+        "status": "recorded",
+        "platform": platform,
+        "app_id": app_id,
+        "artifacts_dir": file_store.artifacts_dir(flow.flow_id),
+        "workflow_hint": (
+            f"Mobile flow '{flow_name}' recorded on {platform} ({len(flow.steps)} steps). "
+            f"Next: run_regression_test(app_url='{app_id}', flow_ids=['{flow.flow_id}'], platform='{platform}')"
+        ),
+    }

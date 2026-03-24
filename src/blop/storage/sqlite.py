@@ -14,6 +14,7 @@ from blop.schemas import (
     FailureCase,
     IncidentCluster,
     RecordedFlow,
+    ReleasePolicy,
     ReleaseSnapshot,
     RemediationDraft,
     SiteContextGraph,
@@ -197,6 +198,31 @@ async def init_db() -> None:
                 created_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS mobile_device_sessions (
+                session_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                device_name TEXT,
+                os_version TEXT,
+                app_id TEXT,
+                app_version TEXT,
+                appium_session_id TEXT,
+                started_at TEXT DEFAULT (datetime('now')),
+                ended_at TEXT,
+                status TEXT DEFAULT 'active',
+                FOREIGN KEY(run_id) REFERENCES runs(run_id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS release_policies (
+                policy_id TEXT PRIMARY KEY,
+                policy_name TEXT NOT NULL,
+                policy_json TEXT NOT NULL,
+                is_default INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
         # Telemetry index for faster time-range queries
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_ts_signals ON telemetry_signals(app_url, ts)"
@@ -249,6 +275,13 @@ async def _migrate(db) -> None:
         (19, "release_snapshots", "brief_json", "TEXT"),
         (20, "release_snapshots", "run_id", "TEXT"),
         (21, "recorded_flows", "intent_contract_json", "TEXT"),
+        # Mobile App Testing (BLO-125)
+        (22, "recorded_flows", "platform", "TEXT DEFAULT 'web'"),
+        (23, "recorded_flows", "mobile_target_json", "TEXT"),
+        (24, "runs", "platform", "TEXT DEFAULT 'web'"),
+        (25, "run_cases", "device_log_path", "TEXT"),
+        (26, "run_cases", "crash_report_path", "TEXT"),
+        (27, "run_cases", "platform", "TEXT DEFAULT 'web'"),
     ]
 
     current_version = await _get_schema_version(db)
@@ -322,12 +355,16 @@ async def get_auth_profile(profile_name: str) -> AuthProfile | None:
 
 async def save_flow(flow: RecordedFlow) -> None:
     async with aiosqlite.connect(_db_path()) as db:
+        mobile_target_json = None
+        if getattr(flow, "mobile_target", None):
+            mobile_target_json = flow.mobile_target.model_dump_json()
         await db.execute(
             """
             INSERT OR REPLACE INTO recorded_flows
             (flow_id, flow_name, app_url, goal, steps_json, created_at, assertions_json, entry_url,
-             spa_hints_json, business_criticality, run_mode_override, intent_contract_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             spa_hints_json, business_criticality, run_mode_override, intent_contract_json,
+             platform, mobile_target_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 flow.flow_id,
@@ -342,6 +379,8 @@ async def save_flow(flow: RecordedFlow) -> None:
                 flow.business_criticality,
                 flow.run_mode_override,
                 flow.intent_contract.model_dump_json() if getattr(flow, "intent_contract", None) else None,
+                getattr(flow, "platform", "web"),
+                mobile_target_json,
             ),
         )
         await db.commit()
@@ -355,14 +394,15 @@ async def get_flow(flow_id: str) -> RecordedFlow | None:
             async with db.execute(
                 """SELECT flow_id, flow_name, app_url, goal, steps_json, created_at,
                           assertions_json, entry_url, spa_hints_json, business_criticality, run_mode_override,
-                          intent_contract_json
+                          intent_contract_json, platform, mobile_target_json
                    FROM recorded_flows WHERE flow_id = ?""",
                 (flow_id,),
             ) as cursor:
                 row = await cursor.fetchone()
         except Exception as exc:
-            if "intent_contract_json" not in str(exc):
+            if "intent_contract_json" not in str(exc) and "platform" not in str(exc) and "mobile_target_json" not in str(exc):
                 raise
+            # Fallback for pre-migration databases
             async with db.execute(
                 """SELECT flow_id, flow_name, app_url, goal, steps_json, created_at,
                           assertions_json, entry_url, spa_hints_json, business_criticality, run_mode_override
@@ -388,6 +428,13 @@ async def get_flow(flow_id: str) -> RecordedFlow | None:
                     s.setdefault("testid_selector", None)
                     s.setdefault("label_text", None)
                     s.setdefault("structured_assertion", None)
+                    # Mobile fields (added in v3)
+                    s.setdefault("mobile_selector", None)
+                    s.setdefault("swipe_direction", None)
+                    s.setdefault("swipe_distance_pct", None)
+                    s.setdefault("touch_x_pct", None)
+                    s.setdefault("touch_y_pct", None)
+                    s.setdefault("pinch_scale", None)
                     steps.append(FlowStep(**s))
 
                 assertions_json: list[str] = []
@@ -404,12 +451,24 @@ async def get_flow(flow_id: str) -> RecordedFlow | None:
                         _log.debug("failed to parse spa_hints for flow", exc_info=True)
 
                 intent_contract = None
-                if row[11]:
+                if len(row) > 11 and row[11]:
                     try:
                         from blop.schemas import IntentContract
                         intent_contract = IntentContract.model_validate_json(row[11])
                     except Exception:
                         _log.debug("failed to parse intent_contract_json for flow", exc_info=True)
+
+                platform = "web"
+                if len(row) > 12 and row[12]:
+                    platform = row[12]
+
+                mobile_target = None
+                if len(row) > 13 and row[13]:
+                    try:
+                        from blop.schemas import MobileDeviceTarget
+                        mobile_target = MobileDeviceTarget.model_validate_json(row[13])
+                    except Exception:
+                        _log.debug("failed to parse mobile_target_json for flow", exc_info=True)
 
                 return RecordedFlow(
                     flow_id=row[0],
@@ -424,6 +483,8 @@ async def get_flow(flow_id: str) -> RecordedFlow | None:
                     business_criticality=row[9] or "other",
                     run_mode_override=row[10] if len(row) > 10 else None,
                     intent_contract=intent_contract,
+                    platform=platform,
+                    mobile_target=mobile_target,
                 )
     return None
 
@@ -480,6 +541,62 @@ async def create_run(
                 1 if headless else 0,
                 artifacts_dir,
                 run_mode,
+            ),
+        )
+        await db.commit()
+
+
+async def create_run_with_initial_events(
+    run_id: str,
+    app_url: str,
+    profile_name: str | None,
+    flow_ids: list[str],
+    headless: bool,
+    artifacts_dir: str,
+    run_mode: str,
+    status: str,
+    run_queued_payload: dict,
+    auth_context_payload: dict,
+) -> None:
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(
+            """
+            INSERT INTO runs (run_id, app_url, profile_name, flow_ids_json, status, started_at, headless, artifacts_dir, run_mode)
+            VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
+            """,
+            (
+                run_id,
+                app_url,
+                profile_name,
+                json.dumps(flow_ids),
+                status,
+                1 if headless else 0,
+                artifacts_dir,
+                run_mode,
+            ),
+        )
+        await db.execute(
+            """
+            INSERT INTO run_health_events (event_id, run_id, event_type, payload_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                run_id,
+                "run_queued",
+                json.dumps(run_queued_payload),
+            ),
+        )
+        await db.execute(
+            """
+            INSERT INTO run_health_events (event_id, run_id, event_type, payload_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                run_id,
+                "auth_context_resolved",
+                json.dumps(auth_context_payload),
             ),
         )
         await db.commit()
@@ -1393,3 +1510,75 @@ async def get_latest_correlation_report(app_url: str, window: str) -> dict | Non
                 "created_at": row[3],
                 "report": report,
             }
+
+# ── Release Policy CRUD (BLO-74) ──────────────────────────────────────────────
+
+async def save_policy(policy: ReleasePolicy) -> None:
+    """Persist a ReleasePolicy. If is_default=True, clears the flag on all others first."""
+    async with aiosqlite.connect(_db_path()) as db:
+        if policy.is_default:
+            await db.execute("UPDATE release_policies SET is_default = 0")
+        await db.execute(
+            """
+            INSERT INTO release_policies (policy_id, policy_name, policy_json, is_default)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(policy_id) DO UPDATE SET
+                policy_name = excluded.policy_name,
+                policy_json = excluded.policy_json,
+                is_default  = excluded.is_default
+            """,
+            (
+                policy.policy_id,
+                policy.policy_name,
+                policy.model_dump_json(),
+                int(policy.is_default),
+            ),
+        )
+        await db.commit()
+
+
+async def get_policy(policy_id: str) -> ReleasePolicy | None:
+    """Retrieve a ReleasePolicy by ID. Returns None if not found."""
+    async with aiosqlite.connect(_db_path()) as db:
+        async with db.execute(
+            "SELECT policy_json FROM release_policies WHERE policy_id = ?",
+            (policy_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            try:
+                return ReleasePolicy.model_validate_json(row[0])
+            except Exception:
+                return None
+
+
+async def get_default_policy() -> ReleasePolicy | None:
+    """Return the policy marked is_default=1, or None if none is saved."""
+    async with aiosqlite.connect(_db_path()) as db:
+        async with db.execute(
+            "SELECT policy_json FROM release_policies WHERE is_default = 1 LIMIT 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            try:
+                return ReleasePolicy.model_validate_json(row[0])
+            except Exception:
+                return None
+
+
+async def list_policies() -> list[ReleasePolicy]:
+    """Return all stored ReleasePolicy objects, default first."""
+    async with aiosqlite.connect(_db_path()) as db:
+        async with db.execute(
+            "SELECT policy_json FROM release_policies ORDER BY is_default DESC, created_at ASC"
+        ) as cursor:
+            rows = await cursor.fetchall()
+    policies: list[ReleasePolicy] = []
+    for row in rows:
+        try:
+            policies.append(ReleasePolicy.model_validate_json(row[0]))
+        except Exception:
+            pass
+    return policies

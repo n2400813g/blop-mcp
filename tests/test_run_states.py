@@ -28,12 +28,11 @@ async def test_run_regression_creates_queued_run():
     """Normal call: create_run called with 'queued', returns status='queued'."""
     from blop.tools.regression import run_regression_test
 
-    mock_create_run = AsyncMock()
-    mock_update_status = AsyncMock()
+    mock_start_run = AsyncMock()
     mock_save_event = AsyncMock()
 
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}):
-        with patch("blop.storage.sqlite.create_run", mock_create_run):
+        with patch("blop.storage.sqlite.create_run_with_initial_events", mock_start_run):
             with patch("blop.storage.sqlite.save_run_health_event", mock_save_event):
                 with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=None):
                     with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=make_flow("flow1")):
@@ -49,10 +48,14 @@ async def test_run_regression_creates_queued_run():
     assert "status_detail" in result
     assert "recommended_next_action" in result
     assert result["is_terminal"] is False
-    mock_create_run.assert_called_once()
+    mock_start_run.assert_awaited_once()
+    assert mock_start_run.await_args.kwargs["status"] == "queued"
+    queued_payload = mock_start_run.await_args.kwargs["run_queued_payload"]
+    auth_payload = mock_start_run.await_args.kwargs["auth_context_payload"]
+    assert "startup_timing_ms" in queued_payload
+    assert "startup_timing_ms" in auth_payload
     event_types = [call.args[1] for call in mock_save_event.await_args_list]
-    assert "run_queued" in event_types
-    assert "auth_context_resolved" in event_types
+    assert "run_startup_timing" in event_types
 
 
 @pytest.mark.asyncio
@@ -65,10 +68,11 @@ async def test_run_regression_records_auth_validation_context():
         auth_type="storage_state",
         storage_state_path="/tmp/auth.json",
     )
+    mock_start_run = AsyncMock()
     mock_save_event = AsyncMock()
 
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}):
-        with patch("blop.storage.sqlite.create_run", new_callable=AsyncMock):
+        with patch("blop.storage.sqlite.create_run_with_initial_events", mock_start_run):
             with patch("blop.storage.sqlite.save_run_health_event", mock_save_event):
                 with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=mock_profile):
                     with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=make_flow("flow1")):
@@ -82,12 +86,7 @@ async def test_run_regression_records_auth_validation_context():
                                             profile_name="prod",
                                         )
 
-    auth_events = [
-        call for call in mock_save_event.await_args_list
-        if call.args[1] == "auth_context_resolved"
-    ]
-    assert len(auth_events) == 1
-    payload = auth_events[0].args[2]
+    payload = mock_start_run.await_args.kwargs["auth_context_payload"]
     assert payload["auth_source"] == "storage_state"
     assert payload["storage_state_path"] == "/tmp/auth.json"
     assert payload["session_validation_status"] == "valid"
@@ -109,15 +108,14 @@ async def test_auth_resolution_failure_returns_waiting_auth():
         with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=mock_profile):
             with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=make_flow("flow1")):
                 with patch("blop.engine.auth.resolve_storage_state", side_effect=Exception("Credentials not set")):
-                    with patch("blop.storage.sqlite.create_run", new_callable=AsyncMock):
+                    with patch("blop.storage.sqlite.create_run_with_initial_events", new_callable=AsyncMock):
                         with patch("blop.storage.sqlite.save_run_health_event", new_callable=AsyncMock):
-                            with patch("blop.storage.sqlite.update_run_status", new_callable=AsyncMock):
-                                with patch("blop.storage.files.artifacts_dir", return_value="/tmp/runs/r1"):
-                                    result = await run_regression_test(
-                                        app_url="https://example.com",
-                                        flow_ids=["flow1"],
-                                        profile_name="prod",
-                                    )
+                            with patch("blop.storage.files.artifacts_dir", return_value="/tmp/runs/r1"):
+                                result = await run_regression_test(
+                                    app_url="https://example.com",
+                                    flow_ids=["flow1"],
+                                    profile_name="prod",
+                                )
 
     assert result["status"] == "waiting_auth"
     assert "message" in result
@@ -146,6 +144,55 @@ async def test_missing_profile_name_returns_structured_error():
 
 
 @pytest.mark.asyncio
+async def test_run_persist_case_completed_event_includes_worker_metadata():
+    from blop.tools.regression import _run_and_persist
+
+    flow = make_flow("flow-billing", "revenue")
+    flow.entry_url = "https://example.com/billing/upgrade"
+    case = FailureCase(
+        case_id="case-1",
+        run_id="run-1",
+        flow_id="flow-billing",
+        flow_name="checkout_with_credit_card",
+        status="pass",
+    )
+
+    async def fake_run_flows(**kwargs):
+        kwargs["execution_metadata"]["flow-billing"] = {
+            "worker_slot": 2,
+            "entry_area_key": "billing",
+        }
+        return [case]
+
+    mock_save_event = AsyncMock()
+
+    with patch("blop.storage.sqlite.update_run_status", new_callable=AsyncMock):
+        with patch("blop.storage.sqlite.save_run_health_event", mock_save_event):
+            with patch("blop.storage.sqlite.save_case", new_callable=AsyncMock):
+                with patch("blop.storage.sqlite.update_run", new_callable=AsyncMock):
+                    with patch("blop.storage.sqlite.save_risk_calibration_record", new_callable=AsyncMock):
+                        with patch("blop.tools.regression.classifier.classify_case", new_callable=AsyncMock, side_effect=lambda current_case, _app_url: current_case):
+                            with patch("blop.tools.regression.classifier.classify_run", new_callable=AsyncMock, return_value={"next_actions": []}):
+                                with patch("blop.tools.regression.regression_engine.run_flows", side_effect=fake_run_flows):
+                                    await _run_and_persist(
+                                        run_id="run-1",
+                                        flows=[flow],
+                                        app_url="https://example.com",
+                                        storage_state=None,
+                                        headless=True,
+                                    )
+
+    case_events = [
+        call.args[2]
+        for call in mock_save_event.await_args_list
+        if call.args[1] == "case_completed"
+    ]
+    assert len(case_events) == 1
+    assert case_events[0]["worker_slot"] == 2
+    assert case_events[0]["entry_area_key"] == "billing"
+
+
+@pytest.mark.asyncio
 async def test_expired_session_returns_waiting_auth_before_queueing_execution():
     from blop.tools.regression import run_regression_test
     from blop.schemas import AuthProfile
@@ -156,8 +203,7 @@ async def test_expired_session_returns_waiting_auth_before_queueing_execution():
         storage_state_path="/tmp/prod.json",
     )
 
-    create_run = AsyncMock()
-    update_status = AsyncMock()
+    start_run = AsyncMock()
     save_event = AsyncMock()
 
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}):
@@ -165,23 +211,23 @@ async def test_expired_session_returns_waiting_auth_before_queueing_execution():
             with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=make_flow("flow1")):
                 with patch("blop.engine.auth.resolve_storage_state", new_callable=AsyncMock, return_value="/tmp/prod.json"):
                     with patch("blop.engine.auth.validate_auth_session", new_callable=AsyncMock, return_value=False):
-                        with patch("blop.storage.sqlite.create_run", create_run):
-                            with patch("blop.storage.sqlite.update_run_status", update_status):
-                                with patch("blop.storage.sqlite.save_run_health_event", save_event):
-                                    with patch("blop.storage.files.artifacts_dir", return_value="/tmp/runs/r1"):
-                                        result = await run_regression_test(
-                                            app_url="https://example.com/app",
-                                            flow_ids=["flow1"],
-                                            profile_name="prod",
-                                        )
+                        with patch("blop.storage.sqlite.create_run_with_initial_events", start_run):
+                            with patch("blop.storage.sqlite.save_run_health_event", save_event):
+                                with patch("blop.storage.files.artifacts_dir", return_value="/tmp/runs/r1"):
+                                    result = await run_regression_test(
+                                        app_url="https://example.com/app",
+                                        flow_ids=["flow1"],
+                                        profile_name="prod",
+                                    )
 
     assert result["status"] == "waiting_auth"
     assert "expired session" in result["message"].lower()
     assert result["is_terminal"] is True
-    create_run.assert_called_once()
-    update_status.assert_awaited_with(result["run_id"], "waiting_auth")
-    auth_events = [call for call in save_event.await_args_list if call.args[1] == "auth_context_resolved"]
-    assert auth_events[0].args[2]["session_validation_status"] == "expired_session"
+    start_run.assert_awaited_once()
+    assert start_run.await_args.kwargs["status"] == "waiting_auth"
+    assert start_run.await_args.kwargs["auth_context_payload"]["session_validation_status"] == "expired_session"
+    event_types = [call.args[1] for call in save_event.await_args_list]
+    assert "run_startup_timing" in event_types
 
 
 @pytest.mark.asyncio
@@ -292,12 +338,13 @@ async def test_run_release_check_accepts_flow_ids_alias():
 
     mock_run_regression = AsyncMock(return_value={"run_id": "run-abc", "status": "queued"})
     with patch("blop.tools.regression.run_regression_test", mock_run_regression):
-        with patch("blop.storage.sqlite.save_release_brief", new_callable=AsyncMock):
-            result = await run_release_check(
-                app_url="https://example.com",
-                flow_ids=["flow1"],
-                mode="replay",
-                release_id="rel-flow-alias",
+        with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=make_flow("flow1")):
+            with patch("blop.storage.sqlite.save_release_brief", new_callable=AsyncMock):
+                result = await run_release_check(
+                    app_url="https://example.com",
+                    flow_ids=["flow1"],
+                    mode="replay",
+                    release_id="rel-flow-alias",
             )
 
     assert result["run_id"] == "run-abc"

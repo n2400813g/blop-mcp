@@ -18,6 +18,7 @@ from blop.engine.flow_builder import (
     build_steps_from_agent_actions,
 )
 from blop.engine.planner import build_execution_plan, build_intent_contract
+from blop.schemas import FailureCase
 from blop.storage import sqlite, files as file_store
 
 
@@ -97,9 +98,47 @@ async def evaluate_web_task(
         run_mode="evaluate",
     )
 
+    # Compute simplified go/no-go recommendation
+    pf = report.get("pass_fail", "error")
+    evidence = report.get("evidence", {})
+    has_console_errors = bool(evidence.get("console_errors"))
+    has_network_failures = bool(evidence.get("network_failures"))
+    raw = report.get("raw_result", "").lower()
+    is_hard_failure = any(kw in raw for kw in ("error", "not found", "failed", "could not"))
+    exhausted_step_budget = "maximum number of steps" in raw or "task is incomplete" in raw
+    if pf == "pass" and not has_console_errors and not has_network_failures:
+        rec_decision = "SHIP"
+        rec_rationale = "Task completed successfully with no console or network errors."
+    elif pf == "fail" and (is_hard_failure or exhausted_step_budget):
+        rec_decision = "BLOCK"
+        if exhausted_step_budget:
+            rec_rationale = "Task exceeded the targeted evaluation step budget before completion. Investigate or narrow scope before shipping."
+        else:
+            rec_rationale = "Task failed with explicit error or missing resource. Investigate before shipping."
+    else:
+        rec_decision = "INVESTIGATE"
+        rec_rationale = "Task encountered issues or errors. Review evidence before shipping."
+    report["release_recommendation"] = {
+        "decision": rec_decision,
+        "confidence": "medium",
+        "rationale": rec_rationale,
+    }
+
     completed_at = datetime.now(timezone.utc).isoformat()
     status = "completed" if report.get("pass_fail") != "error" else "failed"
-    await sqlite.update_run_status(run_id, status)
+    eval_case = _build_evaluation_case(
+        run_id=run_id,
+        task=task,
+        report=report,
+    )
+    await sqlite.update_run(
+        run_id=run_id,
+        status=status,
+        cases=[eval_case],
+        completed_at=completed_at,
+        next_actions=[rec_rationale],
+    )
+    await sqlite.save_case(eval_case)
 
     # Persist network log if captured
     network_log_path = report.get("_network_log_path")
@@ -107,15 +146,15 @@ async def evaluate_web_task(
         await sqlite.save_artifact(run_id, None, "network_log", network_log_path)
 
     for screenshot in report.get("evidence", {}).get("screenshots", []):
-        await sqlite.save_artifact(run_id, None, "screenshot", screenshot)
+        await sqlite.save_artifact(run_id, eval_case.case_id, "screenshot", screenshot)
 
     trace_path = report.get("evidence", {}).get("trace_path")
     if trace_path:
-        await sqlite.save_artifact(run_id, None, "trace", trace_path)
+        await sqlite.save_artifact(run_id, eval_case.case_id, "trace", trace_path)
 
     console_log_path = report.get("_console_log_path")
     if console_log_path:
-        await sqlite.save_artifact(run_id, None, "console_log", console_log_path)
+        await sqlite.save_artifact(run_id, eval_case.case_id, "console_log", console_log_path)
 
     # Optionally promote to a recorded flow
     recorded_flow_id = None
@@ -136,28 +175,6 @@ async def evaluate_web_task(
     if recorded_flow_id:
         report["recorded_flow_id"] = recorded_flow_id
 
-    # Compute simplified go/no-go recommendation
-    pf = report.get("pass_fail", "error")
-    evidence = report.get("evidence", {})
-    has_console_errors = bool(evidence.get("console_errors"))
-    has_network_failures = bool(evidence.get("network_failures"))
-    raw = report.get("raw_result", "").lower()
-    is_hard_failure = any(kw in raw for kw in ("error", "not found", "failed", "could not"))
-    if pf == "pass" and not has_console_errors and not has_network_failures:
-        rec_decision = "SHIP"
-        rec_rationale = "Task completed successfully with no console or network errors."
-    elif pf == "fail" and is_hard_failure:
-        rec_decision = "BLOCK"
-        rec_rationale = "Task failed with explicit error or missing resource. Investigate before shipping."
-    else:
-        rec_decision = "INVESTIGATE"
-        rec_rationale = "Task encountered issues or errors. Review evidence before shipping."
-    report["release_recommendation"] = {
-        "decision": rec_decision,
-        "confidence": "medium",
-        "rationale": rec_rationale,
-    }
-
     if format == "markdown":
         report["formatted_report"] = _format_markdown(report, task, app_url)
     elif format == "text":
@@ -166,6 +183,60 @@ async def evaluate_web_task(
         report["formatted_report"] = json.dumps(report, indent=2)
 
     return report
+
+
+def _build_evaluation_case(
+    *,
+    run_id: str,
+    task: str,
+    report: dict,
+) -> FailureCase:
+    pass_fail = report.get("pass_fail", "error")
+    rec = report.get("release_recommendation", {}) or {}
+    decision = rec.get("decision", "INVESTIGATE")
+    raw_result = str(report.get("raw_result", "") or "")
+    raw_lower = raw_result.lower()
+    failure_class = None
+    if pass_fail == "error":
+        failure_class = "env_issue"
+    elif "maximum number of steps" in raw_lower:
+        failure_class = "test_fragility"
+    elif any(token in raw_lower for token in ("timeout", "connection", "dns", "net::", "ssl", "certificate")):
+        failure_class = "env_issue"
+
+    if pass_fail == "pass":
+        status = "pass"
+        severity = "none"
+    elif decision == "BLOCK":
+        status = "fail"
+        severity = "blocker"
+    elif pass_fail == "error":
+        status = "error"
+        severity = "high"
+    else:
+        status = "fail"
+        severity = "high"
+
+    return FailureCase(
+        run_id=run_id,
+        flow_id=f"eval-{run_id}",
+        flow_name="targeted_evaluation",
+        status=status,
+        severity=severity,
+        failure_class=failure_class,
+        screenshots=list((report.get("evidence", {}) or {}).get("screenshots", []) or []),
+        console_errors=list((report.get("evidence", {}) or {}).get("console_errors", []) or []),
+        network_errors=[
+            f"{item.get('method', '?')} {item.get('url', '?')} -> {item.get('status', '?')}"
+            for item in ((report.get("evidence", {}) or {}).get("network_failures", []) or [])
+        ],
+        trace_path=(report.get("evidence", {}) or {}).get("trace_path"),
+        raw_result=raw_result[:2000],
+        assertion_results=[{"assertion": task, "passed": pass_fail == "pass"}],
+        failure_reason_codes=["agent_step_budget_exhausted"] if "maximum number of steps" in raw_lower else [],
+        business_criticality="other",
+        replay_mode="goal_fallback",
+    )
 
 
 async def _run_evaluation(

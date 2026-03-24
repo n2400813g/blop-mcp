@@ -3,12 +3,26 @@
 This guide is the production baseline for running `blop` as an MCP server with a
 client-managed `stdio` transport (Cursor/Claude Code launching the process).
 
+Related guides:
+
+- Cursor quickstart: [`quickstart_cursor.md`](quickstart_cursor.md)
+- Claude Code quickstart: [`quickstart_claude_code.md`](quickstart_claude_code.md)
+- Codex-compatible quickstart: [`quickstart_codex.md`](quickstart_codex.md)
+- Operator failure guide: [`operator_failures.md`](operator_failures.md)
+- Compatibility policy: [`compatibility_policy.md`](compatibility_policy.md)
+
 ## 1) Recommended Architecture
 
 - Primary transport: `stdio` (`blop-mcp` process is launched by the MCP client).
 - Data plane: local SQLite (`BLOP_DB_PATH`) + artifact filesystem (`BLOP_RUNS_DIR`).
 - Control and evidence: JSON logs (`BLOP_DEBUG_LOG`), run health events in DB.
 - Optional sidecar: `blop-http` for SSE health streaming only.
+
+Production support stance:
+
+- Supported baseline: local managed `stdio`
+- Optional but non-primary: `blop-http` SSE sidecar for health/event streaming
+- Not the primary supported baseline: long-lived remote MCP transports
 
 ```mermaid
 flowchart LR
@@ -139,6 +153,7 @@ Startup:
 1. Validate env file values and absolute paths.
 2. Confirm Chromium availability.
 3. Call `validate_release_setup(app_url=...)` from your MCP client.
+4. Read `blop://health` to confirm runtime posture, path policy, and active run count.
 
 If runs fail unexpectedly:
 

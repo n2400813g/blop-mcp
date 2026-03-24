@@ -154,6 +154,51 @@ def test_build_drift_summary_flags_goal_fallback_when_not_allowed():
     assert "goal_fallback" in drift.disallowed_fallback_used
 
 
+def test_build_drift_summary_treats_public_routes_as_public_surface():
+    from blop.engine.regression import _build_drift_summary
+
+    flow = make_flow(goal="Open public docs")
+    flow.intent_contract.target_surface = "public_site"
+    flow.intent_contract.scope = "public"
+
+    drift = _build_drift_summary(
+        flow=flow,
+        status="pass",
+        replay_mode="strict_steps",
+        assertion_results=[],
+        failure_reason_codes=[],
+        rerecorded=False,
+        actual_landing_url="https://testpages.eviltester.com/pages/input-elements/text-inputs/",
+    )
+
+    assert drift.actual_surface == "public_site"
+    assert drift.surface_match is True
+    assert "surface_drift" not in drift.drift_types
+
+
+def test_selector_heal_thresholds_are_stricter_for_high_risk_steps():
+    from blop.engine.regression import _should_auto_heal
+
+    assert _should_auto_heal(0.84, 0.1, action="click", selector_entropy=0.1) is True
+    assert _should_auto_heal(0.8, 0.2, action="fill", selector_entropy=0.6) is False
+    assert _should_auto_heal(0.93, 0.16, action="drag", selector_entropy=0.2) is False
+
+
+def test_interleave_flows_by_entry_area_round_robins_sections():
+    from blop.engine.regression import _interleave_flows_by_entry_area
+
+    billing_a = make_flow("billing-a", "Upgrade billing")
+    billing_a.entry_url = "https://example.com/billing/upgrade"
+    settings = make_flow("settings", "Update profile")
+    settings.entry_url = "https://example.com/settings/profile"
+    billing_b = make_flow("billing-b", "Review invoices")
+    billing_b.entry_url = "https://example.com/billing/invoices"
+
+    ordered = _interleave_flows_by_entry_area([billing_a, billing_b, settings])
+
+    assert [flow.flow_id for flow in ordered] == ["billing-a", "settings", "billing-b"]
+
+
 @pytest.mark.asyncio
 async def test_run_flows_parallel():
     """run_flows executes multiple flows and returns one case per flow."""
@@ -280,6 +325,44 @@ async def test_run_flows_semaphore():
     assert max_concurrent <= 5
 
 
+@pytest.mark.asyncio
+async def test_run_flows_respects_replay_concurrency_override(monkeypatch):
+    from blop.engine.regression import run_flows
+
+    concurrent_count = 0
+    max_concurrent = 0
+
+    async def slow_execute(*args, **kwargs):
+        nonlocal concurrent_count, max_concurrent
+        concurrent_count += 1
+        max_concurrent = max(max_concurrent, concurrent_count)
+        await asyncio.sleep(0.05)
+        concurrent_count -= 1
+
+        from blop.schemas import FailureCase
+        return FailureCase(
+            run_id=kwargs.get("run_id", "run1"),
+            flow_id=kwargs.get("flow", make_flow()).flow_id,
+            flow_name="test",
+            status="pass",
+        )
+
+    monkeypatch.setattr("blop.engine.regression.BLOP_REPLAY_CONCURRENCY", 2)
+    flows = [make_flow(f"flow{i}") for i in range(6)]
+
+    with patch("blop.engine.regression.execute_flow", side_effect=slow_execute):
+        cases = await run_flows(
+            flows=flows,
+            app_url="https://example.com",
+            run_id="run1",
+            storage_state=None,
+            headless=True,
+        )
+
+    assert len(cases) == 6
+    assert max_concurrent <= 2
+
+
 def test_repair_flow_context_suffix_includes_goal_for_weak_steps():
     from blop.engine.regression import _repair_flow_context_suffix
 
@@ -295,3 +378,48 @@ def test_repair_flow_context_suffix_includes_goal_for_weak_steps():
     assert "Flow name: view_plans_modal" in suffix
     assert "Flow goal: Open the View Plans button" in suffix
     assert "weak locator data" in suffix
+
+
+@pytest.mark.asyncio
+async def test_execute_recorded_flow_invalidates_cached_auth_on_blocked_result():
+    from blop.engine.regression import execute_recorded_flow
+    from blop.schemas import FailureCase
+
+    flow = make_flow()
+    flow.steps = []
+
+    mock_page = AsyncMock()
+    mock_page.on = MagicMock()
+    mock_page.screenshot = AsyncMock()
+    mock_context = AsyncMock()
+    mock_context.new_page = AsyncMock(return_value=mock_page)
+    mock_browser = AsyncMock()
+    mock_browser.new_context = AsyncMock(return_value=mock_context)
+
+    mock_playwright = AsyncMock()
+    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
+    mock_playwright.__aexit__ = AsyncMock(return_value=False)
+    mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+
+    blocked_case = FailureCase(
+        case_id="case-1",
+        run_id="run-1",
+        flow_id=flow.flow_id,
+        flow_name=flow.flow_name,
+        status="blocked",
+    )
+
+    with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+        with patch("blop.engine.browser.make_browser_profile"):
+            with patch("blop.engine.regression._trace_to_failure_case", return_value=blocked_case):
+                with patch("blop.engine.auth.invalidate_validated_session_cache") as invalidate_cache:
+                    result = await execute_recorded_flow(
+                        flow=flow,
+                        run_id="run-1",
+                        case_id="case-1",
+                        storage_state="/tmp/auth.json",
+                        headless=True,
+                    )
+
+    assert result.status == "blocked"
+    invalidate_cache.assert_called_once_with(storage_state_path="/tmp/auth.json")

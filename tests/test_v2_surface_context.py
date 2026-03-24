@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,6 +19,34 @@ def _inventory(routes: list[str]) -> SiteInventory:
         auth_signals=["login", "dashboard"],
         business_signals=["billing", "pricing", "checkout"],
     )
+
+
+@pytest.mark.asyncio
+async def test_capture_context_surfaces_crawl_diagnostics(tmp_db):
+    from blop.tools.v2_surface import capture_context
+
+    inventory = _inventory(["/pricing", "/billing"])
+    inventory.crawl_metadata = {
+        "mode": "parallel_section_aware",
+        "worker_count": 2,
+        "seeded_area_keys": ["/"],
+        "area_page_counts": {"billing": 1, "pricing": 1},
+        "timing_ms": 42,
+        "error_count": 0,
+    }
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr("blop.engine.discovery.inventory_site", AsyncMock(return_value=inventory))
+        monkeypatch.setattr("blop.storage.sqlite.save_site_inventory", AsyncMock())
+        monkeypatch.setattr("blop.storage.sqlite.get_latest_context_graph", AsyncMock(return_value=None))
+        monkeypatch.setattr("blop.storage.sqlite.list_flows", AsyncMock(return_value=[]))
+        monkeypatch.setattr("blop.storage.sqlite.get_flow", AsyncMock(return_value=None))
+        monkeypatch.setattr("blop.storage.sqlite.save_context_graph", AsyncMock())
+
+        result = await capture_context("https://example.com")
+
+    assert result["crawl_diagnostics"]["mode"] == "parallel_section_aware"
+    assert result["crawl_diagnostics"]["worker_count"] == 2
 
 
 @pytest.mark.asyncio

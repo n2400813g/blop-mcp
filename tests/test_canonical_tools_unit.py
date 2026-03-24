@@ -120,6 +120,63 @@ async def test_discover_journeys_planned_ids_are_stable_and_execution_state_is_e
     assert "gates release decisions" in first_journey["gating_reason"]
 
 
+@pytest.mark.asyncio
+async def test_discover_journeys_surfaces_crawl_diagnostics():
+    from blop.tools.journeys import discover_critical_journeys
+
+    mock_flows = [
+        {
+            "flow_name": "Checkout Flow",
+            "goal": "Complete a purchase",
+            "business_criticality": "revenue",
+            "confidence": 0.9,
+            "auth_required": False,
+            "likely_assertions": ["Order confirmation shown"],
+        }
+    ]
+
+    with patch(
+        "blop.engine.discovery.discover_flows",
+        new_callable=AsyncMock,
+        return_value={
+            "flows": mock_flows,
+            "crawl_diagnostics": {"mode": "parallel_section_aware", "worker_count": 3},
+        },
+    ):
+        with patch("blop.storage.sqlite.list_flows", new_callable=AsyncMock, return_value=[]):
+            result = await discover_critical_journeys(app_url="https://example.com")
+
+    assert result["crawl_diagnostics"]["mode"] == "parallel_section_aware"
+    assert result["crawl_diagnostics"]["worker_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_journeys_resource_marks_stale_release_gating_recordings():
+    from blop.tools.resources import journeys_resource
+
+    flows = [
+        {
+            "flow_id": "f1",
+            "flow_name": "checkout",
+            "app_url": "https://example.com",
+            "goal": "Complete checkout",
+            "created_at": "2026-02-01T10:00:00Z",
+        }
+    ]
+    flow_obj = _make_flow("f1", "revenue")
+
+    with patch.dict(os.environ, {"BLOP_FLOW_STALE_DAYS": "14"}):
+        with patch("blop.storage.sqlite.list_flows", new_callable=AsyncMock, return_value=flows):
+            with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=flow_obj):
+                with patch("blop.storage.sqlite.get_latest_context_graph", new_callable=AsyncMock, return_value=None):
+                    result = await journeys_resource()
+
+    assert result["stale_release_gating_count"] == 1
+    assert result["journeys"][0]["stale_recording"] is True
+    assert "record_test_flow" in result["journeys"][0]["recommended_next_action"]
+    assert "stale" in result["workflow_hint"].lower()
+
+
 # ---------------------------------------------------------------------------
 # run_release_check
 # ---------------------------------------------------------------------------
@@ -169,6 +226,74 @@ async def test_run_release_check_result_contains_resource_links():
     assert result["selected_flows"][0]["flow_id"] == "f1"
     assert result["active_gating_policy"]["criticality_filter"] == ["revenue", "activation"]
     assert result["recommended_next_step"]["tool"] == "get_test_results"
+    assert "stability_gate_summary" in result
+    assert "release_exit_criteria" in result
+
+
+@pytest.mark.asyncio
+async def test_run_release_check_targeted_uses_expanded_budget_and_stored_report():
+    """targeted mode should pass a larger step budget and build its result from get_test_results."""
+    from blop.tools.release_check import run_release_check
+
+    eval_result = {
+        "run_id": "run-targeted-1",
+        "summary": ["Task encountered issues"],
+        "release_recommendation": {
+            "decision": "BLOCK",
+            "confidence": "medium",
+            "rationale": "Task failed with explicit error or missing resource. Investigate before shipping.",
+        },
+    }
+    stored_report = {
+        "run_id": "run-targeted-1",
+        "status": "completed",
+        "release_recommendation": {
+            "decision": "BLOCK",
+            "confidence": "medium",
+            "rationale": "1 blocker(s) and 0 critical journey failure(s) detected. Do not ship until these are resolved.",
+        },
+        "severity_counts": {"blocker": 1},
+        "cases": [{"flow_name": "targeted_evaluation", "status": "fail", "severity": "blocker"}],
+        "failed_cases": [{"flow_name": "targeted_evaluation", "status": "fail", "severity": "blocker"}],
+        "next_actions": ["Investigate before shipping."],
+        "top_failure_mode": "automation_fragility",
+        "stability_bucket": "unknown_unclassified",
+        "recommended_remediation_steps": ["Inspect traces", "Refresh flow", "Re-run"],
+        "decision_summary": {"decision": "BLOCK", "next_recommended_action": "Inspect traces"},
+        "evidence_summary": {"failed_case_count": 1, "top_artifact_refs": []},
+        "coverage_summary": {"failure_kinds": ["automation_fragility"]},
+        "evidence_quality": {"confidence_drivers": ["Evidence capture is sparse"]},
+        "drift_summary": {"drift_detected": False, "plan_fidelity": "low"},
+        "replay_trust_summary": {"golden_path_ready": True, "review_required_case_count": 0},
+        "failure_classification": {"primary": "automation_fragility", "confidence": "high"},
+        "failure_links": {"artifacts": [], "resources": [], "triage_hint": "triage_release_blocker(run_id='run-targeted-1')"},
+        "bucket_confidence": "low",
+        "unknown_classification_gaps": ["Missing trace_path for the failed case."],
+        "recommended_next_action": "Inspect traces",
+        "workflow_hint": "Inspect traces",
+        "is_terminal": True,
+    }
+
+    with patch.dict(os.environ, {"BLOP_TARGETED_MAX_STEPS": "41"}):
+        with patch("blop.tools.evaluate.evaluate_web_task", new_callable=AsyncMock, return_value=eval_result) as eval_mock:
+            with patch("blop.tools.results.get_test_results", new_callable=AsyncMock, return_value=stored_report):
+                with patch("blop.storage.sqlite.save_release_brief", new_callable=AsyncMock):
+                    result = await run_release_check(
+                        app_url="https://example.com",
+                        mode="targeted",
+                        release_id="rel-targeted-1",
+                    )
+
+    eval_mock.assert_awaited_once()
+    assert eval_mock.await_args.kwargs["max_steps"] == 41
+    assert result["release_id"] == "rel-targeted-1"
+    assert result["run_id"] == "run-targeted-1"
+    assert result["decision"] == "BLOCK"
+    assert result["evaluation_summary"] == ["Task encountered issues"]
+    assert result["failure_classification"]["primary"] == "automation_fragility"
+    assert result["recommended_next_step"]["tool"] == "triage_release_blocker"
+    assert result["stability_gate_summary"]["unknown_count"] == 1
+    assert result["release_exit_criteria"]["release_blocked_by_stability"] is True
 
 
 @pytest.mark.asyncio

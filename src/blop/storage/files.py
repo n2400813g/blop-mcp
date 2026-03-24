@@ -122,6 +122,25 @@ def network_log_path(run_id: str, case_id: str) -> str:
     return str(dir_ / f"{case_id}.jsonl")
 
 
+def mobile_screenshot_path(run_id: str, case_id: str, step: int, platform: str = "ios") -> str:
+    run_id = _validate_component(run_id, field_name="run_id")
+    case_id = _validate_component(case_id, field_name="case_id")
+    platform = _validate_component(platform, field_name="platform")
+    dir_ = _runs_dir() / "mobile" / platform / "screenshots" / run_id / case_id
+    dir_.mkdir(parents=True, exist_ok=True)
+    return str(dir_ / f"step_{step:03d}.png")
+
+
+def device_log_path(run_id: str, case_id: str, platform: str = "ios") -> str:
+    run_id = _validate_component(run_id, field_name="run_id")
+    case_id = _validate_component(case_id, field_name="case_id")
+    platform = _validate_component(platform, field_name="platform")
+    dir_ = _runs_dir() / "mobile" / platform / "logs" / run_id
+    dir_.mkdir(parents=True, exist_ok=True)
+    suffix = "syslog" if platform == "ios" else "logcat"
+    return str(dir_ / f"{case_id}.{suffix}")
+
+
 def codegen_path(flow_id: str, ext: str = "py") -> str:
     flow_id = _validate_component(flow_id, field_name="flow_id")
     d = _runs_dir() / "codegen"

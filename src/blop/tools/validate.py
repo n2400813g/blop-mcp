@@ -2,10 +2,19 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from blop.config import BLOP_DB_PATH, BLOP_DEBUG_LOG, runtime_config_issues, validate_app_url
+from blop.config import (
+    BLOP_DB_PATH,
+    BLOP_DEBUG_LOG,
+    runtime_config_issues,
+    runtime_posture_snapshot,
+    validate_app_url,
+)
+from blop.schemas import TelemetrySignal
+from blop.stability import build_validation_stability_readiness, classify_validation_issue
 
 
 def _build_validation_summary(result: dict) -> dict:
@@ -39,8 +48,13 @@ def _build_validation_recommended_action(result: dict) -> str:
     if steps:
         return steps[0]
     status = result.get("status", "warnings")
+    warnings = result.get("warnings", []) or []
     if status == "blocked":
         return "Resolve the highest-priority blocker and run validate_release_setup again."
+    if any("expired" in warning.lower() for warning in warnings):
+        return "Refresh the expired auth session with capture_auth_session(...), then re-run validate_release_setup."
+    if any("could not be resolved" in warning.lower() for warning in warnings):
+        return "Repair or re-capture the auth profile before attempting replay."
     if status == "warnings":
         return "Resolve the top warning and re-check setup before running a release check."
     return "Discover release-critical journeys and prepare replay coverage."
@@ -50,12 +64,106 @@ def _augment_validate_result(result: dict, *, app_url: str | None, profile_name:
     result["check_summary"] = _build_validation_summary(result)
     result["headline"] = _build_validation_headline(result, app_url, profile_name)
     result["recommended_action"] = _build_validation_recommended_action(result)
+    result["stability_readiness"] = build_validation_stability_readiness(result)
     return result
+
+
+def _bucket_validation_issues(result: dict) -> dict:
+    bucketed_blockers: list[dict] = []
+    bucketed_warnings: list[dict] = []
+    checks = {check.get("name"): check for check in result.get("checks", [])}
+    for issue in result.get("blockers", []) or []:
+        matched_check = _match_issue_to_check(issue, checks)
+        classified = classify_validation_issue(
+            matched_check.get("name", "runtime_validation"),
+            matched_check.get("message", issue),
+            passed=False,
+        )
+        bucketed_blockers.append(
+            {
+                "message": issue,
+                "check_name": matched_check.get("name"),
+                **classified,
+            }
+        )
+    for issue in result.get("warnings", []) or []:
+        matched_check = _match_issue_to_check(issue, checks)
+        classified = classify_validation_issue(
+            matched_check.get("name", "runtime_validation"),
+            matched_check.get("message", issue),
+            passed=False,
+        )
+        bucketed_warnings.append(
+            {
+                "message": issue,
+                "check_name": matched_check.get("name"),
+                **classified,
+            }
+        )
+    result["bucketed_blockers"] = bucketed_blockers
+    result["bucketed_warnings"] = bucketed_warnings
+    return result
+
+
+def _match_issue_to_check(issue: str, checks: dict) -> dict:
+    lowered = (issue or "").lower()
+    for check in checks.values():
+        message = str(check.get("message", "")).lower()
+        name = str(check.get("name", "")).lower()
+        if name and name in lowered:
+            return check
+        if message and (message in lowered or lowered in message):
+            return check
+    if "auth" in lowered or "profile" in lowered:
+        return checks.get("auth_profile", {"name": "auth_profile", "message": issue})
+    if "chromium" in lowered:
+        return checks.get("chromium_installed", {"name": "chromium_installed", "message": issue})
+    if "reachable" in lowered or "running" in lowered:
+        return checks.get("app_url_reachable", {"name": "app_url_reachable", "message": issue})
+    return {"name": "runtime_validation", "message": issue}
+
+
+async def _record_validation_observations(result: dict, app_url: str | None) -> None:
+    if not app_url:
+        return
+    observations = list(result.get("bucketed_blockers", []) or []) + list(result.get("bucketed_warnings", []) or [])
+    if not observations:
+        return
+    signals: list[TelemetrySignal] = []
+    ts = datetime.now(timezone.utc).isoformat()
+    for issue in observations:
+        bucket = issue.get("stability_bucket")
+        if not bucket:
+            continue
+        signals.append(
+            TelemetrySignal(
+                app_url=app_url,
+                source="custom",
+                ts=ts,
+                signal_type="custom",
+                value=1.0,
+                unit="count",
+                tags={
+                    "surface": "validate",
+                    "bucket": bucket,
+                    "status": "fail" if issue in (result.get("bucketed_blockers", []) or []) else "warning",
+                    "reason_code": str(issue.get("check_name") or "runtime_validation"),
+                },
+            )
+        )
+    if signals:
+        from blop.storage import sqlite
+
+        try:
+            await sqlite.save_telemetry_signals(signals)
+        except Exception:
+            pass
 
 
 async def validate_setup(
     app_url: Optional[str] = None,
     profile_name: Optional[str] = None,
+    check_mobile: bool = False,
 ) -> dict:
     checks: list[dict] = []
     blockers: list[str] = []
@@ -229,6 +337,25 @@ async def validate_setup(
             checks.append({"name": "auth_profile", "passed": False, "message": f"Auth profile check failed: {exc}"})
             warnings.append(f"Auth profile validation error: {exc}")
 
+    # 6. Appium server reachability (mobile, optional)
+    if check_mobile:
+        try:
+            from blop.engine.mobile.driver import check_appium_reachable
+            appium_ok, appium_msg = await check_appium_reachable()
+            checks.append({"name": "appium_server", "passed": appium_ok, "message": appium_msg})
+            if not appium_ok:
+                warnings.append(
+                    f"Appium server not reachable: {appium_msg}. "
+                    "Start it with: appium (requires npm install -g appium)"
+                )
+        except ImportError:
+            checks.append({
+                "name": "appium_server",
+                "passed": False,
+                "message": "Mobile extra not installed — run: pip install blop-mcp[mobile]",
+            })
+            warnings.append("Mobile extra not installed. Run: pip install blop-mcp[mobile]")
+
     if blockers:
         status = "blocked"
     elif warnings:
@@ -275,7 +402,17 @@ async def validate_setup(
             suggested_next_steps.append(
                 "Get results: get_test_results(run_id='...')"
             )
-    elif status == "warnings":
+    # Mobile-specific guidance
+    if check_mobile:
+        appium_failed = any(not c.get("passed") for c in checks if c.get("name") == "appium_server")
+        if appium_failed:
+            if any("not installed" in w for w in warnings):
+                suggested_next_steps.insert(0, "Install mobile extra: pip install blop-mcp[mobile]")
+            else:
+                suggested_next_steps.insert(0, "Start Appium: appium (then re-run validate_setup(check_mobile=True))")
+                suggested_next_steps.insert(1, "See docs/mobile_setup.md for full mobile prerequisites")
+
+    if status == "warnings":
         auth_warning = any("auth" in w.lower() or "session" in w.lower() for w in warnings)
         if auth_warning:
             suggested_next_steps.append(
@@ -291,7 +428,10 @@ async def validate_setup(
         "blockers": blockers,
         "warnings": warnings,
         "suggested_next_steps": suggested_next_steps,
+        "runtime_posture": runtime_posture_snapshot(),
     }
+    result = _bucket_validation_issues(result)
+    await _record_validation_observations(result, app_url)
     return _augment_validate_result(result, app_url=app_url, profile_name=profile_name)
 
 
@@ -312,6 +452,13 @@ async def validate_release_setup(
         canonical_steps = list(result.get("suggested_next_steps", []))
     elif status == "warnings":
         if app_url:
+            if profile_name:
+                canonical_steps.append(
+                    f"Refresh auth first: capture_auth_session(login_url='{app_url.rstrip('/')}/login', profile_name='{profile_name}')"
+                )
+                canonical_steps.append(
+                    f"Re-run preflight after auth refresh: validate_release_setup(app_url='{app_url}', profile_name='{profile_name}')"
+                )
             canonical_steps.append(
                 f"Review release-critical journey coverage: discover_critical_journeys(app_url='{app_url}')"
             )
@@ -324,7 +471,7 @@ async def validate_release_setup(
             )
         else:
             canonical_steps.append(
-                "If protected journeys gate this release, capture or refresh auth before running the release check."
+                "If protected journeys gate this release, capture auth with capture_auth_session(...) before running the release check."
             )
     else:
         if app_url:

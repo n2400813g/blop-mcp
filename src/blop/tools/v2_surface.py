@@ -526,6 +526,7 @@ async def capture_context(
         "graph_id": current_graph.graph_id,
         "app_url": app_url,
         "created_at": current_graph.created_at,
+        "crawl_diagnostics": inventory.crawl_metadata,
         "node_count": len(current_graph.nodes),
         "edge_count": len(current_graph.edges),
         "archetype": current_graph.archetype,

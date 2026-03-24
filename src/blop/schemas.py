@@ -132,9 +132,53 @@ class ExecutionPlan(BaseModel):
     business_criticality: Literal["revenue", "activation", "retention", "support", "other"] = "other"
 
 
+class MobileSelector(BaseModel):
+    """Selector strategies for mobile elements (iOS XCUITest / Android UIAutomator2)."""
+    accessibility_id: str | None = None       # XCUITest/UIAutomator2 accessibilityIdentifier
+    predicate_string: str | None = None       # iOS NSPredicate (e.g. "label == 'Sign In'")
+    class_chain: str | None = None            # iOS XCUITest class chain
+    xpath: str | None = None                  # fallback XPath (discouraged, brittle)
+    android_uiautomator: str | None = None    # UiSelector string for Android
+    text: str | None = None                   # visible text match
+    content_desc: str | None = None           # Android content-description
+
+
+class MobileDeviceTarget(BaseModel):
+    """App and device binding for a mobile flow."""
+    platform: Literal["ios", "android"]
+    app_id: str                               # bundle ID (iOS) or package name (Android)
+    app_path: str | None = None               # local .ipa/.apk path; omit to use installed app
+    device_name: str = "iPhone 15"            # Simulator name or real device name
+    os_version: str = "17.0"
+    device_udid: str | None = None            # reserved for real-device UDID (v1.1+)
+    orientation: Literal["portrait", "landscape"] = "portrait"
+    locale: str = "en_US"
+    app_version: str | None = None            # for evidence labeling only
+
+
+class MobileEvidenceBundle(BaseModel):
+    """Evidence artifacts produced by a mobile run step or case."""
+    run_id: str
+    case_id: str
+    platform: str                             # ios | android
+    screenshots: list[str] = Field(default_factory=list)
+    device_log_path: str | None = None        # path to syslog (iOS) or logcat (Android) file
+    network_har_path: str | None = None       # optional mitmproxy HAR (requires mobile-proxy extra)
+    crash_report_path: str | None = None
+    app_version: str | None = None
+    device_name: str | None = None
+    os_version: str | None = None
+
+
 class FlowStep(BaseModel):
     step_id: int
-    action: Literal["navigate", "click", "fill", "select", "upload", "drag", "assert", "wait"]
+    action: Literal[
+        # Web actions
+        "navigate", "click", "fill", "select", "upload", "drag", "assert", "wait",
+        # Mobile actions
+        "tap", "swipe", "long_press", "pinch", "scroll", "back",
+        "app_launch", "app_foreground", "app_background",
+    ]
     selector: str | None = None
     value: str | None = None
     description: str = ""
@@ -153,6 +197,13 @@ class FlowStep(BaseModel):
     label_text: str | None = None          # associated label/placeholder for fill steps
     # Structured assertion (for assert steps only)
     structured_assertion: StructuredAssertion | None = None
+    # Mobile-specific fields (None for all web flows — no breaking change)
+    mobile_selector: MobileSelector | None = None
+    swipe_direction: Literal["up", "down", "left", "right"] | None = None
+    swipe_distance_pct: float | None = None   # 0.0–1.0 fraction of screen dimension
+    touch_x_pct: float | None = None          # tap coordinate as fraction of screen width
+    touch_y_pct: float | None = None          # tap coordinate as fraction of screen height
+    pinch_scale: float | None = None          # >1.0 = zoom in, <1.0 = zoom out
 
 
 class RecordedFlow(BaseModel):
@@ -172,6 +223,9 @@ class RecordedFlow(BaseModel):
     # Useful for editor-heavy flows whose selectors don't survive replay (goal_fallback)
     # or for flows that must use strict step ordering (strict_steps).
     run_mode_override: Literal["hybrid", "strict_steps", "goal_fallback"] | None = None
+    # Mobile fields (None/default for all web flows — no breaking change)
+    platform: Literal["web", "ios", "android"] = "web"
+    mobile_target: MobileDeviceTarget | None = None
 
 
 class AuthenticatedBaselineRecipe(BaseModel):
@@ -252,6 +306,7 @@ class SiteInventory:
     business_signals: list[str]
     page_structures: dict[str, list[dict]] = field(default_factory=dict)
     crawled_pages: int = 0
+    crawl_metadata: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -265,6 +320,7 @@ class SiteInventory:
             "business_signals": self.business_signals,
             "page_structures": self.page_structures,
             "crawled_pages": self.crawled_pages,
+            "crawl_metadata": self.crawl_metadata,
         }
 
 
@@ -549,7 +605,15 @@ class FailureCase(BaseModel):
     flow_name: str
     status: Literal["pass", "fail", "error", "blocked"]
     severity: Literal["blocker", "high", "medium", "low", "none"] = "none"
-    failure_class: Literal["product_bug", "test_fragility", "auth_failure", "env_issue"] | None = None
+    failure_class: Literal[
+        "product_bug", "test_fragility", "auth_failure", "env_issue",
+        # Mobile-specific failure classes
+        "startup_failure", "install_failure", "navigation_crash",
+    ] | None = None
+    # Mobile evidence (None for web runs)
+    device_log_path: str | None = None
+    crash_report_path: str | None = None
+    platform: str = "web"
     failure_reason_codes: list[str] = []
     repro_steps: list[str] = []
     console_errors: list[str] = []
@@ -737,3 +801,73 @@ class BlockerTriage(BaseModel):
     recommended_action: str
     suggested_owner: str | None = None
     linked_artifacts: list[str]
+
+
+# ── Policy-Aware Release Gates (BLO-74) ───────────────────────────────────────
+
+class CriticalityGate(BaseModel):
+    """Per-criticality level configuration in a ReleasePolicy."""
+    criticality: Literal["revenue", "activation", "retention", "support", "other"]
+    on_failure: Literal["BLOCK", "INVESTIGATE", "IGNORE"] = "INVESTIGATE"
+    min_failures: int = 1
+    enabled: bool = True
+
+
+class ReleasePolicy(BaseModel):
+    """Named release gate policy — controls per-criticality and stability-bucket decisions."""
+    policy_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    policy_name: str
+    description: str = ""
+    is_default: bool = False
+    gates: list[CriticalityGate] = Field(default_factory=list)
+    # Global flags — can escalate INVESTIGATE → BLOCK across the whole run
+    block_on_any_failure: bool = False
+    block_on_unknown_stability: bool = False   # BLO-77: block if unknown_unclassified present
+    block_on_install_failure: bool = True      # BLO-77: block if install_or_upgrade_failure present
+
+    def gate_for(self, criticality: str) -> "CriticalityGate | None":
+        for g in self.gates:
+            if g.criticality == criticality:
+                return g
+        return None
+
+
+# Built-in default policy — matches the historical env-var behaviour
+DEFAULT_RELEASE_POLICY = ReleasePolicy(
+    policy_id="default",
+    policy_name="Default Policy",
+    description="Block on revenue/activation failures; investigate retention; other criticalities are informational.",
+    is_default=True,
+    gates=[
+        CriticalityGate(criticality="revenue",    on_failure="BLOCK",       min_failures=1, enabled=True),
+        CriticalityGate(criticality="activation", on_failure="BLOCK",       min_failures=1, enabled=True),
+        CriticalityGate(criticality="retention",  on_failure="INVESTIGATE", min_failures=1, enabled=True),
+        CriticalityGate(criticality="support",    on_failure="INVESTIGATE", min_failures=1, enabled=False),
+        CriticalityGate(criticality="other",      on_failure="INVESTIGATE", min_failures=1, enabled=False),
+    ],
+    block_on_any_failure=False,
+    block_on_unknown_stability=False,
+    block_on_install_failure=True,
+)
+
+
+class PolicyGateResult(BaseModel):
+    """Result of evaluating one CriticalityGate against actual run data."""
+    criticality: str
+    gate_enabled: bool
+    failures_found: int
+    threshold: int
+    fired: bool
+    decision_contribution: Literal["BLOCK", "INVESTIGATE", "IGNORE", "none"]
+    rationale: str
+
+
+class PolicyEvaluation(BaseModel):
+    """Full structured evaluation of a ReleasePolicy against a run's cases."""
+    policy_id: str
+    policy_name: str
+    gate_results: list[PolicyGateResult] = Field(default_factory=list)
+    final_decision: Literal["SHIP", "INVESTIGATE", "BLOCK"]
+    contributing_gates: list[str] = Field(default_factory=list)
+    applied_global_flags: list[str] = Field(default_factory=list)
+    rationale: str

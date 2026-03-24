@@ -13,6 +13,11 @@ eggs/
 .vibetest/
 runs/
 
+# Ralph autonomous agent (local tooling, not part of the project)
+.ralph/
+.ralphrc
+ralph-claude-code/
+
 # Auth session files
 auth_state*.json
 

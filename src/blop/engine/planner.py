@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
@@ -133,6 +134,18 @@ def _infer_target_surface(goal_text: str, scope: str) -> Literal["public_site", 
     return "unknown"
 
 
+def _extract_goal_urls(goal_text: str) -> list[str]:
+    if not goal_text:
+        return []
+    matches = re.findall(r"https?://[^\s'\"),]+", goal_text)
+    urls: list[str] = []
+    for match in matches:
+        cleaned = match.rstrip(".,;:")
+        if cleaned and cleaned not in urls:
+            urls.append(cleaned)
+    return urls
+
+
 def _infer_must_interact(goal_text: str, target_surface: str) -> list[str]:
     lowered = (goal_text or "").lower()
     actions = ["navigate"]
@@ -180,6 +193,12 @@ def build_execution_plan(
         intent.scope = "authed" if profile_name else "both"
         intent.run_mode = normalize_run_mode(run_mode)
 
+    goal_urls = _extract_goal_urls(goal_text)
+    app_host = (urlparse(app_url).netloc or "").lower()
+    goal_hosts = {(urlparse(url).netloc or "").lower() for url in goal_urls if url}
+    if goal_urls and app_host and goal_hosts and goal_hosts == {app_host} and not profile_name:
+        intent.scope = "public"
+
     target_surface = _infer_target_surface(goal_text, intent.scope)
     goal_type = _infer_goal_type(goal_text, target_surface)
     required_assertions = [a for a in (assertions or []) if a]
@@ -192,7 +211,7 @@ def build_execution_plan(
     if intended_replay_mode == "goal_fallback":
         fallback_policy.append("goal_fallback")
 
-    expected_patterns = [app_url]
+    expected_patterns = goal_urls[:] or [app_url]
     if target_surface == "editor":
         expected_patterns.append("/editor")
     elif target_surface == "billing":

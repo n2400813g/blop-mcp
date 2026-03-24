@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import time
 import traceback
 import uuid
 from typing import Optional
@@ -62,21 +63,29 @@ async def _return_waiting_auth(
     headless: bool,
     run_mode: str,
     auth_context_payload: dict,
+    startup_timing_ms: dict[str, int],
     message: str,
 ) -> dict:
-    await sqlite.create_run(run_id, app_url, profile_name, flow_ids, headless, artifacts_dir, run_mode)
-    await sqlite.update_run_status(run_id, "waiting_auth")
-    await sqlite.save_run_health_event(
-        run_id,
-        "run_queued",
-        {
-            "app_url": app_url,
-            "flow_count": flow_count,
-            "run_mode": auth_context_payload.get("run_mode", "hybrid"),
-            "profile_name": profile_name,
-        },
+    queued_payload = {
+        "app_url": app_url,
+        "flow_count": flow_count,
+        "run_mode": auth_context_payload.get("run_mode", "hybrid"),
+        "profile_name": profile_name,
+        "startup_timing_ms": startup_timing_ms,
+    }
+    auth_payload = {**auth_context_payload, "startup_timing_ms": startup_timing_ms}
+    await sqlite.create_run_with_initial_events(
+        run_id=run_id,
+        app_url=app_url,
+        profile_name=profile_name,
+        flow_ids=flow_ids,
+        headless=headless,
+        artifacts_dir=artifacts_dir,
+        run_mode=run_mode,
+        status="waiting_auth",
+        run_queued_payload=queued_payload,
+        auth_context_payload=auth_payload,
     )
-    await sqlite.save_run_health_event(run_id, "auth_context_resolved", auth_context_payload)
     status_meta = explain_run_status("waiting_auth", run_id=run_id)
     return {
         "run_id": run_id,
@@ -245,15 +254,18 @@ async def run_regression_test(
         if intent.profile_name and not profile_name:
             profile_name = intent.profile_name
 
+    launch_started = time.perf_counter()
     run_id = uuid.uuid4().hex
     flows: list = []
     missing_flow_ids: list[str] = []
+    flow_lookup_started = time.perf_counter()
     for fid in flow_ids:
         flow = await sqlite.get_flow(fid)
         if flow:
             flows.append(flow)
         else:
             missing_flow_ids.append(fid)
+    flow_lookup_ms = int((time.perf_counter() - flow_lookup_started) * 1000)
     if not flows:
         return _start_error(
             "None of the provided flow_ids were found. "
@@ -276,10 +288,20 @@ async def run_regression_test(
 
     storage_state: Optional[str] = None
     artifacts_dir = file_store.artifacts_dir(run_id)
+    auth_resolve_ms = 0
     if profile:
+        auth_resolve_started = time.perf_counter()
         try:
             storage_state = await auth_engine.resolve_storage_state(profile)
         except Exception:
+            auth_resolve_ms = int((time.perf_counter() - auth_resolve_started) * 1000)
+            startup_timing_ms = {
+                "flow_lookup": flow_lookup_ms,
+                "auth_resolve": auth_resolve_ms,
+                "auth_validate": 0,
+                "db_persist": 0,
+                "total_launch": int((time.perf_counter() - launch_started) * 1000),
+            }
             auth_context_payload = {
                 "profile_name": profile_name,
                 "auth_used": True,
@@ -300,9 +322,18 @@ async def run_regression_test(
                 headless=headless,
                 run_mode=run_mode,
                 auth_context_payload=auth_context_payload,
+                startup_timing_ms=startup_timing_ms,
                 message=f"Auth profile '{profile_name}' could not be resolved. Refresh the session or credentials, then retry.",
             )
+        auth_resolve_ms = int((time.perf_counter() - auth_resolve_started) * 1000)
         if not storage_state:
+            startup_timing_ms = {
+                "flow_lookup": flow_lookup_ms,
+                "auth_resolve": auth_resolve_ms,
+                "auth_validate": 0,
+                "db_persist": 0,
+                "total_launch": int((time.perf_counter() - launch_started) * 1000),
+            }
             auth_context_payload = {
                 "profile_name": profile_name,
                 "auth_used": True,
@@ -322,10 +353,10 @@ async def run_regression_test(
                 headless=headless,
                 run_mode=run_mode,
                 auth_context_payload=auth_context_payload,
+                startup_timing_ms=startup_timing_ms,
                 message=f"Auth profile '{profile_name}' did not resolve a usable session. Refresh auth before replaying.",
             )
 
-    await sqlite.create_run(run_id, app_url, profile_name, flow_ids, headless, artifacts_dir, run_mode)
     auth_context_payload = {
         "profile_name": profile_name,
         "auth_used": bool(profile_name),
@@ -334,26 +365,79 @@ async def run_regression_test(
         "user_data_dir": getattr(profile, "user_data_dir", None) if profile else None,
         "session_validation_status": "not_requested",
     }
+    auth_validate_ms = 0
     if storage_state:
+        auth_validate_started = time.perf_counter()
         try:
             session_valid = await auth_engine.validate_auth_session(storage_state, app_url)
             auth_context_payload["session_validation_status"] = "valid" if session_valid else "expired_session"
         except Exception as exc:
             auth_context_payload["session_validation_status"] = "validation_error"
             auth_context_payload["session_validation_error"] = str(exc)[:200]
-    if profile and auth_context_payload["session_validation_status"] in {"expired_session", "validation_error"}:
-        await sqlite.update_run_status(run_id, "waiting_auth")
-        await sqlite.save_run_health_event(
-            run_id,
-            "run_queued",
-            {
-                "app_url": app_url,
-                "flow_count": len(flows),
-                "run_mode": run_mode,
-                "profile_name": profile_name,
-            },
-        )
-        await sqlite.save_run_health_event(run_id, "auth_context_resolved", auth_context_payload)
+        auth_validate_ms = int((time.perf_counter() - auth_validate_started) * 1000)
+
+    waiting_auth = profile and auth_context_payload["session_validation_status"] in {"expired_session", "validation_error"}
+    startup_timing_ms = {
+        "flow_lookup": flow_lookup_ms,
+        "auth_resolve": auth_resolve_ms,
+        "auth_validate": auth_validate_ms,
+        "db_persist": 0,
+        "total_launch": 0,
+    }
+    queued_payload = {
+        "app_url": app_url,
+        "flow_count": len(flows),
+        "run_mode": run_mode,
+        "profile_name": profile_name,
+        "startup_timing_ms": startup_timing_ms,
+    }
+    auth_context_payload = {**auth_context_payload, "startup_timing_ms": startup_timing_ms}
+
+    db_persist_started = time.perf_counter()
+    await sqlite.create_run_with_initial_events(
+        run_id=run_id,
+        app_url=app_url,
+        profile_name=profile_name,
+        flow_ids=flow_ids,
+        headless=headless,
+        artifacts_dir=artifacts_dir,
+        run_mode=run_mode,
+        status="waiting_auth" if waiting_auth else "queued",
+        run_queued_payload=queued_payload,
+        auth_context_payload=auth_context_payload,
+    )
+    startup_timing_ms["db_persist"] = int((time.perf_counter() - db_persist_started) * 1000)
+    startup_timing_ms["total_launch"] = int((time.perf_counter() - launch_started) * 1000)
+    final_startup_timing_ms = dict(startup_timing_ms)
+    await sqlite.save_run_health_event(
+        run_id,
+        "run_startup_timing",
+        final_startup_timing_ms,
+    )
+
+    _log.info(
+        "run_startup_timing run_id=%s flow_lookup_ms=%s auth_resolve_ms=%s auth_validate_ms=%s db_persist_ms=%s total_launch_ms=%s",
+        run_id,
+        final_startup_timing_ms["flow_lookup"],
+        final_startup_timing_ms["auth_resolve"],
+        final_startup_timing_ms["auth_validate"],
+        final_startup_timing_ms["db_persist"],
+        final_startup_timing_ms["total_launch"],
+        extra={
+            "event": "run_startup_timing",
+            "run_id": run_id,
+            "flow_lookup_ms": final_startup_timing_ms["flow_lookup"],
+            "auth_resolve_ms": final_startup_timing_ms["auth_resolve"],
+            "auth_validate_ms": final_startup_timing_ms["auth_validate"],
+            "db_persist_ms": final_startup_timing_ms["db_persist"],
+            "total_launch_ms": final_startup_timing_ms["total_launch"],
+            "profile_name": profile_name,
+            "run_mode": run_mode,
+            "flow_count": len(flows),
+        },
+    )
+
+    if waiting_auth:
         status_meta = explain_run_status("waiting_auth", run_id=run_id)
         if auth_context_payload["session_validation_status"] == "expired_session":
             message = f"Auth profile '{profile_name}' has an expired session for {app_url}. Refresh auth before replaying."
@@ -370,17 +454,6 @@ async def run_regression_test(
             "is_terminal": status_meta["is_terminal"],
             "workflow_hint": message,
         }
-    await sqlite.save_run_health_event(
-        run_id,
-        "run_queued",
-        {
-            "app_url": app_url,
-            "flow_count": len(flows),
-            "run_mode": run_mode,
-            "profile_name": profile_name,
-        },
-    )
-    await sqlite.save_run_health_event(run_id, "auth_context_resolved", auth_context_payload)
 
     # Fire-and-forget; caller polls get_test_results
     task = _spawn_background_task(
@@ -392,7 +465,15 @@ async def run_regression_test(
         "new",
         "queued",
         len(flows),
-        extra={"run_id": run_id, "from_status": "new", "to_status": "queued", "flow_count": len(flows)},
+        extra={
+            "event": "run_transition",
+            "run_id": run_id,
+            "from_status": "new",
+            "to_status": "queued",
+            "flow_count": len(flows),
+            "run_mode": run_mode,
+            "profile_name": profile_name,
+        },
     )
     _RUN_TASKS[run_id] = task
 
@@ -447,7 +528,15 @@ async def _run_and_persist(
         run_id,
         "queued",
         "running",
-        extra={"run_id": run_id, "from_status": "queued", "to_status": "running"},
+        extra={
+            "event": "run_transition",
+            "run_id": run_id,
+            "from_status": "queued",
+            "to_status": "running",
+            "flow_count": len(flows),
+            "run_mode": run_mode,
+            "profile_name": profile_name,
+        },
     )
     await sqlite.save_run_health_event(
         run_id,
@@ -462,6 +551,7 @@ async def _run_and_persist(
     try:
         from blop.config import BLOP_RUN_TIMEOUT_SECS
 
+        execution_metadata: dict[str, dict] = {}
         run_coro = regression_engine.run_flows(
             flows=flows,
             app_url=app_url,
@@ -471,6 +561,7 @@ async def _run_and_persist(
             run_mode=run_mode,
             auto_rerecord=auto_rerecord,
             profile_name=profile_name,
+            execution_metadata=execution_metadata,
         )
         if BLOP_RUN_TIMEOUT_SECS > 0:
             cases = await asyncio.wait_for(run_coro, timeout=float(BLOP_RUN_TIMEOUT_SECS))
@@ -484,6 +575,7 @@ async def _run_and_persist(
             case.business_criticality = flow_criticality.get(case.flow_id, "other")
             classified.append(await classifier.classify_case(case, app_url))
             await sqlite.save_case(case)
+            case_meta = execution_metadata.get(case.flow_id, {})
             await sqlite.save_run_health_event(
                 run_id,
                 "case_completed",
@@ -498,6 +590,8 @@ async def _run_and_persist(
                     "business_criticality": case.business_criticality,
                     "repair_confidence": case.repair_confidence,
                     "healing_decision": case.healing_decision,
+                    "worker_slot": case_meta.get("worker_slot"),
+                    "entry_area_key": case_meta.get("entry_area_key"),
                 },
             )
 
@@ -511,7 +605,14 @@ async def _run_and_persist(
             run_id,
             "running",
             "completed",
-            extra={"run_id": run_id, "from_status": "running", "to_status": "completed"},
+            extra={
+                "event": "run_transition",
+                "run_id": run_id,
+                "from_status": "running",
+                "to_status": "completed",
+                "case_count": len(classified),
+                "next_action_count": len(next_actions),
+            },
         )
         await sqlite.save_run_health_event(
             run_id,
@@ -552,6 +653,7 @@ async def _run_and_persist(
             "failed",
             "run_timeout",
             extra={
+                "event": "run_transition",
                 "run_id": run_id,
                 "from_status": "running",
                 "to_status": "failed",
@@ -583,6 +685,7 @@ async def _run_and_persist(
             "cancelled",
             "task_cancelled",
             extra={
+                "event": "run_transition",
                 "run_id": run_id,
                 "from_status": "running",
                 "to_status": "cancelled",
@@ -610,6 +713,7 @@ async def _run_and_persist(
             "failed",
             "unhandled_exception",
             extra={
+                "event": "run_transition",
                 "run_id": run_id,
                 "from_status": "running",
                 "to_status": "failed",

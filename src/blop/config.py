@@ -94,6 +94,8 @@ else:
     BLOP_DB_PATH: str = _RAW_BLOP_DB_PATH
 BLOP_HEADLESS: bool = os.getenv("BLOP_HEADLESS", "true").lower() == "true"
 BLOP_MAX_STEPS: int = int(os.getenv("BLOP_MAX_STEPS", "50"))
+BLOP_DISCOVERY_CONCURRENCY: int = int(os.getenv("BLOP_DISCOVERY_CONCURRENCY", "0"))
+BLOP_REPLAY_CONCURRENCY: int = int(os.getenv("BLOP_REPLAY_CONCURRENCY", "0"))
 
 # Multi-LLM provider support
 BLOP_LLM_PROVIDER: str = os.getenv("BLOP_LLM_PROVIDER", "google")
@@ -222,6 +224,10 @@ def runtime_config_issues() -> tuple[list[str], list[str]]:
         errors.append("BLOP_RUN_TIMEOUT_SECS must be >= 0")
     if BLOP_STEP_TIMEOUT_SECS <= 0:
         errors.append("BLOP_STEP_TIMEOUT_SECS must be > 0")
+    if BLOP_DISCOVERY_CONCURRENCY < 0:
+        errors.append("BLOP_DISCOVERY_CONCURRENCY must be >= 0")
+    if BLOP_REPLAY_CONCURRENCY < 0:
+        errors.append("BLOP_REPLAY_CONCURRENCY must be >= 0")
     if not 0.0 <= BLOP_AUTO_HEAL_MIN_CONFIDENCE <= 1.0:
         errors.append("BLOP_AUTO_HEAL_MIN_CONFIDENCE must be between 0.0 and 1.0")
     if not 0.0 <= BLOP_AUTO_HEAL_MAX_BEHAVIOR_RISK <= 1.0:
@@ -245,6 +251,44 @@ def runtime_config_issues() -> tuple[list[str], list[str]]:
             "production_minimal, production_debug, full"
         )
     return errors, warnings
+
+
+def runtime_posture_snapshot() -> dict:
+    """Return a summary of the current runtime posture for health/doctor surfaces."""
+    errors, warnings = runtime_config_issues()
+    has_key, key_name = check_llm_api_key()
+    caps_profile = os.getenv("BLOP_CAPABILITIES_PROFILE", "").strip().lower() or "unspecified"
+    return {
+        "environment": BLOP_ENV,
+        "llm_provider": BLOP_LLM_PROVIDER.lower(),
+        "llm_key_name": key_name,
+        "llm_key_present": has_key,
+        "capabilities_profile": caps_profile,
+        "compat_tools_enabled": BLOP_ENABLE_COMPAT_TOOLS,
+        "require_absolute_paths": BLOP_REQUIRE_ABSOLUTE_PATHS,
+        "allow_internal_urls": BLOP_ALLOW_INTERNAL_URLS,
+        "allowed_hosts": list(BLOP_ALLOWED_HOSTS),
+        "timeouts": {
+            "run_timeout_secs": BLOP_RUN_TIMEOUT_SECS,
+            "step_timeout_secs": BLOP_STEP_TIMEOUT_SECS,
+        },
+        "concurrency": {
+            "discovery_workers": BLOP_DISCOVERY_CONCURRENCY,
+            "replay_workers": BLOP_REPLAY_CONCURRENCY,
+        },
+        "paths": {
+            "db_path": BLOP_DB_PATH,
+            "db_path_absolute": os.path.isabs(BLOP_DB_PATH),
+            "runs_dir": BLOP_RUNS_DIR,
+            "runs_dir_absolute": bool(BLOP_RUNS_DIR) and os.path.isabs(BLOP_RUNS_DIR),
+            "debug_log": BLOP_DEBUG_LOG,
+            "debug_log_absolute": bool(BLOP_DEBUG_LOG) and os.path.isabs(BLOP_DEBUG_LOG),
+        },
+        "issues": {
+            "errors": errors,
+            "warnings": warnings,
+        },
+    }
 
 
 # SPA / complex workflow tuning

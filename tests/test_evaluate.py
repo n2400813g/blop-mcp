@@ -47,12 +47,17 @@ async def test_evaluate_web_task_persists_run_artifacts_and_format(tmp_path):
 
         run = await sqlite.get_run(result["run_id"])
         artifacts = await sqlite.list_artifacts_for_run(result["run_id"])
+        cases = await sqlite.list_cases_for_run(result["run_id"])
 
     assert run is not None
     assert run["status"] == "completed"
+    assert run["completed_at"] is not None
     assert run["run_mode"] == "evaluate"
     assert "formatted_report" in result
     assert result["formatted_report"].startswith("## Web Evaluation Report")
+    assert len(cases) == 1
+    assert cases[0].status == "pass"
+    assert cases[0].severity == "none"
 
     artifact_types = {a["artifact_type"] for a in artifacts}
     assert "network_log" in artifact_types
@@ -108,3 +113,54 @@ async def test_evaluate_web_task_promotes_to_recorded_flow_when_requested(tmp_pa
     promote_mock.assert_awaited_once()
     assert result["recorded_flow_id"] == "flow_promoted_123"
     assert result["pass_fail"] == "pass"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_web_task_persists_failure_case_for_step_budget_exhaustion(tmp_path):
+    from blop.tools import evaluate
+    from blop.tools.results import get_test_results
+    from blop.storage import sqlite
+
+    db_path = str(tmp_path / "evaluate_fail.db")
+    fake_report = {
+        "summary": ["Task encountered issues"],
+        "agent_steps": [{"step": 1, "action": "navigate", "description": "Navigate -> https://example.com"}],
+        "evidence": {
+            "console_errors": [],
+            "console_log_count": 0,
+            "network_failures": [],
+            "network_request_count": 0,
+            "screenshots": ["/tmp/eval_fail_1.png"],
+            "trace_path": "/tmp/eval_fail_trace.zip",
+        },
+        "pass_fail": "fail",
+        "raw_result": "I have reached the maximum number of steps and the task is incomplete.",
+        "elapsed_secs": 12.3,
+        "_network_log_path": None,
+        "_console_log_path": None,
+    }
+
+    with patch.dict(os.environ, {"BLOP_DB_PATH": db_path}):
+        await sqlite.init_db()
+        with patch(
+            "blop.tools.evaluate.auth_engine.auto_storage_state_from_env",
+            new=AsyncMock(return_value=None),
+        ), patch("blop.tools.evaluate._run_evaluation", new=AsyncMock(return_value=fake_report)):
+            result = await evaluate.evaluate_web_task(
+                app_url="https://example.com",
+                task="Explore the public site and report blockers",
+                format="json",
+            )
+            run = await sqlite.get_run(result["run_id"])
+            cases = await sqlite.list_cases_for_run(result["run_id"])
+            stored_report = await get_test_results(result["run_id"])
+
+    assert run["status"] == "completed"
+    assert run["completed_at"] is not None
+    assert result["release_recommendation"]["decision"] == "BLOCK"
+    assert len(cases) == 1
+    assert cases[0].severity == "blocker"
+    assert cases[0].failure_class == "test_fragility"
+    assert cases[0].failure_reason_codes == ["agent_step_budget_exhausted"]
+    assert stored_report["release_recommendation"]["decision"] == "BLOCK"
+    assert stored_report["top_failure_mode"] == "automation_fragility"

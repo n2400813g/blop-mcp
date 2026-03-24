@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Literal, Optional
@@ -10,6 +11,7 @@ from blop.config import validate_app_url
 from blop.engine.logger import get_logger
 from blop.reporting.results import explain_run_status
 from blop.schemas import ReleaseCheckRequest
+from blop.stability import build_stability_gate_summary
 from blop.storage import sqlite
 
 _log = get_logger("tools.release_check")
@@ -97,6 +99,26 @@ def _queued_release_check_result(
         "recommended_next_action": status_meta["recommended_next_action"],
         "is_terminal": status_meta["is_terminal"],
         "workflow_hint": status_meta["recommended_next_action"],
+        "stability_gate_summary": {
+            "blocking_buckets": [],
+            "bucket_counts": {},
+            "unknown_count": 0,
+            "required_follow_up_actions": ["Poll the run to collect stability bucket results."],
+            "release_blocked_by_stability": False,
+            "review_required_buckets": [],
+        },
+        "release_exit_criteria": {
+            "blocking_rules": [
+                "install_or_upgrade_failure in smoke coverage blocks release",
+                "auth_session_failure in release-gating journeys blocks release",
+                "unknown_unclassified in release smoke blocks release unless waived",
+            ],
+            "review_rules": [
+                "stale_flow_drift reduces replay trust until the flow is refreshed",
+                "selector_healing_failure reduces replay trust until the flow is refreshed",
+            ],
+            "release_blocked_by_stability": False,
+        },
     }
 
 
@@ -181,6 +203,7 @@ def _build_release_check_result(
         "artifacts": f"blop://release/{release_id}/artifacts",
         "incidents": f"blop://release/{release_id}/incidents",
     }
+    gate_summary = build_stability_gate_summary(run_result)
 
     return {
         "release_id": release_id,
@@ -193,6 +216,19 @@ def _build_release_check_result(
         "business_impact": business_impact,
         "prioritized_actions": prioritized_actions,
         "resource_links": resource_links,
+        "stability_gate_summary": gate_summary,
+        "release_exit_criteria": {
+            "blocking_rules": [
+                "install_or_upgrade_failure in smoke coverage blocks release",
+                "auth_session_failure in release-gating journeys blocks release",
+                "unknown_unclassified in release smoke blocks release unless waived",
+            ],
+            "review_rules": [
+                "stale_flow_drift reduces replay trust until the flow is refreshed",
+                "selector_healing_failure reduces replay trust until the flow is refreshed",
+            ],
+            "release_blocked_by_stability": gate_summary["release_blocked_by_stability"],
+        },
     }
 
 
@@ -388,6 +424,7 @@ async def _run_targeted(
     headless: bool,
 ) -> dict:
     from blop.tools.evaluate import evaluate_web_task
+    from blop.tools.results import get_test_results
 
     # Build a task from journey goals or a generic one
     tasks: list[str] = []
@@ -401,44 +438,39 @@ async def _run_targeted(
         tasks = ["Navigate the app, check that critical user flows work end-to-end, and report any errors."]
 
     task = " Then: ".join(tasks[:3])  # Combine up to 3 goals
+    max_steps = int(os.getenv("BLOP_TARGETED_MAX_STEPS", "40"))
 
     eval_result = await evaluate_web_task(
         app_url=app_url,
         task=task,
         profile_name=profile_name,
         headless=headless,
+        max_steps=max_steps,
     )
 
     if "error" in eval_result:
         return {"error": eval_result["error"], "release_id": release_id}
 
-    # Synthesize a minimal RunResult-like dict to reuse _build_release_check_result
-    rec = eval_result.get("release_recommendation", {})
+    run_id = eval_result.get("run_id")
+    if not run_id:
+        return {"error": "Targeted evaluation did not return a run_id.", "release_id": release_id}
+
+    detailed_result = await get_test_results(run_id)
+    if "error" in detailed_result:
+        return {"error": detailed_result["error"], "release_id": release_id}
+
+    result = _build_release_check_result(detailed_result, release_id, app_url)
+    result.update(detailed_result)
+    rec = result.get("release_recommendation", {})
     decision = rec.get("decision", "INVESTIGATE")
-    confidence_label = rec.get("confidence", "medium")
-    pf = eval_result.get("pass_fail", "error")
-
-    severity_counts: dict = {}
-    if pf == "pass":
-        severity_counts = {"none": 1}
-    else:
-        severity_counts = {"high": 1}
-
-    synthetic_run = {
-        "run_id": eval_result.get("run_id", uuid.uuid4().hex),
-        "status": "completed",
-        "release_recommendation": rec,
-        "severity_counts": severity_counts,
-        "cases": [],
-        "next_actions": [
-            rec.get("rationale", "Review evaluation evidence.")
-        ],
-    }
-
-    result = _build_release_check_result(synthetic_run, release_id, app_url)
     await _save_release_brief(result, app_url)
-    status_meta = explain_run_status(result["status"], run_id=result["run_id"], top_failure_mode="unknown")
+    status_meta = explain_run_status(
+        result["status"],
+        run_id=result["run_id"],
+        top_failure_mode=result.get("top_failure_mode", "unknown"),
+    )
 
+    result["release_id"] = release_id
     result["mode"] = "targeted"
     result["evaluation_summary"] = eval_result.get("summary", [])
     result["selected_flows"] = []
@@ -461,4 +493,5 @@ async def _run_targeted(
     result["recommended_next_action"] = status_meta["recommended_next_action"]
     result["is_terminal"] = status_meta["is_terminal"]
     result["workflow_hint"] = status_meta["recommended_next_action"]
+    result["stability_gate_summary"] = build_stability_gate_summary(result)
     return result

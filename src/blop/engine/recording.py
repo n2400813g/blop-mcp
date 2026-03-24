@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import base64
 import hashlib
 import json
@@ -10,6 +11,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import urlparse
 
 from blop.config import (
     BLOP_AGENT_MAX_ACTIONS_PER_STEP,
@@ -32,6 +34,197 @@ _LOW_SIGNAL_TARGET_TEXT = {
     "upload",
     "wait",
 }
+
+
+def _extract_goal_urls(goal: str) -> list[str]:
+    matches = re.findall(r"https?://[^\s'\"),]+", goal or "")
+    urls: list[str] = []
+    for match in matches:
+        cleaned = match.rstrip(".,;:")
+        if cleaned and cleaned not in urls:
+            urls.append(cleaned)
+    return urls
+
+
+def _extract_goal_text_expectations(goal: str) -> list[str]:
+    expectations: list[str] = []
+    patterns = (
+        r"(?:shows?|display(?:s)?|contains?)\s+(?:the\s+)?text\s+['\"]([^'\"]+)['\"]",
+        r"verify\s+(?:the\s+)?(?:page|homepage|screen)?\s*(?:shows?|contains?)\s+['\"]([^'\"]+)['\"]",
+    )
+    for pattern in patterns:
+        for match in re.findall(pattern, goal or "", flags=re.IGNORECASE):
+            text = str(match).strip()
+            if text and text not in expectations:
+                expectations.append(text)
+    return expectations
+
+
+def _build_public_page_assertions(
+    *,
+    goal: str,
+    current_url: str,
+    page_title: str,
+    heading_text: str | None = None,
+    page_body_text: str | None = None,
+) -> list[tuple[str, Optional[StructuredAssertion]]]:
+    assertions: list[tuple[str, Optional[StructuredAssertion]]] = []
+
+    goal_urls = _extract_goal_urls(goal)
+    if goal_urls:
+        parsed = urlparse(goal_urls[0])
+        expected = parsed.path or "/"
+        if parsed.query:
+            expected = f"{expected}?{parsed.query}"
+        assertions.append((
+            f"URL contains {expected}",
+            StructuredAssertion(
+                assertion_type="url_contains",
+                expected=expected,
+                description=f"URL contains {expected}",
+            ),
+        ))
+
+    searchable_text = " ".join(
+        part.strip().lower()
+        for part in (heading_text or "", page_title or "", page_body_text or "")
+        if part
+    )
+    for text in _extract_goal_text_expectations(goal):
+        if searchable_text and text.lower() not in searchable_text:
+            continue
+        assertions.append((
+            f"Text '{text}' is visible",
+            StructuredAssertion(
+                assertion_type="text_present",
+                expected=text,
+                description=f"Text '{text}' is visible",
+            ),
+        ))
+
+    normalized_title = (page_title or "").strip()
+    if normalized_title:
+        assertions.append((
+            f"Page title contains {normalized_title}",
+            StructuredAssertion(
+                assertion_type="page_title",
+                expected=normalized_title,
+                description=f"Page title contains {normalized_title}",
+            ),
+        ))
+
+    deduped: list[tuple[str, Optional[StructuredAssertion]]] = []
+    seen: set[tuple[str, str | None]] = set()
+    for description, structured in assertions:
+        key = (
+            getattr(structured, "assertion_type", "semantic") if structured else "semantic",
+            getattr(structured, "expected", None) if structured else description,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((description, structured))
+    return deduped[:3]
+
+
+def _looks_like_public_page_assertion_target(goal: str, current_url: str) -> bool:
+    lowered_goal = (goal or "").lower()
+    lowered_url = (current_url or "").lower()
+    if any(token in lowered_goal for token in ("homepage", "public", "marketing", "landing page")):
+        return True
+    goal_urls = _extract_goal_urls(goal)
+    if goal_urls:
+        return True
+    public_markers = ("/pages/", "/reference/", "/docs/", "/blog/", "/help/", "/challenges/")
+    return any(marker in lowered_url for marker in public_markers) or lowered_url.rstrip("/").count("/") <= 2
+
+
+def _selector_from_interacted_attrs(interacted_hint: dict[str, Optional[str]], action: str) -> Optional[str]:
+    attrs = interacted_hint or {}
+    testid = attrs.get("testid")
+    if testid:
+        safe = str(testid).replace("'", "\\'")
+        return f"[data-testid='{safe}']"
+
+    element_id = attrs.get("id")
+    if element_id and re.match(r"^[A-Za-z][A-Za-z0-9_:\\-]*$", element_id):
+        return f"#{element_id}"
+
+    name_attr = attrs.get("name_attr")
+    if name_attr:
+        safe = str(name_attr).replace("'", "\\'")
+        return f"[name='{safe}']"
+
+    placeholder = attrs.get("placeholder")
+    if placeholder:
+        safe = str(placeholder).replace("'", "\\'")
+        return f"[placeholder='{safe}']"
+
+    href = attrs.get("href")
+    if action == "click" and href:
+        safe = str(href).replace("'", "\\'")
+        return f"a[href='{safe}']"
+
+    input_type = (attrs.get("input_type") or "").lower()
+    if action == "fill" and input_type in {"email", "url", "tel", "password", "search", "number"}:
+        return f"input[type='{input_type}']"
+    if action == "fill" and input_type == "text":
+        return "input[type='text']"
+    return None
+
+
+def _extract_interacted_attrs_from_description(description: str) -> dict[str, Optional[str]]:
+    """Recover element attributes from the browser-use action repr when live attrs are unavailable."""
+    if not description:
+        return {}
+
+    attrs_match = re.search(r"attributes=(\{.*?\})(?:[,)])", description)
+    attrs: dict[str, Optional[str]] = {}
+    if attrs_match:
+        try:
+            parsed = ast.literal_eval(attrs_match.group(1))
+        except Exception:
+            parsed = {}
+        if isinstance(parsed, dict):
+            attrs.update(parsed)
+
+    # The browser-use repr is often truncated; recover the most useful keys directly.
+    for key in ("id", "name", "type", "placeholder", "href", "aria-label", "role"):
+        match = re.search(rf"'{re.escape(key)}': '([^']+)'", description)
+        if match and key not in attrs:
+            attrs[key] = match.group(1)
+
+    if not attrs:
+        return {}
+
+    node_name_match = re.search(r"node_name='([^']+)'", description)
+    node_name = node_name_match.group(1).lower() if node_name_match else ""
+
+    return {
+        "id": attrs.get("id"),
+        "testid": attrs.get("data-testid") or attrs.get("data-cy") or attrs.get("data-test"),
+        "placeholder": attrs.get("placeholder"),
+        "name_attr": attrs.get("name"),
+        "href": attrs.get("href"),
+        "input_type": attrs.get("type"),
+        "name": (
+            attrs.get("aria-label")
+            or attrs.get("placeholder")
+            or attrs.get("name")
+            or attrs.get("title")
+        ),
+        "role": attrs.get("role"),
+        "node_name": node_name,
+    }
+
+
+def _merge_interacted_hints(
+    primary: dict[str, Optional[str]],
+    fallback: dict[str, Optional[str]],
+) -> dict[str, Optional[str]]:
+    merged = dict(fallback or {})
+    merged.update({key: value for key, value in (primary or {}).items() if value})
+    return merged
 
 # Shared agent instructions used by both recording and goal-fallback regression agents.
 # Kept here so both contexts stay in sync without duplication.
@@ -292,7 +485,11 @@ async def record_flow(
                         except Exception:
                             _log.debug("extract interacted element xpath and text", exc_info=True)
 
-                    desc = str(action)[:200]
+                    desc = str(action)[:400]
+                    interacted_hint = _merge_interacted_hints(
+                        interacted_hint,
+                        _extract_interacted_attrs_from_description(desc),
+                    )
                     if not target_text:
                         # Prefer meaningful param values over the raw dict repr (which would
                         # produce the action key name, e.g. "write_file", as the target text).
@@ -316,7 +513,7 @@ async def record_flow(
                     if hasattr(action, "url") and action.url:
                         value = str(action.url)
                         url_after = value
-                    desc = str(action)[:200] if action else ""
+                    desc = str(action)[:400] if action else ""
                     target_text = _extract_target_text(desc)
 
                 mapped = _map_action(action_name)
@@ -334,6 +531,8 @@ async def record_flow(
                 dom_name: Optional[str] = interacted_hint.get("name") if isinstance(interacted_hint, dict) else None
 
                 if page_ref is not None and mapped != "navigate":
+                    if _is_brittle_selector(selector):
+                        selector = None
                     locator_reference = interacted_xpath or selector
                     locator_kind = "xpath" if interacted_xpath else "css"
                     if locator_reference:
@@ -368,6 +567,11 @@ async def record_flow(
                         aria_name = dom_name
                     if not target_text:
                         target_text = _prefer_semantic_target_text(None, aria_name, dom_name, label_text)
+
+                if not selector and isinstance(interacted_hint, dict):
+                    selector = _selector_from_interacted_attrs(interacted_hint, mapped)
+                if not label_text and isinstance(interacted_hint, dict):
+                    label_text = interacted_hint.get("placeholder") or interacted_hint.get("name") or label_text
 
                 if _is_brittle_selector(selector):
                     selector = None
@@ -468,10 +672,48 @@ async def _generate_assertions_from_screenshot(
     Returns a list of (assertion_text, StructuredAssertion | None) tuples.
     Falls back to plain-string assertions if structured parsing fails.
     """
+    current_url = ""
+    page_title = ""
+    heading_text = ""
+    try:
+        current_url = page.url or ""
+    except Exception:
+        current_url = ""
+    try:
+        page_title = await page.title() or ""
+    except Exception:
+        page_title = ""
+    try:
+        heading_text = (await page.inner_text("h1") or "").strip()
+    except Exception:
+        heading_text = ""
+    try:
+        page_body_text = (await page.evaluate("() => document.body.innerText") or "").strip()
+    except Exception:
+        page_body_text = ""
+
+    if _looks_like_public_page_assertion_target(goal, current_url):
+        deterministic_public = _build_public_page_assertions(
+            goal=goal,
+            current_url=current_url,
+            page_title=page_title,
+            heading_text=heading_text or None,
+            page_body_text=page_body_text or None,
+        )
+        if deterministic_public:
+            return deterministic_public
+
     from blop.config import check_llm_api_key
     has_key, _ = check_llm_api_key()
     if not has_key:
-        return [(f"Page shows expected content for: {goal}", None)]
+        return [(
+            f"Page title contains {page_title or 'the expected page'}",
+            StructuredAssertion(
+                assertion_type="page_title",
+                expected=page_title or "expected page",
+                description=f"Page title contains {page_title or 'the expected page'}",
+            ),
+        )]
 
     try:
         from blop.engine.llm_factory import make_planning_llm
@@ -534,7 +776,14 @@ Example:
     except Exception:
         _log.debug("generate assertions from screenshot", exc_info=True)
 
-    return [(f"Page shows expected content for: {goal}", None)]
+    return [(
+        f"Page title contains {page_title or 'the expected page'}",
+        StructuredAssertion(
+            assertion_type="page_title",
+            expected=page_title or "expected page",
+            description=f"Page title contains {page_title or 'the expected page'}",
+        ),
+    )]
 
 
 async def _get_page_aria_context(page) -> str:
@@ -694,6 +943,12 @@ def _extract_interacted_element_hint(interacted) -> dict[str, Optional[str]]:
         "role": role,
         "name": name,
         "target_text": name or (meaningful_text[:100] if isinstance(meaningful_text, str) else None),
+        "id": attrs.get("id"),
+        "testid": attrs.get("data-testid") or attrs.get("data-cy") or attrs.get("data-test"),
+        "placeholder": attrs.get("placeholder"),
+        "name_attr": attrs.get("name"),
+        "href": attrs.get("href"),
+        "input_type": attrs.get("type"),
     }
 
 

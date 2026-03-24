@@ -22,7 +22,7 @@ Step 4 — Record or refresh any missing release-gating journeys:
      goal="Complete a purchase end-to-end",
      business_criticality="revenue"
    )
-   → Transitional admin step. Repeat only for the release-gating journeys you need.
+   → Transitional admin step. Repeat only for the release-gating journeys you need, and refresh stale recordings before trusting replay failures.
 
 Step 5 — Run release check:
    run_release_check(app_url="https://your-app.com", mode="replay")
@@ -48,6 +48,7 @@ Step 9 — Make the ship/no-ship decision:
 Note:
    replay mode over recorded journeys is the release-gating golden path.
    targeted mode is a scoped fallback for fast smoke checks when replay coverage is incomplete.
+   goal_fallback is a recovery mode for drift, not the default release gate.
 
 Resources available:
    blop://journeys                        → All recorded journeys

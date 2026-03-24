@@ -5,6 +5,8 @@ import os
 import sys
 from unittest.mock import AsyncMock
 
+import pytest
+
 
 def _get_registered_tool_names() -> set[str]:
     """Return the set of tool names registered on server.mcp."""
@@ -98,3 +100,30 @@ def test_prompt_resources_marked_internal_debug():
 
     assert "Debug/internal resource" in (server.prompts_list_resource.__doc__ or "")
     assert "Debug/internal resource" in (server.prompt_resource.__doc__ or "")
+
+
+@pytest.mark.asyncio
+async def test_health_resource_includes_runtime_posture_and_path_checks(monkeypatch):
+    import blop.server as server
+
+    monkeypatch.setattr(server.sqlite, "list_runs", AsyncMock(return_value=[]))
+    monkeypatch.setattr(server.regression, "_RUN_TASKS", {})
+
+    async def fake_posture():
+        return {}
+
+    with monkeypatch.context() as m:
+        m.setattr("shutil.which", lambda _name: "/usr/bin/chromium")
+        m.setattr(
+            "blop.config.runtime_posture_snapshot",
+            lambda: {
+                "environment": "production",
+                "paths": {"db_path_absolute": True, "debug_log": "/tmp/blop.log"},
+            },
+        )
+        out = await server.health_resource()
+
+    assert out["db_reachable"] is True
+    assert out["chromium_found"] is True
+    assert out["runtime_posture"]["environment"] == "production"
+    assert out["path_checks"]["db_path_absolute"] is True

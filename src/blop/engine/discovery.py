@@ -2,13 +2,20 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import os
 import re
+import time
+from dataclasses import dataclass
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
-from blop.config import BLOP_DISCOVERY_MAX_PAGES, BLOP_SPA_SETTLE_MS
+from blop.config import (
+    BLOP_DISCOVERY_CONCURRENCY,
+    BLOP_DISCOVERY_MAX_PAGES,
+    BLOP_SPA_SETTLE_MS,
+)
 from blop.engine.auth import resolve_storage_state_for_profile
 from blop.engine.interaction import wait_for_spa_ready
 from blop.engine.logger import get_logger
@@ -16,6 +23,32 @@ from blop.engine.secrets import mask_text
 from blop.schemas import SiteInventory
 
 _log = get_logger("discovery")
+
+
+@dataclass(frozen=True)
+class _CrawlWorkItem:
+    url: str
+    depth: int
+    priority: float
+    area_key: str
+    source_url: str
+
+
+@dataclass
+class _CrawlPageResult:
+    url: str
+    depth: int
+    area_key: str
+    buttons: list[dict]
+    links: list[dict]
+    forms: list[dict]
+    headings: list[str]
+    routes: list[str]
+    nodes: list[dict]
+    auth_signals: list[str]
+    business_signals: list[str]
+    discovered_urls: list[str]
+    error: str | None = None
 
 
 def _url_priority(url: str, business_signals: list[str], auth_signals: list[str], hotspot_paths: set[str]) -> float:
@@ -44,6 +77,258 @@ def _adaptive_budget(base_max_pages: int, business_signals: list[str], auth_sign
     if signal_count >= 4:
         return min(30, base_max_pages + 6)
     return base_max_pages
+
+
+def _route_area_key(value: str) -> str:
+    parsed = urlparse(value)
+    path = parsed.path or "/"
+    segments = [segment for segment in path.split("/") if segment]
+    return segments[0].lower() if segments else "/"
+
+
+def _dedupe_keep_order(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(item for item in items if item))
+
+
+def _normalize_inventory_buttons(items: list[dict]) -> list[dict]:
+    deduped = _dedupe_dict_items(items, ("text", "href"))
+    return sorted(
+        deduped,
+        key=lambda item: (
+            str(item.get("text", "")).strip().lower(),
+            str(item.get("href", "")).strip().lower(),
+            str(item.get("id", "")).strip().lower(),
+        ),
+    )
+
+
+def _normalize_inventory_links(items: list[dict]) -> list[dict]:
+    deduped = _dedupe_dict_items(items, ("source_route", "href", "text"))
+    return sorted(
+        deduped,
+        key=lambda item: (
+            str(item.get("source_route", "")).strip().lower(),
+            str(item.get("href", "")).strip().lower(),
+            str(item.get("text", "")).strip().lower(),
+        ),
+    )
+
+
+def _normalize_inventory_forms(items: list[dict]) -> list[dict]:
+    def _form_key(item: dict) -> tuple[str, ...]:
+        inputs = item.get("inputs") or []
+        input_key = ",".join(
+            f"{inp.get('type', '')}:{inp.get('name', '')}:{inp.get('placeholder', '')}:{inp.get('label', '')}"
+            for inp in inputs
+        )
+        return (
+            str(item.get("action", "")).strip().lower(),
+            input_key.lower(),
+        )
+
+    deduped: list[dict] = []
+    seen: set[tuple[str, ...]] = set()
+    for item in items:
+        key = _form_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return sorted(deduped, key=_form_key)
+
+
+def _resolve_discovery_worker_count(max_pages: int, *, storage_state: str | None) -> int:
+    if BLOP_DISCOVERY_CONCURRENCY > 0:
+        return max(1, min(BLOP_DISCOVERY_CONCURRENCY, max_pages))
+    auto_default = 2 if storage_state else 3
+    return max(1, min(auto_default, max_pages))
+
+
+def _choose_next_work_item(frontier: list[_CrawlWorkItem], area_page_counts: dict[str, int]) -> _CrawlWorkItem:
+    unexplored = [item for item in frontier if area_page_counts.get(item.area_key, 0) == 0]
+    candidates = unexplored or frontier
+    selected = min(
+        candidates,
+        key=lambda item: (
+            area_page_counts.get(item.area_key, 0) if not unexplored else 0,
+            -item.priority,
+            item.depth,
+            item.area_key,
+            item.url,
+        ),
+    )
+    frontier.remove(selected)
+    return selected
+
+
+async def _create_crawl_context(browser, *, storage_state: str | None):
+    ctx_kwargs: dict = {}
+    if storage_state:
+        ctx_kwargs["storage_state"] = storage_state
+    return await browser.new_context(**ctx_kwargs)
+
+
+async def _extract_page_inventory(page, url: str) -> _CrawlPageResult:
+    page_buttons = await page.evaluate(
+        """() => Array.from(document.querySelectorAll('button, [role="button"], a.btn, .cta, [class*="btn"]'))
+            .map(el => ({text: el.textContent.trim().slice(0,120), id: el.id, href: el.getAttribute('href') || null}))
+            .filter(el => el.text).slice(0,25)"""
+    )
+    page_links = await page.evaluate(
+        """() => Array.from(document.querySelectorAll('a[href]'))
+            .map(el => ({text: el.textContent.trim().slice(0,120), href: el.href}))
+            .filter(el => el.text && !el.href.startsWith('mailto:') && !el.href.startsWith('tel:'))
+            .slice(0,35)"""
+    )
+    page_links = _dedupe_dict_items(page_links or [], ("href", "text"))
+    page_forms = await page.evaluate(
+        """() => Array.from(document.querySelectorAll('form'))
+            .map(form => ({
+                action: form.action,
+                inputs: Array.from(form.querySelectorAll('input, textarea, select'))
+                    .map(el => ({type: el.type, name: el.name, placeholder: el.placeholder, label: el.getAttribute('aria-label') || ''}))
+            })).slice(0,6)"""
+    )
+    page_headings = await page.evaluate(
+        """() => Array.from(document.querySelectorAll('h1, h2, h3'))
+            .map(el => el.textContent.trim().slice(0,100))
+            .filter(t => t).slice(0,10)"""
+    )
+    page_routes = await page.evaluate(
+        """() => [...new Set(Array.from(document.querySelectorAll('a[href]'))
+            .map(el => { try { return new URL(el.href).pathname; } catch(e) { return null; } })
+            .filter(p => p && p !== '/'))].slice(0,30)"""
+    )
+    page_buttons = _dedupe_dict_items(page_buttons or [], ("text", "href"))
+    page_nodes = await _capture_page_structure(page, max_nodes=50)
+
+    source_path = urlparse(url).path or "/"
+    for link in page_links:
+        link["source_route"] = source_path
+        link["source_url"] = url
+
+    page_text_lower = " ".join(
+        [button.get("text", "") for button in page_buttons]
+        + [link.get("text", "") for link in page_links]
+        + page_headings
+    ).lower()
+    auth_signals: list[str] = []
+    business_signals: list[str] = []
+    for signal in (
+        "sign in", "login", "log in", "sign up", "register", "logout",
+        "dashboard", "/auth", "/login", "/signup", "get started", "create account",
+    ):
+        if signal in page_text_lower and signal not in auth_signals:
+            auth_signals.append(signal)
+    for signal in (
+        "pricing", "contact", "integration", "oauth", "checkout",
+        "payment", "subscribe", "onboarding", "demo", "trial", "plans",
+    ):
+        if signal in page_text_lower and signal not in business_signals:
+            business_signals.append(signal)
+
+    routes_text = " ".join(page_routes).lower()
+    for signal in ("/pricing", "/contact", "/login", "/signup", "/auth", "/checkout", "/demo"):
+        if signal not in routes_text or signal in business_signals + auth_signals:
+            continue
+        if signal in ("/login", "/signup", "/auth"):
+            auth_signals.append(signal)
+        else:
+            business_signals.append(signal)
+
+    discovered_urls = [
+        link.get("href", "")
+        for link in page_links
+        if isinstance(link.get("href"), str) and link.get("href", "").startswith("http")
+    ]
+
+    return _CrawlPageResult(
+        url=url,
+        depth=0,
+        area_key=_route_area_key(url),
+        buttons=page_buttons,
+        links=page_links,
+        forms=page_forms or [],
+        headings=page_headings or [],
+        routes=page_routes or [],
+        nodes=page_nodes,
+        auth_signals=auth_signals,
+        business_signals=business_signals,
+        discovered_urls=discovered_urls,
+    )
+
+
+async def _crawl_one_page(page, item: _CrawlWorkItem, *, worker_slot: int = 0) -> _CrawlPageResult:
+    try:
+        try:
+            await page.goto(item.url, wait_until="domcontentloaded", timeout=15000)
+            await wait_for_spa_ready(
+                page,
+                settle_ms=max(BLOP_SPA_SETTLE_MS, 750),
+                timeout_ms=15000,
+            )
+        except Exception as first_error:
+            try:
+                await page.goto(item.url, timeout=15000)
+                await wait_for_spa_ready(
+                    page,
+                    settle_ms=max(BLOP_SPA_SETTLE_MS, 750),
+                    timeout_ms=15000,
+                )
+            except Exception as second_error:
+                _log.debug(
+                    "crawl_page_failed event=crawl_page_failed url=%s worker_slot=%s error_type=%s error_message=%s fallback_error_type=%s fallback_error_message=%s",
+                    item.url,
+                    worker_slot,
+                    type(first_error).__name__,
+                    str(first_error)[:160],
+                    type(second_error).__name__,
+                    str(second_error)[:160],
+                )
+                return _CrawlPageResult(
+                    url=item.url,
+                    depth=item.depth,
+                    area_key=item.area_key,
+                    buttons=[],
+                    links=[],
+                    forms=[],
+                    headings=[],
+                    routes=[],
+                    nodes=[],
+                    auth_signals=[],
+                    business_signals=[],
+                    discovered_urls=[],
+                    error=f"{type(second_error).__name__}: {str(second_error)[:200]}",
+                )
+
+        result = await _extract_page_inventory(page, item.url)
+        result.depth = item.depth
+        result.area_key = item.area_key
+        return result
+    except Exception as exc:
+        _log.debug(
+            "crawl_page_failed event=crawl_page_failed url=%s worker_slot=%s error_type=%s error_message=%s",
+            item.url,
+            worker_slot,
+            type(exc).__name__,
+            str(exc)[:200],
+            exc_info=True,
+        )
+        return _CrawlPageResult(
+            url=item.url,
+            depth=item.depth,
+            area_key=item.area_key,
+            buttons=[],
+            links=[],
+            forms=[],
+            headings=[],
+            routes=[],
+            nodes=[],
+            auth_signals=[],
+            business_signals=[],
+            discovered_urls=[],
+            error=f"{type(exc).__name__}: {str(exc)[:200]}",
+        )
 
 
 def _dedupe_dict_items(items: list[dict], key_fields: tuple[str, ...]) -> list[dict]:
@@ -184,6 +469,73 @@ def _heuristic_flows_from_inventory(inventory: SiteInventory) -> list[dict]:
     return flows[:8]
 
 
+def _slugify_route_label(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "_", (value or "").lower()).strip("_")
+    return cleaned or "section"
+
+
+def _titleize_route_label(value: str) -> str:
+    return " ".join(part.capitalize() for part in re.split(r"[_\-/]+", value or "") if part) or "Section"
+
+
+def _inventory_section_fallback_flows(inventory: SiteInventory) -> list[dict]:
+    """Generate public-site fallback flows that spread across distinct route sections."""
+    section_map: dict[tuple[str, ...], str] = {}
+    for route in inventory.routes:
+        parsed = urlparse(route if "://" in route else urljoin(inventory.app_url, route))
+        segments = [segment for segment in (parsed.path or "/").split("/") if segment]
+        if not segments:
+            continue
+        if segments[0] in {"pages", "reference", "apps", "challenges"} and len(segments) >= 2:
+            key = (segments[0], segments[1])
+        else:
+            key = (segments[0],)
+        current = section_map.get(key)
+        candidate = parsed.path or "/"
+        if current is None or len(candidate) < len(current):
+            section_map[key] = candidate
+
+    flows: list[dict] = []
+    seen_names: set[str] = set()
+    preferred_order = {"pages": 0, "apps": 1, "challenges": 2, "reference": 3}
+
+    ranked_sections = sorted(
+        section_map.items(),
+        key=lambda item: (
+            preferred_order.get(item[0][0], 9),
+            len(item[0]),
+            item[0],
+        ),
+    )
+
+    for key, path in ranked_sections[:5]:
+        if path == "/":
+            continue
+        section_label = "_".join(key)
+        flow_name = f"explore_{_slugify_route_label(section_label)}"
+        if flow_name in seen_names:
+            continue
+        seen_names.add(flow_name)
+        title = _titleize_route_label(" ".join(key))
+        target_url = urljoin(inventory.app_url, path)
+        flows.append(
+            {
+                "flow_name": flow_name,
+                "goal": f"Navigate to {target_url} and verify the {title} section loads and its primary examples are reachable.",
+                "starting_url": target_url,
+                "preconditions": [],
+                "likely_assertions": [
+                    f"URL contains {path}",
+                    f"{title} navigation or examples are visible",
+                ],
+                "severity_if_broken": "medium",
+                "confidence": 0.48,
+                "business_criticality": "other",
+            }
+        )
+    return flows
+
+
 from blop.engine.dom_utils import extract_interactive_nodes_flat as _extract_interactive_nodes_flat
 
 
@@ -289,17 +641,10 @@ async def inventory_site(
     include_url_pattern: Optional[str] = None,
     exclude_url_pattern: Optional[str] = None,
 ) -> SiteInventory:
-    """BFS crawl up to depth max_depth; extract buttons, links, forms, headings, and signals."""
+    """Parallel crawl up to depth max_depth; extract buttons, links, forms, headings, and signals."""
     from playwright.async_api import async_playwright
 
     base_origin = urlparse(app_url).netloc
-    visited: set[str] = set()
-    queue: list[tuple[str, int, float]] = [(app_url, 0, 1.0)]
-    if seed_urls:
-        for seed in seed_urls:
-            if seed and seed != app_url:
-                queue.append((seed, 0, 0.9))
-
     all_buttons: list[dict] = []
     all_links: list[dict] = []
     all_forms: list[dict] = []
@@ -311,6 +656,9 @@ async def inventory_site(
     crawled_pages = 0
     adaptive_max_pages = max_pages
     hotspot_paths: set[str] = set()
+    area_page_counts: dict[str, int] = {}
+    error_count = 0
+    crawl_started = time.monotonic()
 
     try:
         from blop.storage.sqlite import get_latest_context_graph
@@ -323,174 +671,191 @@ async def inventory_site(
         _log.debug("Failed to load previous context graph for hotspot paths", exc_info=True)
 
     storage_state = await resolve_storage_state_for_profile(profile_name, allow_auto_env=False)
+    worker_count = _resolve_discovery_worker_count(max_pages, storage_state=storage_state)
+    active_worker_count = 1
+    seeded_area_keys: list[str] = [_route_area_key(app_url)]
+    if seed_urls:
+        seeded_area_keys.extend(_route_area_key(seed) for seed in seed_urls if seed)
+    seeded_area_keys = _dedupe_keep_order(seeded_area_keys)
+
+    visited: set[str] = set()
+    inflight: set[str] = set()
+    frontier_urls: set[str] = set()
+    frontier: list[_CrawlWorkItem] = []
+    scheduled_pages = 0
+
+    def _url_allowed(candidate: str) -> bool:
+        if not candidate:
+            return False
+        if same_origin_only and urlparse(candidate).netloc != base_origin:
+            return False
+        if include_url_pattern and not re.search(include_url_pattern, candidate):
+            return False
+        if exclude_url_pattern and re.search(exclude_url_pattern, candidate):
+            return False
+        return True
+
+    def _enqueue_url(candidate: str, *, depth: int, source_url: str) -> None:
+        if not candidate or depth > max_depth or not _url_allowed(candidate):
+            return
+        if candidate in visited or candidate in inflight or candidate in frontier_urls:
+            return
+        frontier.append(
+            _CrawlWorkItem(
+                url=candidate,
+                depth=depth,
+                priority=_url_priority(candidate, business_signals, auth_signals, hotspot_paths),
+                area_key=_route_area_key(candidate),
+                source_url=source_url,
+            )
+        )
+        frontier_urls.add(candidate)
+
+    def _absorb_result(result: _CrawlPageResult) -> None:
+        nonlocal crawled_pages, adaptive_max_pages, error_count
+        if result.error:
+            error_count += 1
+            return
+
+        crawled_pages += 1
+        area_page_counts[result.area_key] = area_page_counts.get(result.area_key, 0) + 1
+        all_buttons.extend(result.buttons)
+        all_links.extend(result.links)
+        all_forms.extend(result.forms)
+        all_headings.extend(result.headings)
+        for route in result.routes:
+            all_routes.add(route)
+        if result.nodes:
+            page_structures[result.url] = result.nodes
+        for signal in result.auth_signals:
+            if signal not in auth_signals:
+                auth_signals.append(signal)
+        for signal in result.business_signals:
+            if signal not in business_signals:
+                business_signals.append(signal)
+        adaptive_max_pages = _adaptive_budget(max_pages, business_signals, auth_signals)
+
+        if result.depth >= max_depth:
+            return
+        for discovered_url in result.discovered_urls:
+            _enqueue_url(discovered_url, depth=result.depth + 1, source_url=result.url)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        ctx_kwargs: dict = {}
-        if storage_state:
-            ctx_kwargs["storage_state"] = storage_state
-        context = await browser.new_context(**ctx_kwargs)
-        page = await context.new_page()
-
         try:
-            while queue and crawled_pages < adaptive_max_pages:
-                queue.sort(key=lambda item: item[2], reverse=True)
-                url, depth, _priority = queue.pop(0)
-                if url in visited:
-                    continue
-                if same_origin_only and urlparse(url).netloc != base_origin:
-                    continue
-                if include_url_pattern and not re.search(include_url_pattern, url):
-                    continue
-                if exclude_url_pattern and re.search(exclude_url_pattern, url):
-                    continue
-                visited.add(url)
+            bootstrap_urls = [app_url]
+            if seed_urls:
+                bootstrap_urls.extend(seed for seed in seed_urls if seed and seed != app_url)
 
+            bootstrap_context = await _create_crawl_context(browser, storage_state=storage_state)
+            bootstrap_page = await bootstrap_context.new_page()
+            try:
+                for bootstrap_url in bootstrap_urls:
+                    if crawled_pages >= adaptive_max_pages or not _url_allowed(bootstrap_url):
+                        continue
+                    if bootstrap_url in visited:
+                        continue
+                    visited.add(bootstrap_url)
+                    scheduled_pages += 1
+                    bootstrap_item = _CrawlWorkItem(
+                        url=bootstrap_url,
+                        depth=0,
+                        priority=1.0 if bootstrap_url == app_url else 0.9,
+                        area_key=_route_area_key(bootstrap_url),
+                        source_url=app_url,
+                    )
+                    result = await _crawl_one_page(bootstrap_page, bootstrap_item, worker_slot=0)
+                    if result.error:
+                        scheduled_pages = max(0, scheduled_pages - 1)
+                    _absorb_result(result)
+            finally:
                 try:
+                    await bootstrap_page.close()
+                except Exception:
+                    _log.debug("Failed to close bootstrap crawl page", exc_info=True)
+                try:
+                    await bootstrap_context.close()
+                except Exception:
+                    _log.debug("Failed to close bootstrap crawl context", exc_info=True)
+
+            if frontier and crawled_pages < adaptive_max_pages:
+                effective_worker_count = max(1, min(worker_count, len(frontier)))
+                active_worker_count = effective_worker_count
+                condition = asyncio.Condition()
+
+                async def worker_loop(worker_slot: int) -> None:
+                    nonlocal scheduled_pages
+                    context = await _create_crawl_context(browser, storage_state=storage_state)
+                    page = await context.new_page()
                     try:
-                        await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                        await wait_for_spa_ready(
-                            page,
-                            settle_ms=max(BLOP_SPA_SETTLE_MS, 750),
-                            timeout_ms=15000,
-                        )
-                    except Exception as first_error:
+                        while True:
+                            async with condition:
+                                while True:
+                                    if crawled_pages >= adaptive_max_pages and not inflight:
+                                        return
+                                    if frontier and scheduled_pages < adaptive_max_pages:
+                                        item = _choose_next_work_item(frontier, area_page_counts)
+                                        frontier_urls.discard(item.url)
+                                        inflight.add(item.url)
+                                        visited.add(item.url)
+                                        scheduled_pages += 1
+                                        break
+                                    if not frontier and not inflight:
+                                        return
+                                    await condition.wait()
+
+                            result = await _crawl_one_page(page, item, worker_slot=worker_slot)
+
+                            async with condition:
+                                inflight.discard(item.url)
+                                if result.error:
+                                    scheduled_pages = max(crawled_pages, scheduled_pages - 1)
+                                _absorb_result(result)
+                                condition.notify_all()
+                    finally:
                         try:
-                            await page.goto(url, timeout=15000)
-                            await wait_for_spa_ready(
-                                page,
-                                settle_ms=max(BLOP_SPA_SETTLE_MS, 750),
-                                timeout_ms=15000,
-                            )
-                        except Exception as second_error:
-                            _log.debug(
-                                "crawl_page_failed event=crawl_page_failed url=%s error_type=%s error_message=%s fallback_error_type=%s fallback_error_message=%s",
-                                url,
-                                type(first_error).__name__,
-                                str(first_error)[:160],
-                                type(second_error).__name__,
-                                str(second_error)[:160],
-                            )
-                            continue
+                            await page.close()
+                        except Exception:
+                            _log.debug("Failed to close crawl worker page", exc_info=True)
+                        try:
+                            await context.close()
+                        except Exception:
+                            _log.debug("Failed to close crawl worker context", exc_info=True)
 
-                    crawled_pages += 1
-
-                    page_buttons = await page.evaluate(
-                        """() => Array.from(document.querySelectorAll('button, [role="button"], a.btn, .cta, [class*="btn"]'))
-                            .map(el => ({text: el.textContent.trim().slice(0,120), id: el.id, href: el.getAttribute('href') || null}))
-                            .filter(el => el.text).slice(0,25)"""
-                    )
-                    page_links = await page.evaluate(
-                        """() => Array.from(document.querySelectorAll('a[href]'))
-                            .map(el => ({text: el.textContent.trim().slice(0,120), href: el.href}))
-                            .filter(el => el.text && !el.href.startsWith('mailto:') && !el.href.startsWith('tel:'))
-                            .slice(0,35)"""
-                    )
-                    page_links = _dedupe_dict_items(page_links or [], ("href", "text"))
-                    page_forms = await page.evaluate(
-                        """() => Array.from(document.querySelectorAll('form'))
-                            .map(form => ({
-                                action: form.action,
-                                inputs: Array.from(form.querySelectorAll('input, textarea, select'))
-                                    .map(el => ({type: el.type, name: el.name, placeholder: el.placeholder, label: el.getAttribute('aria-label') || ''}))
-                            })).slice(0,6)"""
-                    )
-                    page_headings = await page.evaluate(
-                        """() => Array.from(document.querySelectorAll('h1, h2, h3'))
-                            .map(el => el.textContent.trim().slice(0,100))
-                            .filter(t => t).slice(0,10)"""
-                    )
-                    page_routes = await page.evaluate(
-                        """() => [...new Set(Array.from(document.querySelectorAll('a[href]'))
-                            .map(el => { try { return new URL(el.href).pathname; } catch(e) { return null; } })
-                            .filter(p => p && p !== '/'))].slice(0,30)"""
-                    )
-                    page_buttons = _dedupe_dict_items(page_buttons or [], ("text", "href"))
-                    page_nodes = await _capture_page_structure(page, max_nodes=50)
-
-                    all_buttons.extend(page_buttons)
-                    source_path = urlparse(url).path or "/"
-                    for lnk in page_links:
-                        lnk["source_route"] = source_path
-                        lnk["source_url"] = url
-                    all_links.extend(page_links)
-                    all_forms.extend(page_forms)
-                    all_headings.extend(page_headings)
-                    for route in page_routes:
-                        all_routes.add(route)
-                    if page_nodes:
-                        page_structures[url] = page_nodes
-
-                    page_text_lower = " ".join(
-                        [b.get("text", "") for b in page_buttons]
-                        + [l.get("text", "") for l in page_links]
-                        + page_headings
-                    ).lower()
-
-                    for signal in ("sign in", "login", "log in", "sign up", "register", "logout",
-                                   "dashboard", "/auth", "/login", "/signup", "get started", "create account"):
-                        if signal in page_text_lower and signal not in auth_signals:
-                            auth_signals.append(signal)
-
-                    for signal in ("pricing", "contact", "integration", "oauth", "checkout",
-                                   "payment", "subscribe", "onboarding", "demo", "trial", "plans"):
-                        if signal in page_text_lower and signal not in business_signals:
-                            business_signals.append(signal)
-                    adaptive_max_pages = _adaptive_budget(max_pages, business_signals, auth_signals)
-
-                    routes_text = " ".join(page_routes).lower()
-                    for signal in ("/pricing", "/contact", "/login", "/signup", "/auth", "/checkout", "/demo"):
-                        if signal in routes_text and signal not in business_signals + auth_signals:
-                            if signal in ("/login", "/signup", "/auth"):
-                                if signal not in auth_signals:
-                                    auth_signals.append(signal)
-                            else:
-                                if signal not in business_signals:
-                                    business_signals.append(signal)
-
-                    if depth < max_depth:
-                        for link in page_links:
-                            href = link.get("href", "")
-                            if href and href.startswith("http"):
-                                if urlparse(href).netloc != base_origin:
-                                    continue
-                                if include_url_pattern and not re.search(include_url_pattern, href):
-                                    continue
-                                if exclude_url_pattern and re.search(exclude_url_pattern, href):
-                                    continue
-                                if href not in visited:
-                                    priority = _url_priority(href, business_signals, auth_signals, hotspot_paths)
-                                    queue.append((href, depth + 1, priority))
-                except Exception as e:
-                    _log.debug(
-                        "crawl_page_failed event=crawl_page_failed url=%s error_type=%s error_message=%s",
-                        url,
-                        type(e).__name__,
-                        str(e)[:200],
-                        exc_info=True,
-                    )
+                await asyncio.gather(
+                    *(worker_loop(worker_slot) for worker_slot in range(1, effective_worker_count + 1))
+                )
         finally:
-            try:
-                await page.close()
-            except Exception:
-                _log.debug("Failed to close crawl page", exc_info=True)
-            try:
-                await context.close()
-            except Exception:
-                _log.debug("Failed to close browser context", exc_info=True)
             await browser.close()
 
+    crawl_finished = time.monotonic()
+    normalized_buttons = _normalize_inventory_buttons(all_buttons)[:30]
+    normalized_links = _normalize_inventory_links(all_links)[:40]
+    normalized_forms = _normalize_inventory_forms(all_forms)[:10]
+    normalized_headings = sorted(_dedupe_keep_order(all_headings), key=str.lower)[:20]
+    normalized_page_structures = {
+        url: page_structures[url]
+        for url in sorted(page_structures)
+    }
     return SiteInventory(
         app_url=app_url,
         routes=sorted(list(all_routes))[:30],
-        buttons=all_buttons[:30],
-        links=all_links[:40],
-        forms=all_forms[:10],
-        headings=list(dict.fromkeys(all_headings))[:20],
+        buttons=normalized_buttons,
+        links=normalized_links,
+        forms=normalized_forms,
+        headings=normalized_headings,
         auth_signals=auth_signals,
         business_signals=business_signals,
-        page_structures=page_structures,
+        page_structures=normalized_page_structures,
         crawled_pages=crawled_pages,
+        crawl_metadata={
+            "mode": "parallel_section_aware" if active_worker_count > 1 else "sequential",
+            "worker_count": active_worker_count,
+            "seeded_area_keys": seeded_area_keys,
+            "area_page_counts": dict(sorted(area_page_counts.items())),
+            "timing_ms": int((crawl_finished - crawl_started) * 1000),
+            "error_count": error_count,
+        },
     )
 
 
@@ -556,21 +921,21 @@ async def plan_flows_from_inventory(
             "planning_fallback": True,
             "planning_error": "GOOGLE_API_KEY is not set",
         }
-        flows = _fallback_flows(inventory.app_url)
+        flows = _fallback_flows(inventory.app_url, inventory=inventory)
         return (flows, fallback_meta) if include_meta else flows
     if provider == "anthropic" and not os.getenv("ANTHROPIC_API_KEY"):
         fallback_meta = {
             "planning_fallback": True,
             "planning_error": "ANTHROPIC_API_KEY is not set",
         }
-        flows = _fallback_flows(inventory.app_url)
+        flows = _fallback_flows(inventory.app_url, inventory=inventory)
         return (flows, fallback_meta) if include_meta else flows
     if provider == "openai" and not os.getenv("OPENAI_API_KEY"):
         fallback_meta = {
             "planning_fallback": True,
             "planning_error": "OPENAI_API_KEY is not set",
         }
-        flows = _fallback_flows(inventory.app_url)
+        flows = _fallback_flows(inventory.app_url, inventory=inventory)
         return (flows, fallback_meta) if include_meta else flows
 
     llm_kwargs: dict = {"temperature": 0.7, "max_output_tokens": 2000}
@@ -627,7 +992,7 @@ async def plan_flows_from_inventory(
             "planning_error": f"{type(e).__name__}: {str(e)[:200]}",
         }
 
-    flows = _fallback_flows(inventory.app_url)
+    flows = _fallback_flows(inventory.app_url, inventory=inventory)
     return (flows, fallback_meta) if include_meta else flows
 
 
@@ -705,7 +1070,7 @@ async def discover_flows(
     # Clamp to 3-8 flows
     flows = flows[:8]
     if len(flows) < 3:
-        flows += _fallback_flows(app_url)[: 3 - len(flows)]
+        flows += _fallback_flows(app_url, inventory=inventory)[: 3 - len(flows)]
 
     passed, warnings = quality_gate_flows(inventory, flows)
     from blop.engine.context_graph import (
@@ -746,6 +1111,7 @@ async def discover_flows(
             "crawled_pages": inventory.crawled_pages,
             "app_archetype": detect_app_archetype(inventory),
         },
+        "crawl_diagnostics": inventory.crawl_metadata,
         "flows": flows,
         "flow_count": len(flows),
         "quality": {
@@ -804,6 +1170,7 @@ async def explore_site_inventory(
             "crawled_pages": inventory.crawled_pages,
             "app_archetype": detect_app_archetype(inventory),
         },
+        "crawl_diagnostics": inventory.crawl_metadata,
         "inventory": inventory.to_dict(),
     }
 
@@ -878,8 +1245,8 @@ Return only a JSON array:
     return await plan_flows_from_inventory(inventory, business_goal=business_goal)
 
 
-def _fallback_flows(app_url: str) -> list[dict]:
-    return [
+def _fallback_flows(app_url: str, inventory: SiteInventory | None = None) -> list[dict]:
+    flows = [
         {
             "flow_name": "page_loads",
             "goal": f"Navigate to {app_url} and verify the page loads",
@@ -908,3 +1275,14 @@ def _fallback_flows(app_url: str) -> list[dict]:
             "confidence": 0.3,
         },
     ]
+    if inventory is not None:
+        flows.extend(_inventory_section_fallback_flows(inventory))
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    for flow in flows:
+        name = str(flow.get("flow_name", "")).strip().lower()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        deduped.append(flow)
+    return deduped[:8]

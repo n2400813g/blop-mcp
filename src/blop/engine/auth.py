@@ -25,10 +25,12 @@ _BLOP_DIR: str = str(Path(__file__).parent.parent.parent.parent / ".blop")
 _REPO_ROOT = Path(__file__).parent.parent.parent.parent.resolve()
 
 _auth_cache: dict[str, dict] = {}
+_validated_session_cache: dict[tuple[str, str, int], dict[str, float | bool]] = {}
 # Per-profile lock to prevent concurrent logins racing each other
 _login_locks: dict[str, asyncio.Lock] = {}
 _lock_creation_lock = asyncio.Lock()
 _log = get_logger("auth")
+_AUTH_VALIDATION_CACHE_TTL_SECS = float(os.getenv("BLOP_AUTH_VALIDATION_CACHE_TTL_SECS", "60"))
 
 # Set to True to allow absolute paths outside the repo root for auth files
 _ALLOW_ABSOLUTE_AUTH_PATHS: bool = os.getenv("BLOP_ALLOW_ABSOLUTE_AUTH_PATHS", "").lower() in ("1", "true", "yes")
@@ -358,6 +360,40 @@ async def validate_auth_session(
     auth_redirect_patterns: tuple[str, ...] = ("/login", "/signin", "/sign-in", "/auth"),
 ) -> bool:
     """Open headless browser with storage_state, navigate to app_url, return True if not redirected to auth."""
+    try:
+        mtime_ns = os.stat(storage_state_path).st_mtime_ns
+    except OSError:
+        invalidate_validated_session_cache(storage_state_path=storage_state_path, app_url=app_url)
+        mtime_ns = -1
+
+    cache_key = (storage_state_path, app_url, mtime_ns)
+    now = time.time()
+    _prune_validated_session_cache(now=now)
+    _drop_stale_validation_entries(storage_state_path, app_url, keep_mtime_ns=mtime_ns)
+    entry = _validated_session_cache.get(cache_key)
+    if entry and now < float(entry["expires"]):
+        return bool(entry["is_valid"])
+
+    is_valid = await _validate_auth_session_uncached(
+        storage_state_path=storage_state_path,
+        app_url=app_url,
+        auth_redirect_patterns=auth_redirect_patterns,
+    )
+    if is_valid:
+        _validated_session_cache[cache_key] = {
+            "is_valid": True,
+            "expires": now + max(_AUTH_VALIDATION_CACHE_TTL_SECS, 0.0),
+        }
+    else:
+        invalidate_validated_session_cache(storage_state_path=storage_state_path, app_url=app_url)
+    return is_valid
+
+
+async def _validate_auth_session_uncached(
+    storage_state_path: str,
+    app_url: str,
+    auth_redirect_patterns: tuple[str, ...] = ("/login", "/signin", "/sign-in", "/auth"),
+) -> bool:
     from playwright.async_api import async_playwright
 
     try:
@@ -379,6 +415,46 @@ async def validate_auth_session(
             exc_info=True,
         )
         return False
+
+
+def invalidate_validated_session_cache(
+    *,
+    storage_state_path: str | None = None,
+    app_url: str | None = None,
+) -> None:
+    keys_to_remove = [
+        key
+        for key in list(_validated_session_cache.keys())
+        if (storage_state_path is None or key[0] == storage_state_path)
+        and (app_url is None or key[1] == app_url)
+    ]
+    for key in keys_to_remove:
+        _validated_session_cache.pop(key, None)
+
+
+def _prune_validated_session_cache(*, now: float | None = None) -> None:
+    current_time = time.time() if now is None else now
+    keys_to_remove = [
+        key for key, entry in list(_validated_session_cache.items())
+        if current_time >= float(entry["expires"])
+    ]
+    for key in keys_to_remove:
+        _validated_session_cache.pop(key, None)
+
+
+def _drop_stale_validation_entries(
+    storage_state_path: str,
+    app_url: str,
+    *,
+    keep_mtime_ns: int,
+) -> None:
+    keys_to_remove = [
+        key
+        for key in list(_validated_session_cache.keys())
+        if key[0] == storage_state_path and key[1] == app_url and key[2] != keep_mtime_ns
+    ]
+    for key in keys_to_remove:
+        _validated_session_cache.pop(key, None)
 
 
 async def auto_storage_state_from_env() -> Optional[str]:

@@ -35,6 +35,8 @@ async def test_validate_all_pass_returns_ready():
     assert result["warnings"] == []
     assert "headline" in result
     assert "recommended_action" in result
+    assert "runtime_posture" in result
+    assert result["stability_readiness"]["ready_for_release_gating"] is True
     assert result["check_summary"]["total_checks"] >= 3
     assert any(c["name"] == "GOOGLE_API_KEY" and c["passed"] for c in result["checks"])
     assert any(c["name"] == "chromium_installed" and c["passed"] for c in result["checks"])
@@ -61,6 +63,7 @@ async def test_validate_missing_api_key_blocked():
     assert any("GOOGLE_API_KEY" in b for b in result["blockers"])
     api_check = next(c for c in result["checks"] if c["name"] == "GOOGLE_API_KEY")
     assert not api_check["passed"]
+    assert result["bucketed_blockers"][0]["stability_bucket"] == "environment_runtime_misconfig"
 
 
 @pytest.mark.asyncio
@@ -82,6 +85,7 @@ async def test_validate_chromium_not_installed_blocked():
     assert any("Chromium" in b for b in result["blockers"])
     chrom_check = next(c for c in result["checks"] if c["name"] == "chromium_installed")
     assert not chrom_check["passed"]
+    assert any(issue["stability_bucket"] == "install_or_upgrade_failure" for issue in result["bucketed_blockers"])
 
 
 @pytest.mark.asyncio
@@ -126,6 +130,7 @@ async def test_validate_app_url_unreachable_warnings():
     assert result["status"] == "warnings"
     assert result["blockers"] == []
     assert any("unreachable" in w or "not reachable" in w for w in result["warnings"])
+    assert result["bucketed_warnings"][0]["stability_bucket"] == "network_transient_infra"
 
 
 @pytest.mark.asyncio
@@ -203,6 +208,29 @@ async def test_validate_profile_not_found_warning():
     auth_check = next((c for c in result["checks"] if c["name"] == "auth_profile"), None)
     assert auth_check is not None
     assert not auth_check["passed"]
+    assert result["bucketed_warnings"][0]["stability_bucket"] == "auth_session_failure"
+    assert result["stability_readiness"]["primary_bucket"] == "auth_session_failure"
+
+
+@pytest.mark.asyncio
+async def test_validate_setup_records_bucketed_validation_observations():
+    from blop.tools.validate import validate_setup
+
+    mock_browser = AsyncMock()
+    mock_playwright = AsyncMock()
+    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
+    mock_playwright.__aexit__ = AsyncMock(return_value=False)
+    mock_playwright.chromium.launch.return_value = mock_browser
+
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+        with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+            with patch("blop.storage.sqlite.init_db", new_callable=AsyncMock):
+                with patch("urllib.request.urlopen", side_effect=Exception("Connection refused")):
+                    with patch("blop.storage.sqlite.save_telemetry_signals", new_callable=AsyncMock) as save_signals:
+                        result = await validate_setup(app_url="https://unreachable.example.com")
+
+    assert result["bucketed_warnings"][0]["stability_bucket"] == "network_transient_infra"
+    save_signals.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -254,6 +282,47 @@ async def test_validate_release_setup_delegates_to_validate_setup():
 
     assert result_setup["status"] == result_release["status"]
     assert result_release["headline"] == result_setup["headline"]
+
+
+@pytest.mark.asyncio
+async def test_validate_release_setup_auth_warning_prioritizes_refresh():
+    from blop.tools.validate import validate_release_setup
+
+    mock_browser = AsyncMock()
+    mock_playwright = AsyncMock()
+    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
+    mock_playwright.__aexit__ = AsyncMock(return_value=False)
+    mock_playwright.chromium.launch.return_value = mock_browser
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_urlopen_ctx = MagicMock()
+    mock_urlopen_ctx.__enter__ = MagicMock(return_value=mock_resp)
+    mock_urlopen_ctx.__exit__ = MagicMock(return_value=False)
+
+    profile = MagicMock()
+    profile.auth_type = "storage_state"
+
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+        with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+            with patch("blop.storage.sqlite.init_db", new_callable=AsyncMock):
+                with patch("urllib.request.urlopen", return_value=mock_urlopen_ctx):
+                    with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=profile):
+                        with patch(
+                            "blop.engine.auth.resolve_storage_state_for_profile",
+                            new_callable=AsyncMock,
+                            return_value="/tmp/auth.json",
+                        ):
+                            with patch("blop.engine.auth.validate_auth_session", new_callable=AsyncMock, return_value=False):
+                                result = await validate_release_setup(
+                                    app_url="https://example.com",
+                                    profile_name="prod",
+                                )
+
+    assert result["status"] == "warnings"
+    assert "expired" in result["headline"].lower()
+    assert "capture_auth_session" in result["recommended_action"]
+    assert "capture_auth_session" in result["suggested_next_steps"][0]
+    assert "validate_release_setup" in result["suggested_next_steps"][1]
 
 
 @pytest.mark.asyncio
