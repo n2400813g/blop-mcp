@@ -234,7 +234,7 @@ async def _evaluate_assertion(driver, assertion, platform: str) -> bool:
     """Evaluate a StructuredAssertion against the current mobile screen state."""
     loop = asyncio.get_event_loop()
     try:
-        page_source = await loop.run_in_executor(None, driver.page_source)
+        page_source = await loop.run_in_executor(None, lambda: driver.page_source)
     except Exception:
         return False
 

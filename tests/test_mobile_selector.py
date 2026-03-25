@@ -6,7 +6,7 @@ The Appium Python client must be installed: pip install blop-mcp[mobile]
 from __future__ import annotations
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 appium = pytest.importorskip("appium", reason="Appium-Python-Client not installed; skip with pip install blop-mcp[mobile]")
 

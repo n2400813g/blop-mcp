@@ -10,7 +10,7 @@ async def take_device_screenshot(driver, *, path: str) -> str:
     """Capture a device screenshot and save it to *path*. Returns the path."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     # driver.get_screenshot_as_base64() is synchronous; run in executor to avoid blocking
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     b64 = await loop.run_in_executor(None, driver.get_screenshot_as_base64)
     data = base64.b64decode(b64)
     with open(path, "wb") as f:
@@ -18,12 +18,12 @@ async def take_device_screenshot(driver, *, path: str) -> str:
     return path
 
 
-async def capture_ios_syslog(driver, *, output_path: str) -> None:
-    """Write iOS syslog lines captured during the session to *output_path*."""
+async def _capture_log(driver, log_type: str, *, output_path: str) -> None:
+    """Write device log lines of *log_type* to *output_path*."""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
-        log_entries = await loop.run_in_executor(None, lambda: driver.get_log("syslog"))
+        log_entries = await loop.run_in_executor(None, lambda: driver.get_log(log_type))
     except Exception:
         log_entries = []
 
@@ -31,21 +31,16 @@ async def capture_ios_syslog(driver, *, output_path: str) -> None:
         for entry in log_entries:
             msg = entry.get("message", "") if isinstance(entry, dict) else str(entry)
             f.write(msg + "\n")
+
+
+async def capture_ios_syslog(driver, *, output_path: str) -> None:
+    """Write iOS syslog lines captured during the session to *output_path*."""
+    await _capture_log(driver, "syslog", output_path=output_path)
 
 
 async def capture_android_logcat(driver, *, output_path: str) -> None:
     """Write Android logcat lines captured during the session to *output_path*."""
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    loop = asyncio.get_event_loop()
-    try:
-        log_entries = await loop.run_in_executor(None, lambda: driver.get_log("logcat"))
-    except Exception:
-        log_entries = []
-
-    with open(output_path, "w") as f:
-        for entry in log_entries:
-            msg = entry.get("message", "") if isinstance(entry, dict) else str(entry)
-            f.write(msg + "\n")
+    await _capture_log(driver, "logcat", output_path=output_path)
 
 
 async def capture_device_logs(driver, *, platform: str, output_path: str) -> None:

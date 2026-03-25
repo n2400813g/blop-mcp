@@ -131,8 +131,10 @@ class TestComputeReleaseRecommendation:
         # "other" gate is disabled in DEFAULT_RELEASE_POLICY
         cases = [_make_case("fail", criticality="other")]
         rec = _compute_release_recommendation(cases, "completed")
-        # Ungated failure escalates SHIP → INVESTIGATE
+        # Ungated failure escalates SHIP → INVESTIGATE (no gate should have fired)
         assert rec["decision"] == "INVESTIGATE"
+        fired_gates = [g for g in rec.get("gate_results", []) if g.get("fired")]
+        assert not fired_gates, f"No gate should fire for ungated 'other' failures, got: {fired_gates}"
 
     def test_blocker_severity_always_blocks_regardless_of_criticality(self):
         cases = [_make_case("fail", severity="blocker", criticality="other")]

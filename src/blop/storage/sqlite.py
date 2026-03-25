@@ -518,6 +518,38 @@ async def list_flows() -> list[dict]:
         ]
 
 
+async def find_flow_by_url_and_name(app_url: str, flow_name: str) -> dict | None:
+    """Return the first recorded flow matching *app_url* and *flow_name*, or None."""
+    async with aiosqlite.connect(_db_path()) as db:
+        try:
+            async with db.execute(
+                "SELECT flow_id, flow_name, app_url, goal, created_at, run_mode_override, intent_contract_json "
+                "FROM recorded_flows WHERE app_url = ? AND flow_name = ? LIMIT 1",
+                (app_url, flow_name),
+            ) as cursor:
+                row = await cursor.fetchone()
+        except Exception as exc:
+            if "intent_contract_json" not in str(exc):
+                raise
+            async with db.execute(
+                "SELECT flow_id, flow_name, app_url, goal, created_at, run_mode_override "
+                "FROM recorded_flows WHERE app_url = ? AND flow_name = ? LIMIT 1",
+                (app_url, flow_name),
+            ) as cursor:
+                row = await cursor.fetchone()
+    if not row:
+        return None
+    return {
+        "flow_id": row[0],
+        "flow_name": row[1],
+        "app_url": row[2],
+        "goal": row[3],
+        "created_at": row[4],
+        "run_mode_override": row[5] if len(row) > 5 else None,
+        "has_intent_contract": bool(row[6]) if len(row) > 6 else False,
+    }
+
+
 async def create_run(
     run_id: str,
     app_url: str,
@@ -1580,5 +1612,5 @@ async def list_policies() -> list[ReleasePolicy]:
         try:
             policies.append(ReleasePolicy.model_validate_json(row[0]))
         except Exception:
-            pass
+            _log.debug("Failed to parse policy row, skipping", exc_info=True)
     return policies

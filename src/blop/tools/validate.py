@@ -438,13 +438,17 @@ async def validate_setup(
 async def validate_release_setup(
     app_url: Optional[str] = None,
     profile_name: Optional[str] = None,
+    check_mobile: bool = False,
 ) -> dict:
     """Canonical MVP alias for validate_setup.
 
     Checks all preconditions (API key, Chromium, DB, app reachability, auth)
     before running a release check.
+
+    Args:
+        check_mobile: If True, also checks Appium server reachability for mobile testing.
     """
-    result = await validate_setup(app_url=app_url, profile_name=profile_name)
+    result = await validate_setup(app_url=app_url, profile_name=profile_name, check_mobile=check_mobile)
     status = result.get("status", "warnings")
 
     canonical_steps: list[str] = []

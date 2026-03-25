@@ -613,7 +613,7 @@ class FailureCase(BaseModel):
     # Mobile evidence (None for web runs)
     device_log_path: str | None = None
     crash_report_path: str | None = None
-    platform: str = "web"
+    platform: Literal["web", "ios", "android"] = "web"
     failure_reason_codes: list[str] = []
     repro_steps: list[str] = []
     console_errors: list[str] = []

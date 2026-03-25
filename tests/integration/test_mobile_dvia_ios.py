@@ -238,7 +238,7 @@ async def test_blop_record_and_replay_ios_flow(ios_target, tmp_path, monkeypatch
                 description="Navigate back to main menu",
             ),
         ],
-        created_at=datetime.datetime.utcnow().isoformat(),
+        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         business_criticality="other",
         platform="ios",
         mobile_target=ios_target,

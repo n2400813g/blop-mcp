@@ -82,7 +82,6 @@ if [[ "$PLATFORM" == "ios" || "$PLATFORM" == "both" ]]; then
     echo "  Install Xcode from the App Store, then re-run this script."
   else
     DEVICE="${BLOP_IOS_DEVICE:-iPhone 15}"
-    RUNTIME="com.apple.CoreSimulator.SimRuntime.iOS-17-0"
 
     # Boot simulator if not running
     UDID=$(xcrun simctl list devices available 2>/dev/null | grep "$DEVICE" | grep -oE '[A-F0-9-]{36}' | head -1)
@@ -133,16 +132,19 @@ fi
 
 echo ""
 echo "--- Starting Appium server..."
+APPIUM_LOG="${BLOP_APPIUM_LOG:-/tmp/appium-$$.log}"
 if lsof -i :4723 &>/dev/null; then
   echo "  Appium already running on port 4723."
 else
-  echo "  Starting Appium on port 4723 (background)..."
-  nohup npx appium --port 4723 --log /tmp/appium.log &
+  echo "  Starting Appium on port 4723 (background). Log: $APPIUM_LOG"
+  nohup npx appium --port 4723 --log "$APPIUM_LOG" &
+  APPIUM_PID=$!
+  trap 'kill "$APPIUM_PID" 2>/dev/null || true' EXIT
   sleep 3
   if lsof -i :4723 &>/dev/null; then
-    echo "  Appium started. Log: /tmp/appium.log"
+    echo "  Appium started (PID $APPIUM_PID)."
   else
-    echo "  WARN: Appium may not have started. Check /tmp/appium.log"
+    echo "  WARN: Appium may not have started. Check $APPIUM_LOG"
   fi
 fi
 

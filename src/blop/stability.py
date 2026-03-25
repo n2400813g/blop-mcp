@@ -209,6 +209,7 @@ def classify_report_stability(report: dict[str, Any]) -> dict[str, Any]:
             classified_cases,
             key=lambda item: ranking.get(item["stability_bucket"], 999),
         )[0]
+        primary.setdefault("unknown_classification_gaps", [])
         return primary
 
     return {

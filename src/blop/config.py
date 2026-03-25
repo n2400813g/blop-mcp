@@ -106,6 +106,9 @@ OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 # Extended thinking budget (0 = disabled)
 BLOP_THINKING_BUDGET: int = int(os.getenv("BLOP_THINKING_BUDGET", "0"))
 
+# Mobile / Appium
+BLOP_APPIUM_URL: str = os.getenv("BLOP_APPIUM_URL", "http://127.0.0.1:4723")
+
 # Storage archival thresholds (days)
 BLOP_ARCHIVE_RUNS_AFTER_DAYS: int = int(os.getenv("BLOP_ARCHIVE_RUNS_AFTER_DAYS", "30"))
 BLOP_ARCHIVE_TELEMETRY_AFTER_DAYS: int = int(os.getenv("BLOP_ARCHIVE_TELEMETRY_AFTER_DAYS", "90"))

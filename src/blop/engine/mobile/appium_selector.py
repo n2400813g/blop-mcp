@@ -47,7 +47,8 @@ async def find_element(driver, selector: "MobileSelector", platform: str):
             strategies.append((By.ACCESSIBILITY_ID, selector.content_desc))
 
     if selector.text:
-        strategies.append((By.XPATH, f"//*[@label='{selector.text}' or @value='{selector.text}' or @name='{selector.text}']"))
+        safe_text = selector.text.replace("'", "\\'")
+        strategies.append((By.XPATH, f"//*[@label='{safe_text}' or @value='{safe_text}' or @name='{safe_text}']"))
 
     if selector.xpath:
         strategies.append((By.XPATH, selector.xpath))
@@ -77,6 +78,8 @@ def describe_selector(selector: "MobileSelector") -> str:
         return f"class_chain={selector.class_chain!r}"
     if selector.android_uiautomator:
         return f"uiautomator={selector.android_uiautomator!r}"
+    if selector.content_desc:
+        return f"content_desc={selector.content_desc!r}"
     if selector.text:
         return f"text={selector.text!r}"
     if selector.xpath:

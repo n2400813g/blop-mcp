@@ -146,7 +146,7 @@ def test_recorded_flow_web_default():
         app_url="https://example.com",
         goal="test",
         steps=[],
-        created_at=datetime.datetime.utcnow().isoformat(),
+        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
     assert flow.platform == "web"
     assert flow.mobile_target is None
@@ -160,7 +160,7 @@ def test_recorded_flow_ios():
         app_url="com.example.App",
         goal="login",
         steps=[FlowStep(step_id=0, action="tap")],
-        created_at=datetime.datetime.utcnow().isoformat(),
+        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         platform="ios",
         mobile_target=target,
     )
@@ -260,7 +260,7 @@ async def test_save_and_load_mobile_flow(tmp_path, monkeypatch):
         app_url="com.example.App",
         goal="login flow",
         steps=[FlowStep(step_id=0, action="tap", mobile_selector=MobileSelector(accessibility_id="loginBtn"))],
-        created_at=datetime.datetime.utcnow().isoformat(),
+        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         platform="ios",
         mobile_target=target,
     )

@@ -180,12 +180,8 @@ async def classify_case(case: FailureCase, url: str) -> FailureCase:
         case.severity = det_severity
         return case
 
-    provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
-    has_key = (
-        (provider == "google" and os.getenv("GOOGLE_API_KEY"))
-        or (provider == "anthropic" and os.getenv("ANTHROPIC_API_KEY"))
-        or (provider == "openai" and os.getenv("OPENAI_API_KEY"))
-    )
+    from blop.config import check_llm_api_key
+    has_key, _ = check_llm_api_key()
     if not has_key:
         case.severity = "medium" if case.status == "fail" else "high"
         return case
@@ -276,12 +272,8 @@ async def classify_run(cases: list[FailureCase], url: str) -> dict:
 
 
 async def _generate_next_actions(failed_cases: list[FailureCase], url: str) -> list[str]:
-    provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
-    has_key = (
-        (provider == "google" and os.getenv("GOOGLE_API_KEY"))
-        or (provider == "anthropic" and os.getenv("ANTHROPIC_API_KEY"))
-        or (provider == "openai" and os.getenv("OPENAI_API_KEY"))
-    )
+    from blop.config import check_llm_api_key
+    has_key, _ = check_llm_api_key()
     if not has_key:
         return []
 

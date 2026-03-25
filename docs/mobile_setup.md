@@ -132,10 +132,10 @@ The setup script downloads these automatically:
 
 ### Your own app
 
-For real flows against your app, provide either:
+For real flows against your app, provide one of:
 
 - **`app_path`** — absolute path to your `.apk` / `.ipa` / `.app` file. blop will install it each session.
-- **`app_id`** — bundle ID (iOS) or package name (Android) of an already-installed app.
+- **`app_id`** — bundle ID (iOS) or package name (Android) of an already-installed app. Required if `app_path` is not set.
 
 ```python
 MobileDeviceTarget(

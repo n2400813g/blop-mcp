@@ -342,9 +342,11 @@ def _compute_release_recommendation(
             rationale=(
                 f"{len(failures_for_gate)} {gate.criticality} failure(s) — gate fires {gate.on_failure}."
                 if fired else
-                f"No {gate.criticality} failures."
-                if gate.enabled else
                 f"Gate disabled for {gate.criticality}."
+                if not gate.enabled else
+                f"{len(failures_for_gate)} {gate.criticality} failure(s) — below threshold of {gate.min_failures}."
+                if failures_for_gate else
+                f"No {gate.criticality} failures."
             ),
         ))
 

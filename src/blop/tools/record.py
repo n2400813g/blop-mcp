@@ -92,11 +92,7 @@ def _ensure_assertion_steps(steps, goal: str):
 
 
 async def _find_refresh_candidate(app_url: str, flow_name: str) -> dict | None:
-    existing = await sqlite.list_flows()
-    for flow in existing:
-        if flow.get("app_url") == app_url and flow.get("flow_name") == flow_name:
-            return flow
-    return None
+    return await sqlite.find_flow_by_url_and_name(app_url, flow_name)
 
 
 async def record_test_flow(
