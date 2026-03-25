@@ -319,18 +319,59 @@ async def run_release_check(
     effective_flow_ids = request.flow_ids if request.flow_ids is not None else request.journey_ids
 
     if request.mode == "targeted":
-        return await _run_targeted(request.app_url, effective_flow_ids, request.profile_name, release_id, request.headless)
+        result = await _run_targeted(request.app_url, effective_flow_ids, request.profile_name, release_id, request.headless)
+    else:
+        # Default: replay mode
+        result = await _run_replay(
+            app_url=request.app_url,
+            flow_ids=effective_flow_ids,
+            profile_name=request.profile_name,
+            criticality_filter=request.criticality_filter,
+            release_id=release_id,
+            headless=request.headless,
+            run_mode=request.run_mode,
+        )
 
-    # Default: replay mode
-    return await _run_replay(
-        app_url=request.app_url,
-        flow_ids=effective_flow_ids,
-        profile_name=request.profile_name,
-        criticality_filter=request.criticality_filter,
-        release_id=release_id,
-        headless=request.headless,
-        run_mode=request.run_mode,
-    )
+    # After run completes, sync to hosted platform (best-effort, never blocks local result)
+    try:
+        from blop import config as _config
+        from blop.sync.client import SyncClient
+        from blop.sync.models import SyncRunPayload, RunCasePayload
+
+        _project_id = _config.BLOP_PROJECT_ID
+        if not _project_id:
+            pass  # No project configured, skip sync
+        else:
+            _sync_client = SyncClient(
+                hosted_url=_config.BLOP_HOSTED_URL,
+                api_token=_config.BLOP_API_TOKEN,
+            )
+            _run_id = result.get("run_id", "")
+            _cases = result.get("cases", [])
+            _sync_payload = SyncRunPayload(
+                blop_mcp_run_id=_run_id,
+                project_id=_project_id,
+                url=request.app_url,
+                blop_mcp_release_id=release_id,
+                environment=_config.BLOP_ENV if hasattr(_config, "BLOP_ENV") else "production",
+                run_cases=[
+                    RunCasePayload(
+                        case_id_external=str(c.get("case_id", c.get("flow_id", c.get("id", "")))),
+                        status="pass" if c.get("passed") or c.get("status") == "pass" else (c.get("status") or "fail"),
+                        flow_id_external=c.get("flow_id"),
+                        severity=c.get("severity"),
+                        result_json=c,
+                    )
+                    for c in _cases
+                    if isinstance(c, dict)
+                ],
+            )
+            import asyncio as _asyncio
+            _asyncio.create_task(_sync_client.push_run(_sync_payload))
+    except Exception as _exc:
+        _log.warning("Failed to schedule blop sync: %s", _exc)
+
+    return result
 
 
 async def _run_replay(

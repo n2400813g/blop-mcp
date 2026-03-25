@@ -106,6 +106,9 @@ OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 # Extended thinking budget (0 = disabled)
 BLOP_THINKING_BUDGET: int = int(os.getenv("BLOP_THINKING_BUDGET", "0"))
 
+# Mobile / Appium
+BLOP_APPIUM_URL: str = os.getenv("BLOP_APPIUM_URL", "http://127.0.0.1:4723")
+
 # Storage archival thresholds (days)
 BLOP_ARCHIVE_RUNS_AFTER_DAYS: int = int(os.getenv("BLOP_ARCHIVE_RUNS_AFTER_DAYS", "30"))
 BLOP_ARCHIVE_TELEMETRY_AFTER_DAYS: int = int(os.getenv("BLOP_ARCHIVE_TELEMETRY_AFTER_DAYS", "90"))
@@ -150,6 +153,11 @@ BLOP_PROMPTS_DIR: str = os.getenv("BLOP_PROMPTS_DIR", "")
 # Legacy auth URL env var (fallback for LOGIN_URL)
 TEST_AUTH_URL: str = os.getenv("TEST_AUTH_URL", "")
 BLOP_VALIDATE_AUTH_CACHE: bool = _env_bool("BLOP_VALIDATE_AUTH_CACHE", False)
+
+# Hosted blop platform sync (optional — fire-and-forget push after each run_release_check)
+BLOP_HOSTED_URL: str | None = os.getenv("BLOP_HOSTED_URL") or None  # e.g. https://app.blop.dev
+BLOP_API_TOKEN: str | None = os.getenv("BLOP_API_TOKEN") or None    # blop_sk_… workspace API token
+BLOP_PROJECT_ID: str | None = os.getenv("BLOP_PROJECT_ID") or None  # workspace project UUID
 
 
 def check_llm_api_key() -> tuple[bool, str]:

@@ -16,9 +16,9 @@
 ## Per-bucket quick reference
 
 ### `auth_session_failure`
-**Tool to run:** `validate_setup(app_url=..., profile_name=...)`
+**Tool to run:** `validate_release_setup(app_url=..., profile_name=...)`
 **Look at:** `auth_provenance.session_validation_status` in run results; health events of type `auth_context_resolved`
-**Fix:** `capture_auth_session(app_url=..., profile_name=...)` → `validate_setup(...)` → retry replay
+**Fix:** `capture_auth_session(app_url=..., profile_name=...)` → `validate_release_setup(...)` → retry replay
 **Escalate when:** release-gating journeys still cannot authenticate after re-capture
 
 ### `stale_flow_drift`

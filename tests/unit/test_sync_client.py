@@ -1,0 +1,64 @@
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+from blop.sync.client import SyncClient
+from blop.sync.models import SyncRunPayload, RunCasePayload
+
+
+async def test_sync_noop_when_no_config():
+    """No hosted URL or token → returns None without making HTTP request."""
+    client = SyncClient(hosted_url=None, api_token=None)
+    result = await client.push_run(SyncRunPayload(
+        blop_mcp_run_id="x",
+        project_id="proj-1",
+        url="https://example.com",
+        run_cases=[],
+    ))
+    assert result is None
+
+
+async def test_sync_noop_when_no_token():
+    """Has URL but no token → still a no-op."""
+    client = SyncClient(hosted_url="https://app.blop.dev", api_token=None)
+    result = await client.push_run(SyncRunPayload(
+        blop_mcp_run_id="x",
+        project_id="proj-1",
+        url="https://example.com",
+        run_cases=[],
+    ))
+    assert result is None
+
+
+async def test_sync_posts_to_endpoint():
+    """With both URL and token, POSTs to /api/v1/sync/runs."""
+    client = SyncClient(hosted_url="https://app.blop.dev", api_token="blop_sk_test")
+
+    mock_response = MagicMock()
+    mock_response.status_code = 201
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json = MagicMock(return_value={"test_run_id": "uuid-123", "status": "completed", "run_cases_stored": 0})
+
+    with patch("httpx.AsyncClient.post", new=AsyncMock(return_value=mock_response)):
+        result = await client.push_run(SyncRunPayload(
+            blop_mcp_run_id="run-abc",
+            project_id="proj-1",
+            url="https://example.com",
+            run_cases=[],
+        ))
+
+    assert result is not None
+    assert result["status"] == "completed"
+
+
+async def test_sync_does_not_raise_on_http_error():
+    """HTTP failure → returns None without raising (fire-and-forget)."""
+    client = SyncClient(hosted_url="https://app.blop.dev", api_token="blop_sk_test")
+
+    with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=Exception("network error"))):
+        result = await client.push_run(SyncRunPayload(
+            blop_mcp_run_id="run-abc",
+            project_id="proj-1",
+            url="https://example.com",
+            run_cases=[],
+        ))
+
+    assert result is None

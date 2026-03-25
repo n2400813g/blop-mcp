@@ -80,8 +80,8 @@ def classify_mobile_failure(
     if step_index <= 3 and _matches(all_lines, _AUTH_SIGNALS):
         return "auth_failure"
 
-    # Appium server / environment issue
-    if any(s in error_lower for s in ["connection refused", "webdriverexception", "timeout"]):
+    # Appium server / environment issue (avoid matching normal assertion/wait timeouts)
+    if any(s in error_lower for s in ["connection refused", "webdriverexception", "connection timed out", "appium server timed out", "could not connect"]):
         return "env_issue"
 
     return None

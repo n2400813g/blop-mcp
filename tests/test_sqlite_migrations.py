@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import stat
 from unittest.mock import AsyncMock, patch

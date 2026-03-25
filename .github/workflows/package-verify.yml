@@ -31,3 +31,11 @@ jobs:
           pip install dist/*.whl
           blop --help
           blop-mcp --help
+
+      - name: Smoke install built sdist
+        run: |
+          python -m venv /tmp/blop-sdist-smoke
+          . /tmp/blop-sdist-smoke/bin/activate
+          pip install dist/*.tar.gz
+          blop --help
+          blop-mcp --help

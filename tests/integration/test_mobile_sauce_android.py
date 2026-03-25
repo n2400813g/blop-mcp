@@ -190,6 +190,8 @@ async def test_login_with_invalid_credentials_shows_error(driver):
         assert any(kw in page_source for kw in ["error", "Error", "invalid", "wrong", "failed", "Unauthorized"]), (
             f"Expected error message for invalid credentials. Source: {page_source[:400]}"
         )
+    except AssertionError:
+        raise
     except Exception as exc:
         pytest.skip(f"Could not complete invalid login test: {exc}")
 
@@ -370,7 +372,7 @@ async def test_blop_record_and_replay_android_flow(android_target, tmp_path, mon
                 value="Backpack",
             ),
         ],
-        created_at=datetime.datetime.utcnow().isoformat(),
+        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         business_criticality="activation",
         platform="android",
         mobile_target=android_target,
@@ -428,7 +430,7 @@ async def test_run_mobile_flows_handles_multiple_flows(android_target, tmp_path,
                 FlowStep(step_id=0, action="app_launch", description="Launch app", value=APP_PACKAGE),
                 FlowStep(step_id=1, action="wait", description="Brief wait", value="1.0"),
             ],
-            created_at=datetime.datetime.utcnow().isoformat(),
+            created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
             platform="android",
             mobile_target=android_target,
         )

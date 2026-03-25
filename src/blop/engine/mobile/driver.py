@@ -9,12 +9,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from blop.schemas import MobileDeviceTarget
 
-_APPIUM_SERVER_URL = "http://127.0.0.1:4723"
-
-
 def _get_appium_url() -> str:
-    import os
-    return os.environ.get("BLOP_APPIUM_URL", _APPIUM_SERVER_URL)
+    from blop.config import BLOP_APPIUM_URL
+    return BLOP_APPIUM_URL
 
 
 def _require_appium():
@@ -36,6 +33,8 @@ async def make_appium_driver(target: "MobileDeviceTarget"):
     Raises RuntimeError if the Appium Python client is not installed or
     if the Appium server is not reachable.
     """
+    import asyncio
+
     _require_appium()
 
     from appium import webdriver
@@ -87,7 +86,8 @@ async def make_appium_driver(target: "MobileDeviceTarget"):
             options.locale = parts[1] if len(parts) > 1 else parts[0]
 
     try:
-        driver = webdriver.Remote(_get_appium_url(), options=options)
+        loop = asyncio.get_running_loop()
+        driver = await loop.run_in_executor(None, lambda: webdriver.Remote(url, options=options))
     except Exception as exc:
         raise RuntimeError(
             f"Failed to create Appium session at {url}: {exc}. "
@@ -100,16 +100,22 @@ async def make_appium_driver(target: "MobileDeviceTarget"):
 
 async def check_appium_reachable() -> tuple[bool, str]:
     """Return (reachable, message) for validate_setup."""
+    import asyncio
     import urllib.error
     import urllib.request
 
     url = _get_appium_url()
-    try:
-        with urllib.request.urlopen(f"{url}/status", timeout=3) as resp:
-            if resp.status == 200:
-                return True, f"Appium server reachable at {url}"
-            return False, f"Appium server at {url} returned HTTP {resp.status}"
-    except urllib.error.URLError as exc:
-        return False, f"Appium server not reachable at {url}: {exc.reason}"
-    except Exception as exc:
-        return False, f"Appium check failed: {exc}"
+
+    def _check() -> tuple[bool, str]:
+        try:
+            with urllib.request.urlopen(f"{url}/status", timeout=3) as resp:
+                if resp.status == 200:
+                    return True, f"Appium server reachable at {url}"
+                return False, f"Appium server at {url} returned HTTP {resp.status}"
+        except urllib.error.URLError as exc:
+            return False, f"Appium server not reachable at {url}: {exc.reason}"
+        except Exception as exc:
+            return False, f"Appium check failed: {exc}"
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _check)

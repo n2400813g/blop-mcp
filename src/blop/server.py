@@ -2491,13 +2491,17 @@ from blop.tools.prompts import (
 async def validate_release_setup(
     app_url: Optional[str] = None,
     profile_name: Optional[str] = None,
+    check_mobile: bool = False,
 ) -> dict:
     """Preflight check before a release: verifies API key, Chromium, DB, app reachability, and auth profile.
 
     This is the canonical MVP entry point — run this before discover_critical_journeys or run_release_check.
+
+    Args:
+        check_mobile: If True, also checks Appium server reachability for mobile testing.
     """
     return await _safe_call(validate.validate_release_setup, tool_name="validate_release_setup",
-                            app_url=app_url, profile_name=profile_name)
+                            app_url=app_url, profile_name=profile_name, check_mobile=check_mobile)
 
 
 @mcp.tool()
