@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "blop": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/blop-mcp",
+        "run",
+        "python",
+        "-m",
+        "blop.server"
+      ],
+      "env": {
+        "GOOGLE_API_KEY": "your_key_here",
+        "APP_BASE_URL": "https://your-app.com",
+        "LOGIN_URL": "https://your-app.com/login",
+        "TEST_USERNAME": "your@email.com",
+        "TEST_PASSWORD": "your_password"
+      }
+    }
+  }
+}

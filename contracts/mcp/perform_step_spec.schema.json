@@ -1,0 +1,132 @@
+{
+  "description": "Structured single-step command for perform_step.",
+  "properties": {
+    "action": {
+      "enum": [
+        "click",
+        "type",
+        "wait",
+        "press_key",
+        "navigate"
+      ],
+      "title": "Action",
+      "type": "string"
+    },
+    "ref": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ref"
+    },
+    "selector": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Selector"
+    },
+    "url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Url"
+    },
+    "text": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Text"
+    },
+    "submit": {
+      "default": false,
+      "title": "Submit",
+      "type": "boolean"
+    },
+    "slowly": {
+      "default": false,
+      "title": "Slowly",
+      "type": "boolean"
+    },
+    "time_secs": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Time Secs"
+    },
+    "wait_text": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Wait Text"
+    },
+    "text_gone": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Text Gone"
+    },
+    "key": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Key"
+    },
+    "double_click": {
+      "default": false,
+      "title": "Double Click",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "action"
+  ],
+  "title": "PerformStepSpec",
+  "type": "object"
+}

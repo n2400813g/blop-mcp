@@ -1,0 +1,45 @@
+{
+  "properties": {
+    "workspace_id": {
+      "title": "Workspace Id",
+      "type": "string"
+    },
+    "environment": {
+      "title": "Environment",
+      "type": "string"
+    },
+    "exploration_profile": {
+      "title": "Exploration Profile",
+      "type": "string"
+    },
+    "resource_uris": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Stable blop:// resource keys \u2192 URIs",
+      "title": "Resource Uris",
+      "type": "object"
+    },
+    "primary_tools": {
+      "description": "Suggested tool names for the release-confidence loop",
+      "items": {
+        "type": "string"
+      },
+      "title": "Primary Tools",
+      "type": "array"
+    },
+    "hosted_sync": {
+      "additionalProperties": true,
+      "description": "Optional BLOP_HOSTED_URL and api_token_configured (bool)",
+      "title": "Hosted Sync",
+      "type": "object"
+    }
+  },
+  "required": [
+    "workspace_id",
+    "environment",
+    "exploration_profile"
+  ],
+  "title": "WorkspaceContextDTO",
+  "type": "object"
+}

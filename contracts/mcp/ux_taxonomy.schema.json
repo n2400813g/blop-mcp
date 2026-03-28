@@ -1,0 +1,29 @@
+{
+  "properties": {
+    "version": {
+      "default": "1",
+      "title": "Version",
+      "type": "string"
+    },
+    "criticality_hints": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Criticality Hints",
+      "type": "object"
+    },
+    "archetype_hints": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Archetype Hints",
+      "type": "object"
+    }
+  },
+  "required": [
+    "criticality_hints",
+    "archetype_hints"
+  ],
+  "title": "UxTaxonomyDTO",
+  "type": "object"
+}

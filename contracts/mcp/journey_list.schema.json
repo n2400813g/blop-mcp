@@ -1,0 +1,53 @@
+{
+  "properties": {
+    "app_url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "App Url"
+    },
+    "release_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Release Id"
+    },
+    "journeys": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Journeys",
+      "type": "array"
+    },
+    "total": {
+      "default": 0,
+      "title": "Total",
+      "type": "integer"
+    },
+    "stale_release_gating_count": {
+      "default": 0,
+      "title": "Stale Release Gating Count",
+      "type": "integer"
+    },
+    "workflow_hint": {
+      "default": "",
+      "title": "Workflow Hint",
+      "type": "string"
+    }
+  },
+  "title": "JourneyListDTO",
+  "type": "object"
+}

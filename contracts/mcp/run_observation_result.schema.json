@@ -1,0 +1,23 @@
+{
+  "properties": {
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "observation_key": {
+      "title": "Observation Key",
+      "type": "string"
+    },
+    "updated": {
+      "default": true,
+      "title": "Updated",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "run_id",
+    "observation_key"
+  ],
+  "title": "RunObservationResultDTO",
+  "type": "object"
+}

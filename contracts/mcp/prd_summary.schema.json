@@ -1,0 +1,116 @@
+{
+  "properties": {
+    "prd_source": {
+      "enum": [
+        "none",
+        "recorded_flows",
+        "release_brief"
+      ],
+      "title": "Prd Source",
+      "type": "string"
+    },
+    "scope": {
+      "enum": [
+        "journey",
+        "release"
+      ],
+      "title": "Scope",
+      "type": "string"
+    },
+    "release_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Release Id"
+    },
+    "journey_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Journey Id"
+    },
+    "app_url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "App Url"
+    },
+    "key_requirements": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Key Requirements",
+      "type": "array"
+    },
+    "critical_journeys": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Critical Journeys",
+      "type": "array"
+    },
+    "risk_notes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Risk Notes",
+      "type": "array"
+    },
+    "acceptance_criteria": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Acceptance Criteria",
+      "type": "array"
+    },
+    "flow_goal": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Flow Goal"
+    },
+    "intent_contract": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Intent Contract"
+    }
+  },
+  "required": [
+    "prd_source",
+    "scope"
+  ],
+  "title": "PrdSummaryDTO",
+  "type": "object"
+}
