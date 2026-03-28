@@ -1,11 +1,14 @@
 """LLM factory: supports google (Gemini), anthropic, and openai backends.
 
 Usage:
-    from blop.engine.llm_factory import make_planning_llm, make_agent_llm, make_message
+    from blop.engine.llm_factory import make_planning_llm, make_agent_llm, make_message, ainvoke_llm
 
     llm = make_planning_llm(temperature=0.3, max_output_tokens=2000)
-    response = await llm.ainvoke([make_message(prompt)])
+    response = await ainvoke_llm(llm, [make_message(prompt)], span_name="blop.llm.example", role="planner")
     text = str(response.content)
+
+``ainvoke_llm`` wraps ``llm.ainvoke`` with optional OpenTelemetry when ``BLOP_OTEL_TRACING=1``
+and ``blop-mcp[otel]`` is installed (see ``llm_tracing``).
 """
 
 from __future__ import annotations
@@ -122,6 +125,14 @@ def make_planning_llm(
 def make_agent_llm(*, role: str = "agent", temperature: float = 0.7) -> Any:
     """Return a chat model for use as the Browser-Use agent backbone."""
     return _make_chat_model(role=role, temperature=temperature, max_output_tokens=None)
+
+
+async def ainvoke_llm(llm: Any, messages: list, *, span_name: str, **span_attrs: Any) -> Any:
+    """Invoke ``llm.ainvoke(messages)`` with an optional OpenTelemetry span (see ``llm_tracing``)."""
+    from blop.engine.llm_tracing import trace_llm_call
+
+    with trace_llm_call(span_name, span_attrs):
+        return await llm.ainvoke(messages)
 
 
 def make_message(prompt: str) -> Any:

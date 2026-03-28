@@ -2,6 +2,8 @@
 
 This guide covers Codex-compatible MCP clients that launch `blop-mcp` as a local process.
 
+For the product framing behind this setup, see [`docs/DOC_CONTRACT.md`](DOC_CONTRACT.md) and [`docs/AGENT_CONTEXT_PACK.md`](AGENT_CONTEXT_PACK.md).
+
 ## Runtime contract
 
 - Launch `blop` locally through `stdio`

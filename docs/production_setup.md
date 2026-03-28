@@ -5,6 +5,8 @@ client-managed `stdio` transport (Cursor/Claude Code launching the process).
 
 Related guides:
 
+- Documentation contract: [`DOC_CONTRACT.md`](DOC_CONTRACT.md)
+- Agent context pack: [`AGENT_CONTEXT_PACK.md`](AGENT_CONTEXT_PACK.md)
 - Cursor quickstart: [`quickstart_cursor.md`](quickstart_cursor.md)
 - Claude Code quickstart: [`quickstart_claude_code.md`](quickstart_claude_code.md)
 - Codex-compatible quickstart: [`quickstart_codex.md`](quickstart_codex.md)

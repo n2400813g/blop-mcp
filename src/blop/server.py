@@ -25,6 +25,7 @@ extras. Logging is disabled before other imports so stdio JSON-RPC stays clean.
 
 import logging
 import os
+from importlib import import_module
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -45,26 +46,76 @@ from mcp.server.fastmcp import FastMCP
 from blop import capabilities as capability_flags
 from blop.config import BLOP_DISCOVERY_MAX_PAGES
 from blop.schemas import ReleaseReference, TelemetrySignalInput
-from blop.storage import sqlite
-from blop.storage.sqlite import init_db
-from blop.tools import assertions as assertions_tools
-from blop.tools import (
-    auth,
-    browser_compat,
-    capture_auth,
-    debug,
-    discover,
-    record,
-    regression,
-    results,
-    v2_surface,
-    validate,
-)
-from blop.tools import baselines as baselines_tools
-from blop.tools import evaluate as evaluate_tools
-from blop.tools import network as network_tools
-from blop.tools import security as security_tools
-from blop.tools import storage as storage_tools
+
+
+class _LazyModule:
+    """Proxy module imports until first attribute access.
+
+    This keeps ``import blop.server`` lighter while preserving existing patch
+    points such as ``blop.server.browser_compat.browser_hover`` in tests.
+    """
+
+    __slots__ = ("_module_name", "_module")
+
+    def __init__(self, module_name: str) -> None:
+        object.__setattr__(self, "_module_name", module_name)
+        object.__setattr__(self, "_module", None)
+
+    def _load(self):
+        module = object.__getattribute__(self, "_module")
+        if module is None:
+            module = import_module(object.__getattribute__(self, "_module_name"))
+            object.__setattr__(self, "_module", module)
+        return module
+
+    def __getattr__(self, name: str):
+        return getattr(self._load(), name)
+
+    def __setattr__(self, name: str, value) -> None:
+        if name in self.__slots__:
+            object.__setattr__(self, name, value)
+            return
+        setattr(self._load(), name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name in self.__slots__:
+            object.__delattr__(self, name)
+            return
+        delattr(self._load(), name)
+
+    def __repr__(self) -> str:
+        return f"<LazyModule {object.__getattribute__(self, '_module_name')}>"
+
+
+def _lazy_module(module_name: str) -> _LazyModule:
+    return _LazyModule(module_name)
+
+
+sqlite = _lazy_module("blop.storage.sqlite")
+assertions_tools = _lazy_module("blop.tools.assertions")
+auth = _lazy_module("blop.tools.auth")
+browser_compat = _lazy_module("blop.tools.browser_compat")
+capture_auth = _lazy_module("blop.tools.capture_auth")
+debug = _lazy_module("blop.tools.debug")
+discover = _lazy_module("blop.tools.discover")
+record = _lazy_module("blop.tools.record")
+regression = _lazy_module("blop.tools.regression")
+results = _lazy_module("blop.tools.results")
+v2_surface = _lazy_module("blop.tools.v2_surface")
+validate = _lazy_module("blop.tools.validate")
+baselines_tools = _lazy_module("blop.tools.baselines")
+evaluate_tools = _lazy_module("blop.tools.evaluate")
+network_tools = _lazy_module("blop.tools.network")
+security_tools = _lazy_module("blop.tools.security")
+storage_tools = _lazy_module("blop.tools.storage")
+atomic_browser_tools = _lazy_module("blop.tools.atomic_browser")
+context_read_tools = _lazy_module("blop.tools.context_read")
+journeys_tools = _lazy_module("blop.tools.journeys")
+release_check_tools = _lazy_module("blop.tools.release_check")
+resources_tools = _lazy_module("blop.tools.resources")
+triage_tools = _lazy_module("blop.tools.triage")
+prompts_tools = _lazy_module("blop.tools.prompts")
+process_insights_tools = _lazy_module("blop.tools.process_insights")
 
 mcp = FastMCP("blop")
 
@@ -1260,6 +1311,30 @@ async def get_test_results(run_id: str) -> dict:
         step_failure_index, artifact_paths), severity_counts, failed_cases, next_actions
     """
     return await _safe_call(results.get_test_results, run_id=run_id)
+
+
+@mcp.tool()
+async def get_process_insights(run_id: str, include_pm4py: bool = True) -> dict:
+    """Derive process-mining style variants from run health events (optional PM4Py when installed).
+
+    Uses replay_step_completed and other health events. Install ``blop-mcp[insights]`` for PM4Py stats.
+    """
+    return await _safe_call(
+        process_insights_tools.get_process_insights,
+        tool_name="get_process_insights",
+        run_id=run_id,
+        include_pm4py=include_pm4py,
+    )
+
+
+@mcp.tool()
+async def export_run_trace(run_id: str) -> dict:
+    """Export OTLP-shaped JSON (resourceSpans) for a run — local SQLite only, no network upload."""
+    return await _safe_call(
+        process_insights_tools.export_run_trace_otel,
+        tool_name="export_run_trace",
+        run_id=run_id,
+    )
 
 
 @_if_compat
@@ -2560,17 +2635,6 @@ def quick_web_eval() -> str:
 # ===========================================================================
 
 from blop.mcp.envelope import ok_response as _ok_tool_response
-from blop.tools import atomic_browser as atomic_browser_tools
-from blop.tools import context_read as context_read_tools
-from blop.tools import journeys as journeys_tools
-from blop.tools import release_check as release_check_tools
-from blop.tools import resources as resources_tools
-from blop.tools import triage as triage_tools
-from blop.tools.prompts import (
-    EXPLAIN_RELEASE_RISK,
-    INVESTIGATE_BLOCKER,
-    RELEASE_READINESS_REVIEW,
-)
 
 
 @mcp.tool()
@@ -2899,17 +2963,17 @@ async def release_incidents_resource(release_id: str) -> dict:
 
 @mcp.prompt()
 def release_readiness_review() -> str:
-    return RELEASE_READINESS_REVIEW
+    return prompts_tools.RELEASE_READINESS_REVIEW
 
 
 @mcp.prompt()
 def investigate_blocker() -> str:
-    return INVESTIGATE_BLOCKER
+    return prompts_tools.INVESTIGATE_BLOCKER
 
 
 @mcp.prompt()
 def explain_release_risk() -> str:
-    return EXPLAIN_RELEASE_RISK
+    return prompts_tools.EXPLAIN_RELEASE_RISK
 
 
 def run() -> int:
@@ -2954,7 +3018,7 @@ def run() -> int:
             _log.error("startup_config_error error=%s", err)
         return 1
 
-    asyncio.run(init_db())
+    asyncio.run(sqlite.init_db())
     try:
         resume_summary = asyncio.run(regression.resume_incomplete_runs())
         if resume_summary.get("resumed", 0):

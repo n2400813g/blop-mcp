@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from blop.engine.browser_session_manager import SESSION_MANAGER
 from blop.mcp.dto import CaptureArtifactResultDTO, PerformStepResultDTO
@@ -19,7 +19,12 @@ from blop.storage import sqlite
 
 
 class PerformStepSpec(BaseModel):
-    """Structured single-step command for perform_step."""
+    """Structured single-step command for perform_step.
+
+    ``lifecycle`` mirrors observe/act/extract: *observe* resolves locators or reads page state
+    without mutating; *act* performs the action; *extract* returns structured observe fields
+    for downstream assertions (same as observe for click/type today).
+    """
 
     action: Literal["click", "type", "wait", "press_key", "navigate"]
     ref: str | None = None
@@ -33,6 +38,11 @@ class PerformStepSpec(BaseModel):
     text_gone: str | None = None
     key: str | None = None
     double_click: bool = False
+    lifecycle: Literal["observe", "act", "extract"] = "act"
+    correlation: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional run_id and case_id for correlating with replay health events.",
+    )
 
     @field_validator("action", mode="before")
     @classmethod
@@ -67,32 +77,63 @@ async def get_page_snapshot(selector: Optional[str] = None, filename: Optional[s
         return err_response("snapshot_failed", str(e)).model_dump()
 
 
+def _step_ok(
+    spec: PerformStepSpec,
+    detail: dict[str, Any],
+    *,
+    observe_metadata: dict[str, Any] | None = None,
+) -> dict:
+    out = PerformStepResultDTO(
+        action=spec.action,
+        status="ok",
+        detail=detail,
+        lifecycle=spec.lifecycle,
+        correlation=dict(spec.correlation or {}),
+        observe_metadata=observe_metadata or {},
+    )
+    return ok_response(out.model_dump()).model_dump()
+
+
 async def perform_step(step_spec: dict) -> dict:
     try:
         spec = PerformStepSpec.model_validate(step_spec)
     except Exception as e:
         return err_response("invalid_step_spec", str(e)).model_dump()
 
+    observe = spec.lifecycle in ("observe", "extract")
+
     try:
         if spec.action == "navigate":
             if not spec.url:
                 return err_response("invalid_step_spec", "navigate requires url").model_dump()
+            if observe:
+                info = await SESSION_MANAGER.read_page_info()
+                meta = {**info, "intended_url": spec.url, "observe_kind": "pre_navigate"}
+                return _step_ok(spec, {"mode": "observe", "skipped_navigation": True}, observe_metadata=meta)
             raw = await SESSION_MANAGER.navigate(spec.url, profile_name=None)
-            out = PerformStepResultDTO(action=spec.action, status="ok", detail=raw)
-            return ok_response(out.model_dump()).model_dump()
+            return _step_ok(spec, raw)
 
         if spec.action == "click":
+            if observe:
+                raw = await SESSION_MANAGER.resolve_locator(spec.ref, spec.selector)
+                return _step_ok(spec, raw, observe_metadata=dict(raw))
             raw = await SESSION_MANAGER.click(
                 ref=spec.ref,
                 selector=spec.selector,
                 double_click=spec.double_click,
             )
-            out = PerformStepResultDTO(action=spec.action, status="ok", detail=raw)
-            return ok_response(out.model_dump()).model_dump()
+            return _step_ok(spec, raw)
 
         if spec.action == "type":
             if spec.text is None:
                 return err_response("invalid_step_spec", "type requires text").model_dump()
+            if observe:
+                raw = await SESSION_MANAGER.resolve_locator(spec.ref, spec.selector)
+                return _step_ok(
+                    spec,
+                    raw,
+                    observe_metadata={**raw, "text_len": len(spec.text)},
+                )
             raw = await SESSION_MANAGER.type_text(
                 ref=spec.ref,
                 selector=spec.selector,
@@ -100,24 +141,35 @@ async def perform_step(step_spec: dict) -> dict:
                 submit=spec.submit,
                 slowly=spec.slowly,
             )
-            out = PerformStepResultDTO(action=spec.action, status="ok", detail=raw)
-            return ok_response(out.model_dump()).model_dump()
+            return _step_ok(spec, raw)
 
         if spec.action == "wait":
+            if observe:
+                info = await SESSION_MANAGER.read_page_info()
+                return _step_ok(
+                    spec,
+                    {"mode": "observe", "skipped_wait": True},
+                    observe_metadata=info,
+                )
             raw = await SESSION_MANAGER.wait_for(
                 time_secs=spec.time_secs,
                 text=spec.wait_text,
                 text_gone=spec.text_gone,
             )
-            out = PerformStepResultDTO(action=spec.action, status="ok", detail=raw)
-            return ok_response(out.model_dump()).model_dump()
+            return _step_ok(spec, raw)
 
         if spec.action == "press_key":
             if not spec.key:
                 return err_response("invalid_step_spec", "press_key requires key").model_dump()
+            if observe:
+                info = await SESSION_MANAGER.read_page_info()
+                return _step_ok(
+                    spec,
+                    {"mode": "observe", "skipped_key": True, "key": spec.key},
+                    observe_metadata=info,
+                )
             raw = await SESSION_MANAGER.press_key(spec.key)
-            out = PerformStepResultDTO(action=spec.action, status="ok", detail=raw)
-            return ok_response(out.model_dump()).model_dump()
+            return _step_ok(spec, raw)
 
         return err_response("unsupported_action", spec.action).model_dump()
     except Exception as e:

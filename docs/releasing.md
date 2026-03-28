@@ -55,7 +55,7 @@ For apps with recorded flows, `run_release_check(app_url=...)` must return `deci
 
 ### 5. Auth session validity
 
-For any auth-dependent flows in the release scope, `validate_setup(app_url=..., profile_name=...)` must return `status: ready` (not `blocked`). A `waiting_auth` or `auth_session_failure` on a release-gating journey is a hard block.
+For any auth-dependent flows in the release scope, `validate_release_setup(app_url=..., profile_name=...)` must return `status: ready` (not `blocked`). A `waiting_auth` or `auth_session_failure` on a release-gating journey is a hard block.
 
 ### Non-blocking review items
 

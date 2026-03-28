@@ -177,6 +177,12 @@ class BrowserSessionManager:
             del self._network_events[:overflow]
             self._last_nav_network_idx = max(0, self._last_nav_network_idx - overflow)
 
+    async def read_page_info(self) -> dict:
+        """Current page URL and title (no navigation)."""
+        await self.ensure_started()
+        page = self._current_page()
+        return {"url": page.url, "title": await page.title()}
+
     async def navigate(self, url: str, profile_name: Optional[str] = None) -> dict:
         err = validate_app_url(url)
         if err:
@@ -340,6 +346,28 @@ class BrowserSessionManager:
         if selector:
             return selector
         raise ValueError("Either ref or selector is required")
+
+    async def resolve_locator(self, ref: Optional[str], selector: Optional[str]) -> dict:
+        """Observe-only: resolve selector and report visibility/count (no click/fill)."""
+        page = self._current_page()
+        sel = self._resolve_selector(ref, selector)
+        loc = page.locator(sel)
+        try:
+            count = await loc.count()
+        except Exception as exc:
+            return {"status": "error", "selector": sel, "error": str(exc)[:300]}
+        visible = False
+        if count > 0:
+            try:
+                visible = await loc.first.is_visible()
+            except Exception:
+                visible = False
+        return {
+            "status": "ok",
+            "selector": sel,
+            "count": count,
+            "first_visible": bool(visible),
+        }
 
     async def click(self, ref: Optional[str], selector: Optional[str], double_click: bool = False) -> dict:
         page = self._current_page()

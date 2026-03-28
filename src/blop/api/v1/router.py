@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from importlib import import_module
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -23,10 +24,18 @@ from blop.api.v1.schemas import (
 )
 from blop.schemas import ReleaseBrief, ReleaseSnapshot
 from blop.storage import sqlite
-from blop.tools.release_check import run_release_check
-from blop.tools.results import get_test_results
 
 router = APIRouter(dependencies=[Depends(require_v1_api_key)])
+
+
+async def run_release_check(*args, **kwargs):
+    """Lazy wrapper to avoid importing the release-check stack at router import time."""
+    return await import_module("blop.tools.release_check").run_release_check(*args, **kwargs)
+
+
+async def get_test_results(*args, **kwargs):
+    """Lazy wrapper to avoid importing the results stack at router import time."""
+    return await import_module("blop.tools.results").get_test_results(*args, **kwargs)
 
 
 def _public_base(request: Request) -> str:

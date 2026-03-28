@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from importlib import import_module
 from typing import Optional
 
 from blop.config import BLOP_API_TOKEN, BLOP_ENV, BLOP_HOSTED_URL, BLOP_PROJECT_ID
@@ -18,13 +19,16 @@ from blop.mcp.dto import (
 from blop.mcp.envelope import err_response, ok_response
 from blop.schemas import ReleaseBrief
 from blop.storage import sqlite
-from blop.tools import resources as resources_tools
 
 _CACHE_TTL_SECS = 120.0
 _workspace_cache: tuple[float, dict] | None = None
 _ux_cache: tuple[float, dict] | None = None
 _release_context_cache: dict[str, tuple[float, dict]] = {}
 _journeys_for_release_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _resources_tools():
+    return import_module("blop.tools.resources")
 
 
 def _norm_url(url: str) -> str:
@@ -125,7 +129,7 @@ async def get_release_context(release_id: str, use_cache: bool = True) -> dict:
         if (now - ts) < _CACHE_TTL_SECS:
             return payload
 
-    raw = await resources_tools.release_brief_resource(rid)
+    raw = await _resources_tools().release_brief_resource(rid)
     if raw.get("error"):
         return err_response("not_found", raw["error"], detail=rid).model_dump()
     links = _release_resource_links(rid)
@@ -190,7 +194,7 @@ async def get_journeys_for_release(
     if not target_url:
         return err_response("invalid_argument", "Could not resolve app_url").model_dump()
 
-    full = await resources_tools.journeys_resource(app_url=target_url)
+    full = await _resources_tools().journeys_resource(app_url=target_url)
     filtered = list(full["journeys"])
     stale_gating = sum(
         1 for j in filtered if j.get("stale_recording") and j.get("criticality_class") in ("revenue", "activation")

@@ -408,9 +408,7 @@ async def validate_setup(
         try:
             from blop.sync.client import SyncClient
 
-            probe = await SyncClient(BLOP_HOSTED_URL, BLOP_API_TOKEN).probe_connection(
-                BLOP_PROJECT_ID
-            )
+            probe = await SyncClient(BLOP_HOSTED_URL, BLOP_API_TOKEN).probe_connection(BLOP_PROJECT_ID)
             if probe:
                 detail = (
                     f"Connected to workspace {probe.get('workspace_id')} "
@@ -431,9 +429,7 @@ async def validate_setup(
                         "message": "Configured, but the hosted sync connection could not be verified",
                     }
                 )
-                warnings.append(
-                    "Hosted sync is configured, but Blop Cloud connectivity or token validation failed."
-                )
+                warnings.append("Hosted sync is configured, but Blop Cloud connectivity or token validation failed.")
         except Exception as exc:
             checks.append(
                 {

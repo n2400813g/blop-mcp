@@ -226,15 +226,18 @@ async def test_validate_warns_on_partial_hosted_sync_config():
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
         with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
             with patch("blop.storage.sqlite.init_db", new_callable=AsyncMock):
-                with patch("blop.tools.validate.hosted_sync_config_snapshot", return_value={
-                    "enabled": False,
-                    "partial": True,
-                    "configured_fields": ["BLOP_HOSTED_URL"],
-                    "missing_fields": ["BLOP_API_TOKEN", "BLOP_PROJECT_ID"],
-                    "hosted_url": "https://cloud.blop.dev",
-                    "project_id": None,
-                    "token_present": False,
-                }):
+                with patch(
+                    "blop.tools.validate.hosted_sync_config_snapshot",
+                    return_value={
+                        "enabled": False,
+                        "partial": True,
+                        "configured_fields": ["BLOP_HOSTED_URL"],
+                        "missing_fields": ["BLOP_API_TOKEN", "BLOP_PROJECT_ID"],
+                        "hosted_url": "https://cloud.blop.dev",
+                        "project_id": None,
+                        "token_present": False,
+                    },
+                ):
                     result = await validate_setup()
 
     assert result["status"] == "warnings"
@@ -254,26 +257,31 @@ async def test_validate_reports_hosted_sync_connection_when_configured():
     mock_playwright.chromium.launch.return_value = mock_browser
 
     mock_sync_client = MagicMock()
-    mock_sync_client.probe_connection = AsyncMock(return_value={
-        "status": "ok",
-        "workspace_id": "ws_123",
-        "token_scope": "project",
-        "requested_project_id": "proj_123",
-        "token_project_id": "proj_123",
-    })
+    mock_sync_client.probe_connection = AsyncMock(
+        return_value={
+            "status": "ok",
+            "workspace_id": "ws_123",
+            "token_scope": "project",
+            "requested_project_id": "proj_123",
+            "token_project_id": "proj_123",
+        }
+    )
 
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
         with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
             with patch("blop.storage.sqlite.init_db", new_callable=AsyncMock):
-                with patch("blop.tools.validate.hosted_sync_config_snapshot", return_value={
-                    "enabled": True,
-                    "partial": False,
-                    "configured_fields": ["BLOP_HOSTED_URL", "BLOP_API_TOKEN", "BLOP_PROJECT_ID"],
-                    "missing_fields": [],
-                    "hosted_url": "https://cloud.blop.dev",
-                    "project_id": "proj_123",
-                    "token_present": True,
-                }):
+                with patch(
+                    "blop.tools.validate.hosted_sync_config_snapshot",
+                    return_value={
+                        "enabled": True,
+                        "partial": False,
+                        "configured_fields": ["BLOP_HOSTED_URL", "BLOP_API_TOKEN", "BLOP_PROJECT_ID"],
+                        "missing_fields": [],
+                        "hosted_url": "https://cloud.blop.dev",
+                        "project_id": "proj_123",
+                        "token_present": True,
+                    },
+                ):
                     with patch("blop.sync.client.SyncClient", return_value=mock_sync_client):
                         result = await validate_setup()
 

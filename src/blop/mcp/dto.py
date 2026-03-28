@@ -99,6 +99,15 @@ class PerformStepResultDTO(BaseModel):
     action: str
     status: str
     detail: dict[str, Any] = Field(default_factory=dict)
+    lifecycle: Literal["observe", "act", "extract"] = "act"
+    correlation: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional run_id / case_id for aligning atomic steps with replay health events.",
+    )
+    observe_metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="When lifecycle=observe, locator resolution (count, visible) or page URL/title.",
+    )
 
 
 class CaptureArtifactResultDTO(BaseModel):

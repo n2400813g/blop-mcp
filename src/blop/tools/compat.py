@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from importlib import import_module
 from typing import Optional
 
 from blop.config import BLOP_ENABLE_COMPAT_TOOLS
-from blop.tools import journeys, release_check, resources, validate
+
+
+def _load_tool_module(module_name: str):
+    return import_module(f"blop.tools.{module_name}")
 
 
 def _compat_disabled(tool_name: str, replacement_tool: str) -> dict:
@@ -44,6 +48,7 @@ async def validate_setup(
     """Deprecated compat alias for validate_release_setup."""
     if not BLOP_ENABLE_COMPAT_TOOLS:
         return _compat_disabled("validate_setup", "validate_release_setup")
+    validate = _load_tool_module("validate")
     result = await validate.validate_release_setup(app_url=app_url, profile_name=profile_name)
     return _with_deprecation(
         result,
@@ -67,6 +72,7 @@ async def discover_test_flows(
     """Deprecated compat alias for discover_critical_journeys."""
     if not BLOP_ENABLE_COMPAT_TOOLS:
         return _compat_disabled("discover_test_flows", "discover_critical_journeys")
+    journeys = _load_tool_module("journeys")
     result = await journeys.discover_critical_journeys(
         app_url=app_url,
         profile_name=profile_name,
@@ -103,6 +109,7 @@ async def run_regression_test(
     """Deprecated compat alias for run_release_check(mode='replay')."""
     if not BLOP_ENABLE_COMPAT_TOOLS:
         return _compat_disabled("run_regression_test", "run_release_check")
+    release_check = _load_tool_module("release_check")
     result = await release_check.run_release_check(
         app_url=app_url,
         flow_ids=flow_ids,
@@ -142,7 +149,7 @@ async def evaluate_web_task(
 
     # The canonical targeted mode is release-shaped rather than arbitrary-task shaped.
     # Keep the existing behavior for compat callers, but attach the canonical upgrade path.
-    from blop.tools.evaluate import evaluate_web_task as legacy_evaluate_web_task
+    legacy_evaluate_web_task = _load_tool_module("evaluate").evaluate_web_task
 
     result = await legacy_evaluate_web_task(
         app_url=app_url,
@@ -171,6 +178,7 @@ async def list_recorded_tests() -> dict:
     """Deprecated compat alias for the blop://journeys resource."""
     if not BLOP_ENABLE_COMPAT_TOOLS:
         return _compat_disabled("list_recorded_tests", "blop://journeys")
+    resources = _load_tool_module("resources")
     result = await resources.journeys_resource()
     return _with_deprecation(
         result,

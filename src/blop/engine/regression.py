@@ -374,6 +374,32 @@ async def execute_recorded_flow(
                 )
             trace.step_results.append(step_result)
 
+            try:
+                from blop.reporting.health_event_taxonomy import canonical_replay_step_activity
+                from blop.storage import sqlite as _sqlite_health
+
+                await _sqlite_health.save_run_health_event(
+                    run_id,
+                    "replay_step_completed",
+                    {
+                        "case_id": case_id,
+                        "flow_id": flow.flow_id,
+                        "flow_name": flow.flow_name,
+                        "step_id": step.step_id,
+                        "step_index": step_idx,
+                        "action": step.action,
+                        "status": step_result.status,
+                        "replay_mode": step_result.replay_mode,
+                        "elapsed_ms": step_result.elapsed_ms,
+                        "failure_reason": step_result.failure_reason,
+                        "selector_entropy": step_result.selector_entropy,
+                        "aria_consistency": step_result.aria_consistency,
+                        "activity": canonical_replay_step_activity(step.action, step_result.status),
+                    },
+                )
+            except Exception:
+                _log.debug("replay_step_completed health event failed", exc_info=True)
+
             # Collect performance metrics after navigation steps
             if step.action == "navigate" and step_result.status == "pass":
                 if not landing_observed:
@@ -1009,7 +1035,7 @@ async def repair_step_with_agent(
     if not _check_llm_api_key():
         return None
 
-    from blop.engine.llm_factory import make_planning_llm
+    from blop.engine.llm_factory import ainvoke_llm, make_planning_llm
     from blop.prompts import REPAIR_STEP_PROMPT
 
     try:
@@ -1055,7 +1081,12 @@ async def repair_step_with_agent(
 
         llm = make_planning_llm(temperature=0.2, max_output_tokens=300, role="repair")
         msg = _make_vision_message(prompt, b64)
-        response = await llm.ainvoke([msg])
+        response = await ainvoke_llm(
+            llm,
+            [msg],
+            span_name="blop.llm.repair_step",
+            role="repair",
+        )
         text = str(response.content) if hasattr(response, "content") else str(response)
         m = re.search(r"\{.*\}", text, re.DOTALL)
         if m:

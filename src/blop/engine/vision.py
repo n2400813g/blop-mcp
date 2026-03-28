@@ -77,9 +77,16 @@ Return ONLY a JSON object with the pixel coordinates of its center:
 {{"x": <integer>, "y": <integer>}}
 If not found, return {{"x": null, "y": null}}"""
 
+        from blop.engine.llm_factory import ainvoke_llm
+
         llm = _llm()
         msg = _make_vision_message(prompt, b64)
-        response = await llm.ainvoke([msg])
+        response = await ainvoke_llm(
+            llm,
+            [msg],
+            span_name="blop.llm.vision.find_element_coords",
+            role="vision",
+        )
         text = str(response.content) if hasattr(response, "content") else str(response)
         m = re.search(r'\{"x":\s*(\d+|null),\s*"y":\s*(\d+|null)\}', text)
         if m and m.group(1) != "null":
@@ -143,9 +150,16 @@ Assertions:
 
 Return ONLY a JSON array of booleans in the same order (e.g. [true, false, true]):"""
 
+        from blop.engine.llm_factory import ainvoke_llm
+
         llm = _llm(max_output_tokens=64)
         msg = _make_vision_message(prompt, b64)
-        response = await llm.ainvoke([msg])
+        response = await ainvoke_llm(
+            llm,
+            [msg],
+            span_name="blop.llm.vision.assert_all_by_vision",
+            role="vision",
+        )
         text = str(response.content) if hasattr(response, "content") else str(response)
         m = re.search(r"\[.*?\]", text, re.DOTALL)
         if m:
