@@ -10,6 +10,7 @@ Compatible MCP clients: **Cursor**, **Claude Code**, and other clients that supp
 
 ## Quick Navigation
 
+- [Contributing](CONTRIBUTING.md)
 - [Product thesis](#product-thesis)
 - [What it actually does](#what-does-it-actually-do)
 - [Why blop vs generic AI testing agents](#why-blop-vs-generic-ai-testing-agents)
@@ -172,7 +173,7 @@ Everything else can stay as-is.
 
 1. Open Cursor
 2. Go to **Settings → MCP**
-3. Click **Add MCP Server** and paste this (update the path to where you cloned blop):
+3. Click **Add MCP Server** and paste this (update the path to where you cloned blop). You can start from [`.cursor/mcp.json.example`](.cursor/mcp.json.example) and copy it to `.cursor/mcp.json` locally if you prefer a file-based setup (the real `mcp.json` is gitignored).
 
 ```json
 {

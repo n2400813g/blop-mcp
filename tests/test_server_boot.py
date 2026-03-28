@@ -1,4 +1,5 @@
 """Tests for server import-time behaviour — server_boot category."""
+
 from __future__ import annotations
 
 import logging

@@ -1,26 +1,28 @@
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
-import uuid
 
 
 class StructuredAssertion(BaseModel):
     """Machine-evaluable assertion captured during recording."""
+
     assertion_type: Literal[
-        "text_present",     # expected text is present in element or page body
+        "text_present",  # expected text is present in element or page body
         "element_visible",  # element matching target selector/role is visible
-        "url_contains",     # current URL contains expected substring
-        "page_title",       # document.title contains expected substring
-        "count",            # element count equals expected (integer string)
-        "semantic",         # requires LLM/vision evaluation
-        "visual_match",     # pixel-based + LLM visual comparison against golden baseline
+        "url_contains",  # current URL contains expected substring
+        "page_title",  # document.title contains expected substring
+        "count",  # element count equals expected (integer string)
+        "semantic",  # requires LLM/vision evaluation
+        "visual_match",  # pixel-based + LLM visual comparison against golden baseline
     ]
-    target: str | None = None      # CSS selector, ARIA role name, or URL substring
-    expected: str | None = None    # expected text/value/count
-    description: str = ""          # original natural-language form (always kept)
-    negated: bool = False          # if True, assert that condition does NOT hold
+    target: str | None = None  # CSS selector, ARIA role name, or URL substring
+    expected: str | None = None  # expected text/value/count
+    description: str = ""  # original natural-language form (always kept)
+    negated: bool = False  # if True, assert that condition does NOT hold
 
     @model_validator(mode="after")
     def _validate_shape(self) -> "StructuredAssertion":
@@ -78,36 +80,43 @@ class AuthProfile(BaseModel):
 
 class SpaHints(BaseModel):
     """Per-flow hints for navigating complex SPAs and web-component apps."""
-    wait_for_selector: str | None = None        # CSS selector that signals page is ready
-    wait_for_shadow_selector: str | None = None # CSS selector to search inside shadow roots
-    entry_url_pattern: str | None = None        # URL substring indicating we're in the right view
-    settle_ms: int = 1500                       # Extra settle wait after navigation (ms)
-    has_web_components: bool = False            # App uses shadow DOM web components
-    push_state_navigation: bool = False         # SPA uses pushState (not full page loads)
+
+    wait_for_selector: str | None = None  # CSS selector that signals page is ready
+    wait_for_shadow_selector: str | None = None  # CSS selector to search inside shadow roots
+    entry_url_pattern: str | None = None  # URL substring indicating we're in the right view
+    settle_ms: int = 1500  # Extra settle wait after navigation (ms)
+    has_web_components: bool = False  # App uses shadow DOM web components
+    push_state_navigation: bool = False  # SPA uses pushState (not full page loads)
     # Canvas/WebGL-heavy app fields (populated from context graph archetype == "editor_heavy")
-    is_editor_heavy: bool = False               # App requires extended canvas/WebGL init waits
-    editor_ready_selector: str | None = None   # DOM element that confirms the heavy view is ready
-    editor_ready_js: str | None = None         # JS expression that resolves true when view is ready
-    editor_settle_ms: int = 8000               # Settle time for canvas/WebGL views (ms)
+    is_editor_heavy: bool = False  # App requires extended canvas/WebGL init waits
+    editor_ready_selector: str | None = None  # DOM element that confirms the heavy view is ready
+    editor_ready_js: str | None = None  # JS expression that resolves true when view is ready
+    editor_settle_ms: int = 8000  # Settle time for canvas/WebGL views (ms)
 
 
 class IntentContract(BaseModel):
     goal_text: str
-    goal_type: Literal["navigation", "milestone", "transaction", "gate_check", "editor_panel", "exploration"] = "milestone"
+    goal_type: Literal["navigation", "milestone", "transaction", "gate_check", "editor_panel", "exploration"] = (
+        "milestone"
+    )
     target_surface: Literal["public_site", "authenticated_app", "editor", "billing", "settings", "unknown"] = "unknown"
     success_assertions: list[str] = Field(default_factory=list)
     must_interact: list[str] = Field(default_factory=list)
     forbidden_shortcuts: list[str] = Field(default_factory=list)
     scope: Literal["public", "authed", "both"] = "both"
     business_criticality: Literal["revenue", "activation", "retention", "support", "other"] = "other"
-    planning_source: Literal["nl_command", "explicit_goal", "discovery_flow", "baseline_recipe", "legacy_unstructured"] = "explicit_goal"
+    planning_source: Literal[
+        "nl_command", "explicit_goal", "discovery_flow", "baseline_recipe", "legacy_unstructured"
+    ] = "explicit_goal"
     expected_url_patterns: list[str] = Field(default_factory=list)
     allowed_fallbacks: list[Literal["hybrid_repair", "goal_fallback", "hard_rerecord"]] = Field(default_factory=list)
 
 
 class DriftSummary(BaseModel):
     drift_detected: bool = False
-    drift_types: list[Literal["surface_drift", "auth_drift", "plan_drift", "assertion_drift", "repair_drift", "legacy_unstructured"]] = Field(default_factory=list)
+    drift_types: list[
+        Literal["surface_drift", "auth_drift", "plan_drift", "assertion_drift", "repair_drift", "legacy_unstructured"]
+    ] = Field(default_factory=list)
     allowed_fallback_used: list[str] = Field(default_factory=list)
     disallowed_fallback_used: list[str] = Field(default_factory=list)
     surface_match: bool | None = None
@@ -127,43 +136,52 @@ class ExecutionPlan(BaseModel):
     expected_landing_url_patterns: list[str] = Field(default_factory=list)
     required_assertion_phrases: list[str] = Field(default_factory=list)
     fallback_policy: list[Literal["hybrid_repair", "goal_fallback", "hard_rerecord"]] = Field(default_factory=list)
-    planning_source: Literal["nl_command", "explicit_goal", "discovery_flow", "baseline_recipe", "legacy_unstructured"] = "explicit_goal"
+    planning_source: Literal[
+        "nl_command", "explicit_goal", "discovery_flow", "baseline_recipe", "legacy_unstructured"
+    ] = "explicit_goal"
     scope: Literal["public", "authed", "both"] = "both"
     business_criticality: Literal["revenue", "activation", "retention", "support", "other"] = "other"
 
 
 class MobileSelector(BaseModel):
     """Selector strategies for mobile elements (iOS XCUITest / Android UIAutomator2)."""
-    accessibility_id: str | None = None       # XCUITest/UIAutomator2 accessibilityIdentifier
-    predicate_string: str | None = None       # iOS NSPredicate (e.g. "label == 'Sign In'")
-    class_chain: str | None = None            # iOS XCUITest class chain
-    xpath: str | None = None                  # fallback XPath (discouraged, brittle)
-    android_uiautomator: str | None = None    # UiSelector string for Android
-    text: str | None = None                   # visible text match
-    content_desc: str | None = None           # Android content-description
+
+    accessibility_id: str | None = None  # XCUITest/UIAutomator2 accessibilityIdentifier
+    predicate_string: str | None = None  # iOS NSPredicate (e.g. "label == 'Sign In'")
+    class_chain: str | None = None  # iOS XCUITest class chain
+    xpath: str | None = None  # fallback XPath (discouraged, brittle)
+    android_uiautomator: str | None = None  # UiSelector string for Android
+    text: str | None = None  # visible text match
+    content_desc: str | None = None  # Android content-description
 
 
 class MobileDeviceTarget(BaseModel):
-    """App and device binding for a mobile flow."""
+    """App and device binding for a mobile flow.
+
+    For BrowserStack / LambdaTest, set ``device_name`` and ``os_version`` to a supported
+    real-device or emulator pair from the vendor catalog; hub routing uses ``BLOP_MOBILE_PROVIDER``.
+    """
+
     platform: Literal["ios", "android"]
-    app_id: str                               # bundle ID (iOS) or package name (Android)
-    app_path: str | None = None               # local .ipa/.apk path; omit to use installed app
-    device_name: str = "iPhone 15"            # Simulator name or real device name
+    app_id: str  # bundle ID (iOS) or package name (Android)
+    app_path: str | None = None  # local .ipa/.apk path; omit to use installed app
+    device_name: str = "iPhone 15"  # Simulator name or real device name
     os_version: str = "17.0"
-    device_udid: str | None = None            # reserved for real-device UDID (v1.1+)
+    device_udid: str | None = None  # reserved for real-device UDID (v1.1+)
     orientation: Literal["portrait", "landscape"] = "portrait"
     locale: str = "en_US"
-    app_version: str | None = None            # for evidence labeling only
+    app_version: str | None = None  # for evidence labeling only
 
 
 class MobileEvidenceBundle(BaseModel):
     """Evidence artifacts produced by a mobile run step or case."""
+
     run_id: str
     case_id: str
-    platform: str                             # ios | android
+    platform: str  # ios | android
     screenshots: list[str] = Field(default_factory=list)
-    device_log_path: str | None = None        # path to syslog (iOS) or logcat (Android) file
-    network_har_path: str | None = None       # optional mitmproxy HAR (requires mobile-proxy extra)
+    device_log_path: str | None = None  # path to syslog (iOS) or logcat (Android) file
+    network_har_path: str | None = None  # optional mitmproxy HAR (requires mobile-proxy extra)
     crash_report_path: str | None = None
     app_version: str | None = None
     device_name: str | None = None
@@ -174,10 +192,24 @@ class FlowStep(BaseModel):
     step_id: int
     action: Literal[
         # Web actions
-        "navigate", "click", "fill", "select", "upload", "drag", "assert", "wait",
+        "navigate",
+        "click",
+        "fill",
+        "select",
+        "upload",
+        "drag",
+        "assert",
+        "wait",
         # Mobile actions
-        "tap", "swipe", "long_press", "pinch", "scroll", "back",
-        "app_launch", "app_foreground", "app_background",
+        "tap",
+        "swipe",
+        "long_press",
+        "pinch",
+        "scroll",
+        "back",
+        "app_launch",
+        "app_foreground",
+        "app_background",
     ]
     selector: str | None = None
     value: str | None = None
@@ -190,20 +222,21 @@ class FlowStep(BaseModel):
     url_after: str | None = None
     screenshot_path: str | None = None
     # Semantic locator fields (captured at record time for stable replay)
-    aria_role: str | None = None           # ARIA role, e.g. "button", "textbox", "link"
-    aria_name: str | None = None           # accessible name at record time
-    aria_snapshot: str | None = None       # compact ARIA subtree JSON (depth 2, max 30 nodes)
-    testid_selector: str | None = None     # e.g. "[data-testid='submit-btn']"
-    label_text: str | None = None          # associated label/placeholder for fill steps
+    aria_role: str | None = None  # ARIA role, e.g. "button", "textbox", "link"
+    aria_name: str | None = None  # accessible name at record time
+    aria_snapshot: str | None = None  # compact ARIA subtree JSON (depth 2, max 30 nodes)
+    testid_selector: str | None = None  # e.g. "[data-testid='submit-btn']"
+    label_text: str | None = None  # associated label/placeholder for fill steps
+    replay_recipe: list[dict[str, str]] = Field(default_factory=list)  # precompiled locator order for replay
     # Structured assertion (for assert steps only)
     structured_assertion: StructuredAssertion | None = None
     # Mobile-specific fields (None for all web flows — no breaking change)
     mobile_selector: MobileSelector | None = None
     swipe_direction: Literal["up", "down", "left", "right"] | None = None
-    swipe_distance_pct: float | None = None   # 0.0–1.0 fraction of screen dimension
-    touch_x_pct: float | None = None          # tap coordinate as fraction of screen width
-    touch_y_pct: float | None = None          # tap coordinate as fraction of screen height
-    pinch_scale: float | None = None          # >1.0 = zoom in, <1.0 = zoom out
+    swipe_distance_pct: float | None = None  # 0.0–1.0 fraction of screen dimension
+    touch_x_pct: float | None = None  # tap coordinate as fraction of screen width
+    touch_y_pct: float | None = None  # tap coordinate as fraction of screen height
+    pinch_scale: float | None = None  # >1.0 = zoom in, <1.0 = zoom out
 
 
 class RecordedFlow(BaseModel):
@@ -543,11 +576,11 @@ class CorrelationMatch(BaseModel):
 
 
 class StabilityFingerprint(BaseModel):
-    selector_entropy: float = 0.0       # higher means selector likely brittle
-    aria_consistency: float = 0.0       # higher means semantic locator looked stable
-    latency_ms: int = 0                 # observed step latency
+    selector_entropy: float = 0.0  # higher means selector likely brittle
+    aria_consistency: float = 0.0  # higher means semantic locator looked stable
+    latency_ms: int = 0  # observed step latency
     retry_count: int = 0
-    drift_score: float = 0.0            # heuristic [0,1] drift indicator
+    drift_score: float = 0.0  # heuristic [0,1] drift indicator
 
 
 @dataclass
@@ -589,6 +622,7 @@ class ReplayTrace:
 
 class HealedStep(BaseModel):
     """Record of a step that was automatically healed during regression replay."""
+
     step_id: int
     original_selector: str | None = None
     healed_selector: str | None = None
@@ -605,14 +639,26 @@ class FailureCase(BaseModel):
     flow_name: str
     status: Literal["pass", "fail", "error", "blocked"]
     severity: Literal["blocker", "high", "medium", "low", "none"] = "none"
-    failure_class: Literal[
-        "product_bug", "test_fragility", "auth_failure", "env_issue",
-        # Mobile-specific failure classes
-        "startup_failure", "install_failure", "navigation_crash",
-    ] | None = None
+    failure_class: (
+        Literal[
+            "product_bug",
+            "test_fragility",
+            "auth_failure",
+            "env_issue",
+            # Mobile-specific failure classes
+            "startup_failure",
+            "install_failure",
+            "navigation_crash",
+        ]
+        | None
+    ) = None
     # Mobile evidence (None for web runs)
     device_log_path: str | None = None
     crash_report_path: str | None = None
+    mobile_accessibility_paths: list[str] = Field(
+        default_factory=list,
+        description="Per-step page_source XML paths from Appium replay",
+    )
     platform: Literal["web", "ios", "android"] = "web"
     failure_reason_codes: list[str] = []
     repro_steps: list[str] = []
@@ -701,6 +747,7 @@ class DebugResult(BaseModel):
 
 class ReleaseRecommendation(BaseModel):
     """Authoritative schema for the release_recommendation field returned by build_report and evaluate_web_task."""
+
     decision: Literal["SHIP", "INVESTIGATE", "BLOCK"]
     confidence: Literal["high", "medium", "low"]
     rationale: str
@@ -709,6 +756,7 @@ class ReleaseRecommendation(BaseModel):
 
 
 # ── MVP canonical models ──────────────────────────────────────────────────────
+
 
 class ActionItem(BaseModel):
     priority: int  # 1 = highest
@@ -730,7 +778,13 @@ class ConfidenceScore(BaseModel):
 class ReleaseCheckRequest(BaseModel):
     """Canonical public request contract for release-confidence checks."""
 
-    app_url: str
+    app_url: str = Field(
+        ...,
+        description=(
+            "Web: https URL for the app under test. Mobile-only replay: package name (Android) or "
+            "bundle ID (iOS), same value as record_test_flow app_url for those flows."
+        ),
+    )
     journey_ids: list[str] | None = None
     flow_ids: list[str] | None = None
     profile_name: str | None = None
@@ -805,8 +859,10 @@ class BlockerTriage(BaseModel):
 
 # ── Policy-Aware Release Gates (BLO-74) ───────────────────────────────────────
 
+
 class CriticalityGate(BaseModel):
     """Per-criticality level configuration in a ReleasePolicy."""
+
     criticality: Literal["revenue", "activation", "retention", "support", "other"]
     on_failure: Literal["BLOCK", "INVESTIGATE", "IGNORE"] = "INVESTIGATE"
     min_failures: int = 1
@@ -815,6 +871,7 @@ class CriticalityGate(BaseModel):
 
 class ReleasePolicy(BaseModel):
     """Named release gate policy — controls per-criticality and stability-bucket decisions."""
+
     policy_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     policy_name: str
     description: str = ""
@@ -822,8 +879,8 @@ class ReleasePolicy(BaseModel):
     gates: list[CriticalityGate] = Field(default_factory=list)
     # Global flags — can escalate INVESTIGATE → BLOCK across the whole run
     block_on_any_failure: bool = False
-    block_on_unknown_stability: bool = False   # BLO-77: block if unknown_unclassified present
-    block_on_install_failure: bool = True      # BLO-77: block if install_or_upgrade_failure present
+    block_on_unknown_stability: bool = False  # BLO-77: block if unknown_unclassified present
+    block_on_install_failure: bool = True  # BLO-77: block if install_or_upgrade_failure present
 
     def gate_for(self, criticality: str) -> "CriticalityGate | None":
         for g in self.gates:
@@ -839,11 +896,11 @@ DEFAULT_RELEASE_POLICY = ReleasePolicy(
     description="Block on revenue/activation failures; investigate retention; other criticalities are informational.",
     is_default=True,
     gates=[
-        CriticalityGate(criticality="revenue",    on_failure="BLOCK",       min_failures=1, enabled=True),
-        CriticalityGate(criticality="activation", on_failure="BLOCK",       min_failures=1, enabled=True),
-        CriticalityGate(criticality="retention",  on_failure="INVESTIGATE", min_failures=1, enabled=True),
-        CriticalityGate(criticality="support",    on_failure="INVESTIGATE", min_failures=1, enabled=False),
-        CriticalityGate(criticality="other",      on_failure="INVESTIGATE", min_failures=1, enabled=False),
+        CriticalityGate(criticality="revenue", on_failure="BLOCK", min_failures=1, enabled=True),
+        CriticalityGate(criticality="activation", on_failure="BLOCK", min_failures=1, enabled=True),
+        CriticalityGate(criticality="retention", on_failure="INVESTIGATE", min_failures=1, enabled=True),
+        CriticalityGate(criticality="support", on_failure="INVESTIGATE", min_failures=1, enabled=False),
+        CriticalityGate(criticality="other", on_failure="INVESTIGATE", min_failures=1, enabled=False),
     ],
     block_on_any_failure=False,
     block_on_unknown_stability=False,
@@ -853,6 +910,7 @@ DEFAULT_RELEASE_POLICY = ReleasePolicy(
 
 class PolicyGateResult(BaseModel):
     """Result of evaluating one CriticalityGate against actual run data."""
+
     criticality: str
     gate_enabled: bool
     failures_found: int
@@ -864,6 +922,7 @@ class PolicyGateResult(BaseModel):
 
 class PolicyEvaluation(BaseModel):
     """Full structured evaluation of a ReleasePolicy against a run's cases."""
+
     policy_id: str
     policy_name: str
     gate_results: list[PolicyGateResult] = Field(default_factory=list)

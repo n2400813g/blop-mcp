@@ -1,4 +1,5 @@
 """Network mocking/routing tools with canonical scope-aware contracts."""
+
 from __future__ import annotations
 
 import logging

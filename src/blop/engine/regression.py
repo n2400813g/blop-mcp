@@ -1,4 +1,5 @@
 """Flow replay engine — step-by-step hybrid replay with agent repair fallback."""
+
 from __future__ import annotations
 
 import asyncio
@@ -8,12 +9,14 @@ import json
 import os
 import re
 import time
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 from urllib.parse import urlparse
-from typing import Optional, TYPE_CHECKING
 
+from blop.engine.browser_pool import BROWSER_POOL
+from blop.engine.evidence_policy import cap_artifact_paths, resolve_evidence_policy, should_capture_screenshot
+from blop.engine.logger import get_logger
 from blop.schemas import FailureCase, RecordedFlow, ReplayStepResult, ReplayTrace, StabilityFingerprint
 from blop.storage import files as file_store
-from blop.engine.logger import get_logger
 
 _log = get_logger("regression")
 
@@ -21,10 +24,9 @@ if TYPE_CHECKING:
     from playwright.async_api import Page
 
 
-from blop.config import BLOP_AUTO_HEAL_MIN_CONFIDENCE as AUTO_HEAL_MIN_CONFIDENCE
 from blop.config import BLOP_AUTO_HEAL_MAX_BEHAVIOR_RISK as AUTO_HEAL_MAX_BEHAVIOR_RISK
-from blop.config import BLOP_REPLAY_CONCURRENCY
-from blop.config import BLOP_STEP_TIMEOUT_SECS
+from blop.config import BLOP_AUTO_HEAL_MIN_CONFIDENCE as AUTO_HEAL_MIN_CONFIDENCE
+from blop.config import BLOP_REPLAY_CONCURRENCY, BLOP_STEP_TIMEOUT_SECS
 from blop.schemas import DriftSummary
 
 
@@ -99,10 +101,9 @@ def _should_auto_heal(
     action: str | None = None,
     selector_entropy: float = 0.0,
 ) -> bool:
-    return (
-        repair_confidence >= _required_heal_confidence(action, selector_entropy)
-        and behavior_risk <= _allowed_heal_behavior_risk(action)
-    )
+    return repair_confidence >= _required_heal_confidence(
+        action, selector_entropy
+    ) and behavior_risk <= _allowed_heal_behavior_risk(action)
 
 
 async def _save_navigation_health_event(
@@ -140,9 +141,20 @@ def _infer_surface_from_url(url: str, *, expected_surface: str | None = None) ->
     path = (parsed.path or "/").lower()
     segments = [segment for segment in path.split("/") if segment]
     public_markers = {
-        "pages", "reference", "docs", "blog", "help", "support",
-        "challenges", "tutorial", "tutorials", "guide", "guides",
-        "about", "contact", "examples",
+        "pages",
+        "reference",
+        "docs",
+        "blog",
+        "help",
+        "support",
+        "challenges",
+        "tutorial",
+        "tutorials",
+        "guide",
+        "guides",
+        "about",
+        "contact",
+        "examples",
     }
     app_markers = {"dashboard", "workspace", "project", "projects", "console", "admin"}
     if "/editor" in lowered:
@@ -208,7 +220,8 @@ def _build_drift_summary(
     surface_match = None
     if actual_landing_url:
         surface_match = actual_surface == intent.target_surface or (
-            intent.target_surface == "authenticated_app" and actual_surface in {"authenticated_app", "editor", "billing", "settings"}
+            intent.target_surface == "authenticated_app"
+            and actual_surface in {"authenticated_app", "editor", "billing", "settings"}
         )
         if not surface_match:
             drift_types.append("surface_drift")
@@ -263,6 +276,7 @@ def _build_drift_summary(
 # Hybrid step-by-step executor
 # ---------------------------------------------------------------------------
 
+
 async def execute_recorded_flow(
     flow: RecordedFlow,
     run_id: str,
@@ -272,7 +286,6 @@ async def execute_recorded_flow(
     run_mode: str = "hybrid",
 ) -> FailureCase:
     """Replay a RecordedFlow step-by-step; repair broken selectors before falling back to agent."""
-    from playwright.async_api import async_playwright
     from blop.engine.browser import make_browser_profile
 
     trace = ReplayTrace(
@@ -282,171 +295,181 @@ async def execute_recorded_flow(
     )
 
     browser_profile = make_browser_profile(headless=headless, storage_state=storage_state)
+    evidence_policy = resolve_evidence_policy()
+    video_dir = None
+    if evidence_policy.video:
+        video_dir = str(file_store._runs_dir() / "videos" / run_id)
+        os.makedirs(video_dir, exist_ok=True)
 
-    capture_trace = os.getenv("BLOP_CAPTURE_TRACE", "true").lower() in ("true", "1", "yes")
-    capture_video = os.getenv("BLOP_CAPTURE_VIDEO", "false").lower() in ("true", "1", "yes")
+    lease = await BROWSER_POOL.acquire(
+        headless=bool(browser_profile.headless),
+        storage_state=storage_state,
+        record_video_dir=video_dir,
+        record_video_size={"width": 1280, "height": 720} if video_dir else None,
+    )
+    context = lease.context
+    page = lease.page
 
-    async with async_playwright() as p:
-        launch_kwargs = {
-            "headless": browser_profile.headless,
-            "args": browser_profile.browser_args if hasattr(browser_profile, "browser_args") else [],
-        }
-        browser = await p.chromium.launch(**{k: v for k, v in launch_kwargs.items() if v or k == "headless"})
+    # Apply any registered network route mocks
+    from blop.tools.network import apply_routes_to_context
 
-        ctx_kwargs: dict = {}
-        if storage_state:
-            ctx_kwargs["storage_state"] = storage_state
-        if capture_video:
-            video_dir = str(file_store._runs_dir() / "videos" / run_id)
-            os.makedirs(video_dir, exist_ok=True)
-            ctx_kwargs["record_video_dir"] = video_dir
-            ctx_kwargs["record_video_size"] = {"width": 1280, "height": 720}
-        context = await browser.new_context(**ctx_kwargs)
+    await apply_routes_to_context(context)
 
-        # Apply any registered network route mocks
-        from blop.tools.network import apply_routes_to_context
-        await apply_routes_to_context(context)
-
-        # Start Playwright tracing for debugging artifacts
-        trace_zip = file_store.trace_path(run_id, case_id)
-        tracing_enabled = False
-        if capture_trace:
-            try:
-                await context.tracing.start(screenshots=True, snapshots=True, sources=False)
-                tracing_enabled = True
-            except Exception:
-                _log.debug("tracing start failed", exc_info=True)
-
-        # Capture console errors
-        page = await context.new_page()
-        page.on("console", lambda msg: trace.console_errors.append(msg.text) if msg.type == "error" else None)
-        page.on("response", lambda resp: trace.network_errors.append(f"{resp.status} {resp.url}")
-                 if resp.status >= 500 else None)
-
+    # Start Playwright tracing for debugging artifacts
+    trace_zip = file_store.trace_path(run_id, case_id)
+    tracing_enabled = False
+    if evidence_policy.trace:
         try:
-            unrecoverable = False
-            deferred_asserts: list[tuple[int, object]] = []  # (step_idx, step) for assert steps
-            landing_observed = False
+            await context.tracing.start(screenshots=True, snapshots=True, sources=False)
+            tracing_enabled = True
+        except Exception:
+            _log.debug("tracing start failed", exc_info=True)
 
-            spa_hints = getattr(flow, "spa_hints", None)
+    # Capture console errors
+    page.on("console", lambda msg: trace.console_errors.append(msg.text) if msg.type == "error" else None)
+    page.on(
+        "response",
+        lambda resp: trace.network_errors.append(f"{resp.status} {resp.url}") if resp.status >= 500 else None,
+    )
 
-            for step_idx, step in enumerate(flow.steps):
-                # Cooperative cancellation boundary between potentially long browser steps.
-                await asyncio.sleep(0)
-                if step.action == "assert":
-                    deferred_asserts.append((step_idx, step))
-                    continue
+    try:
+        deferred_asserts: list[tuple[int, object]] = []  # (step_idx, step) for assert steps
+        landing_observed = False
 
-                try:
-                    step_result = await asyncio.wait_for(
-                        _execute_single_step(
-                            page=page,
-                            step=step,
-                            step_idx=step_idx,
+        spa_hints = getattr(flow, "spa_hints", None)
+
+        for step_idx, step in enumerate(flow.steps):
+            # Cooperative cancellation boundary between potentially long browser steps.
+            await asyncio.sleep(0)
+            if step.action == "assert":
+                deferred_asserts.append((step_idx, step))
+                continue
+
+            try:
+                step_result = await asyncio.wait_for(
+                    _execute_single_step(
+                        page=page,
+                        step=step,
+                        step_idx=step_idx,
+                        run_id=run_id,
+                        case_id=case_id,
+                        run_mode=run_mode,
+                        trace=trace,
+                        spa_hints=spa_hints,
+                        flow_name=flow.flow_name,
+                        flow_goal=flow.goal,
+                        evidence_policy=evidence_policy,
+                    ),
+                    timeout=float(BLOP_STEP_TIMEOUT_SECS),
+                )
+            except asyncio.TimeoutError:
+                step_result = ReplayStepResult(
+                    step_id=step.step_id,
+                    action=step.action,
+                    status="fail",
+                    replay_mode="step_timeout",
+                    error=f"Step exceeded BLOP_STEP_TIMEOUT_SECS={BLOP_STEP_TIMEOUT_SECS}",
+                    elapsed_ms=int(float(BLOP_STEP_TIMEOUT_SECS) * 1000),
+                    failure_reason="step_timeout",
+                )
+            trace.step_results.append(step_result)
+
+            # Collect performance metrics after navigation steps
+            if step.action == "navigate" and step_result.status == "pass":
+                if not landing_observed:
+                    try:
+                        current_url = page.url
+                        page_title = await _normalize_page_text(page.title())
+                        await _save_navigation_health_event(
                             run_id=run_id,
                             case_id=case_id,
-                            run_mode=run_mode,
-                            trace=trace,
-                            spa_hints=spa_hints,
-                            flow_name=flow.flow_name,
-                            flow_goal=flow.goal,
-                        ),
-                        timeout=float(BLOP_STEP_TIMEOUT_SECS),
-                    )
-                except asyncio.TimeoutError:
-                    step_result = ReplayStepResult(
-                        step_id=step.step_id,
-                        action=step.action,
-                        status="fail",
-                        replay_mode="step_timeout",
-                        error=f"Step exceeded BLOP_STEP_TIMEOUT_SECS={BLOP_STEP_TIMEOUT_SECS}",
-                        elapsed_ms=int(float(BLOP_STEP_TIMEOUT_SECS) * 1000),
-                        failure_reason="step_timeout",
-                    )
-                trace.step_results.append(step_result)
-
-                # Collect performance metrics after navigation steps
-                if step.action == "navigate" and step_result.status == "pass":
-                    if not landing_observed:
-                        try:
-                            current_url = page.url
-                            page_title = await _normalize_page_text(page.title())
-                            await _save_navigation_health_event(
-                                run_id=run_id,
-                                case_id=case_id,
-                                flow=flow,
-                                expected_url=step.value or flow.entry_url or flow.app_url,
-                                landed_url=current_url,
-                                page_title=page_title[:120],
-                            )
-                            trace.landing_url = current_url
-                            landing_observed = True
-                        except Exception:
-                            _log.debug("navigation health event failed", exc_info=True)
-                    try:
-                        from blop.engine.performance import collect_performance_metrics
-                        perf = await collect_performance_metrics(page)
-                        if perf:
-                            perf["step_id"] = step.step_id
-                            perf["url"] = step.value or step.description
-                            trace.performance_metrics.append(perf)
+                            flow=flow,
+                            expected_url=step.value or flow.entry_url or flow.app_url,
+                            landed_url=current_url,
+                            page_title=page_title[:120],
+                        )
+                        trace.landing_url = current_url
+                        landing_observed = True
                     except Exception:
-                        _log.debug("collect performance metrics failed", exc_info=True)
+                        _log.debug("navigation health event failed", exc_info=True)
+                try:
+                    from blop.engine.performance import collect_performance_metrics
 
-                if step_result.status == "fail":
-                    if trace.step_failure_index is None:
-                        trace.step_failure_index = step_idx
-                    if run_mode == "strict_steps":
-                        unrecoverable = True
-                        break
+                    perf = await collect_performance_metrics(page)
+                    if perf:
+                        perf["step_id"] = step.step_id
+                        perf["url"] = step.value or step.description
+                        trace.performance_metrics.append(perf)
+                except Exception:
+                    _log.debug("collect performance metrics failed", exc_info=True)
 
-                if step_result.screenshot_path:
-                    trace.screenshots.append(step_result.screenshot_path)
+            if step_result.status == "fail":
+                if trace.step_failure_index is None:
+                    trace.step_failure_index = step_idx
+                if not step_result.screenshot_path and should_capture_screenshot(evidence_policy, "failure"):
+                    failure_shot = await _take_step_screenshot(
+                        page,
+                        run_id,
+                        case_id,
+                        step_idx,
+                        evidence_policy=evidence_policy,
+                        trigger="failure",
+                    )
+                    if failure_shot:
+                        step_result.screenshot_path = failure_shot
+                if run_mode == "strict_steps":
+                    break
 
-            # Tiered assertion evaluation: deterministic first, vision batch for semantic only
-            if deferred_asserts:
-                await asyncio.sleep(0)
-                assertion_eval_results = await _evaluate_assertions(page, deferred_asserts)
-                for result in assertion_eval_results:
-                    step_obj = result["step"]
-                    passed = result["passed"]
-                    eval_type = result["eval_type"]
-                    trace.assertion_results.append({
+            if step_result.screenshot_path:
+                trace.screenshots.append(step_result.screenshot_path)
+
+        # Tiered assertion evaluation: deterministic first, vision batch for semantic only
+        if deferred_asserts:
+            await asyncio.sleep(0)
+            assertion_eval_results = await _evaluate_assertions(page, deferred_asserts)
+            for result in assertion_eval_results:
+                step_obj = result["step"]
+                passed = result["passed"]
+                eval_type = result["eval_type"]
+                trace.assertion_results.append(
+                    {
                         "assertion": step_obj.value or step_obj.description,
                         "passed": passed,
                         "eval_type": eval_type,
                         **({"failed": True} if not passed else {}),
-                    })
-                    trace.step_results.append(ReplayStepResult(
+                    }
+                )
+                trace.step_results.append(
+                    ReplayStepResult(
                         step_id=step_obj.step_id,
                         action="assert",
                         status="pass" if passed else "fail",
                         replay_mode=eval_type,
-                    ))
+                    )
+                )
 
-            # Take final screenshot
-            try:
+        # Take final screenshot
+        try:
+            if should_capture_screenshot(evidence_policy, "final"):
                 final_path = file_store.screenshot_path(run_id, case_id, 999)
                 await page.screenshot(path=final_path)
                 trace.screenshots.append(final_path)
-            except Exception:
-                _log.debug("final screenshot failed", exc_info=True)
+        except Exception:
+            _log.debug("final screenshot failed", exc_info=True)
 
-        finally:
-            if tracing_enabled:
-                try:
-                    await context.tracing.stop(path=trace_zip)
-                    trace.trace_path = trace_zip
-                except Exception:
-                    _log.debug("tracing stop failed", exc_info=True)
+    finally:
+        if tracing_enabled:
             try:
-                await context.close()
+                await context.tracing.stop(path=trace_zip)
+                trace.trace_path = trace_zip
             except Exception:
-                _log.debug("context close failed", exc_info=True)
-            try:
-                await browser.close()
-            except Exception:
-                _log.debug("browser close failed", exc_info=True)
+                _log.debug("tracing stop failed", exc_info=True)
+        try:
+            await lease.close()
+        except Exception:
+            _log.debug("context close failed", exc_info=True)
+
+    trace.screenshots = cap_artifact_paths(trace.screenshots, limit=evidence_policy.artifact_cap)
 
     result_case = _trace_to_failure_case(trace, flow, run_id, case_id)
     if result_case.status == "blocked" and storage_state:
@@ -457,6 +480,7 @@ async def execute_recorded_flow(
     # Soft heal: persist healed selectors back into the recorded flow
     if result_case.healed_steps:
         from blop.storage.sqlite import update_flow_step_selector
+
         for hs in result_case.healed_steps:
             updates: dict = {}
             if hs.healed_locator_type == "role" and hs.healed_role and hs.healed_name:
@@ -488,6 +512,7 @@ async def _execute_single_step(
     spa_hints=None,
     flow_name: str | None = None,
     flow_goal: str | None = None,
+    evidence_policy=None,
 ) -> ReplayStepResult:
     """Tiered fallback: testid → aria_role → by_label → CSS → text → agent repair."""
     from blop.engine.interaction import click_locator, fill_locator, wait_for_spa_ready
@@ -544,7 +569,8 @@ async def _execute_single_step(
         if "auth redirect detected" in text:
             return "auth_expired"
         if any(
-            kw in text for kw in (
+            kw in text
+            for kw in (
                 "intercept",
                 "outside of the viewport",
                 "receives pointer events",
@@ -634,7 +660,9 @@ async def _execute_single_step(
     async def _try_locator(locator, replay_mode: str, allow_ambiguous_override: bool = False):
         # For click on navigation links (e.g. responsive sites have desktop + mobile nav
         # both in DOM), allow picking the first visible candidate rather than refusing.
-        _allow_amb = allow_ambiguous_override or (action == "click" and step.aria_role in ("link", "button", "menuitem", "tab"))
+        _allow_amb = allow_ambiguous_override or (
+            action == "click" and step.aria_role in ("link", "button", "menuitem", "tab")
+        )
         selected, reason, reason_error = await _pick_locator_candidate(locator, allow_ambiguous=_allow_amb)
         if not selected:
             return False, reason, reason_error, replay_mode
@@ -642,6 +670,44 @@ async def _execute_single_step(
         if ok:
             return True, None, None, replay_mode
         return False, apply_reason, apply_error, replay_mode
+
+    async def _try_replay_recipe():
+        for candidate in getattr(step, "replay_recipe", []) or []:
+            kind = str(candidate.get("kind") or "")
+            try:
+                if kind == "testid" and candidate.get("selector"):
+                    ok, reason, err, replay_mode = await _try_locator(page.locator(candidate["selector"]), "testid")
+                elif kind in ("role_exact", "role_fuzzy") and candidate.get("role") and candidate.get("name"):
+                    ok, reason, err, replay_mode = await _try_locator(
+                        page.get_by_role(
+                            candidate["role"],
+                            name=candidate["name"],
+                            exact=(kind == "role_exact"),
+                        ),
+                        "aria_role_exact" if kind == "role_exact" else "aria_role",
+                    )
+                elif kind in ("label_exact", "label_fuzzy") and candidate.get("text") and action in ("fill", "upload"):
+                    ok, reason, err, replay_mode = await _try_locator(
+                        page.get_by_label(candidate["text"], exact=(kind == "label_exact")),
+                        "by_label_exact" if kind == "label_exact" else "by_label",
+                    )
+                elif kind == "selector" and candidate.get("selector"):
+                    ok, reason, err, replay_mode = await _try_locator(page.locator(candidate["selector"]), "selector")
+                elif kind in ("text_exact", "text_fuzzy") and candidate.get("text"):
+                    ok, reason, err, replay_mode = await _try_locator(
+                        page.get_by_text(candidate["text"], exact=(kind == "text_exact")),
+                        "text_lookup_exact" if kind == "text_exact" else "text_lookup",
+                        allow_ambiguous_override=True,
+                    )
+                else:
+                    continue
+                if ok:
+                    return True, None, None, replay_mode
+                if reason and reason != "locator_not_found":
+                    return False, reason, err, replay_mode
+            except Exception:
+                _log.debug("compiled replay recipe candidate failed", exc_info=True)
+        return False, None, None, None
 
     last_reason: str | None = None
     last_error: str | None = None
@@ -657,6 +723,7 @@ async def _execute_single_step(
             if spa_hints and not spa_hints.is_editor_heavy:
                 from blop.engine.context_graph import detect_app_archetype, editor_hints_from_archetype
                 from blop.schemas import SiteInventory
+
                 _probe = SiteInventory(
                     app_url=nav_url or "",
                     routes=[nav_url or ""],
@@ -671,6 +738,7 @@ async def _execute_single_step(
                 _hint_kwargs = editor_hints_from_archetype(_archetype)
                 if _hint_kwargs:
                     from blop.schemas import SpaHints as _SpaHints
+
                     _effective_hints = _SpaHints(**{**spa_hints.model_dump(), **_hint_kwargs})
             elif spa_hints is None:
                 _effective_hints = None
@@ -691,7 +759,9 @@ async def _execute_single_step(
                 settle_ms=_effective_hints.settle_ms if _effective_hints else 1500,
                 spa_hints=_effective_hints,
             )
-            shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
+            shot = await _take_step_screenshot(
+                page, run_id, case_id, step_idx, evidence_policy=evidence_policy, trigger="navigation"
+            )
             return _result(status="pass", replay_mode="selector", screenshot_path=shot)
         except Exception as e:
             return _result(
@@ -708,8 +778,15 @@ async def _execute_single_step(
         except Exception:
             wait_secs = max(0.1, float(getattr(step, "wait_after_secs", 0.5)))
         await page.wait_for_timeout(int(wait_secs * 1000))
-        shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
+        shot = await _take_step_screenshot(page, run_id, case_id, step_idx, evidence_policy=evidence_policy)
         return _result(status="pass", replay_mode="wait", screenshot_path=shot)
+
+    recipe_ok, recipe_reason, recipe_error, recipe_mode = await _try_replay_recipe()
+    if recipe_ok:
+        shot = await _take_step_screenshot(page, run_id, case_id, step_idx, evidence_policy=evidence_policy)
+        return _result(status="pass", replay_mode=recipe_mode or "compiled_recipe", screenshot_path=shot)
+    if recipe_reason:
+        last_reason, last_error = recipe_reason, recipe_error
 
     # Tier 1: data-testid selector (most stable)
     testid_sel = getattr(step, "testid_selector", None)
@@ -717,7 +794,7 @@ async def _execute_single_step(
         try:
             ok, reason, err, _ = await _try_locator(page.locator(testid_sel), "testid")
             if ok:
-                shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
+                shot = await _take_step_screenshot(page, run_id, case_id, step_idx, evidence_policy=evidence_policy)
                 return _result(status="pass", replay_mode="testid", screenshot_path=shot)
             last_reason, last_error = reason, err
         except Exception:
@@ -735,7 +812,7 @@ async def _execute_single_step(
                     "aria_role_exact" if exact_mode else "aria_role_fuzzy",
                 )
                 if ok:
-                    shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
+                    shot = await _take_step_screenshot(page, run_id, case_id, step_idx, evidence_policy=evidence_policy)
                     return _result(
                         status="pass",
                         replay_mode="aria_role_exact" if exact_mode else "aria_role",
@@ -757,7 +834,7 @@ async def _execute_single_step(
                     "by_label_exact" if exact_mode else "by_label",
                 )
                 if ok:
-                    shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
+                    shot = await _take_step_screenshot(page, run_id, case_id, step_idx, evidence_policy=evidence_policy)
                     return _result(
                         status="pass",
                         replay_mode="by_label_exact" if exact_mode else "by_label",
@@ -773,7 +850,7 @@ async def _execute_single_step(
         try:
             ok, reason, err, _ = await _try_locator(page.locator(selector), "selector")
             if ok:
-                shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
+                shot = await _take_step_screenshot(page, run_id, case_id, step_idx, evidence_policy=evidence_policy)
                 return _result(status="pass", replay_mode="selector", screenshot_path=shot)
             if reason:
                 last_reason, last_error = reason, err
@@ -791,7 +868,7 @@ async def _execute_single_step(
                     allow_ambiguous_override=True,
                 )
                 if ok:
-                    shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
+                    shot = await _take_step_screenshot(page, run_id, case_id, step_idx, evidence_policy=evidence_policy)
                     return _result(
                         status="pass",
                         replay_mode="text_lookup_exact" if exact_mode else "text_lookup",
@@ -886,10 +963,11 @@ async def _execute_single_step(
                         value = original_value
                 else:
                     from blop.engine.vision import click_by_vision
+
                     desc = target_text or step.description
                     await click_by_vision(page, desc)
 
-                shot = await _take_step_screenshot(page, run_id, case_id, step_idx)
+                shot = await _take_step_screenshot(page, run_id, case_id, step_idx, evidence_policy=evidence_policy)
                 return _result(
                     status="repaired",
                     replay_mode="agent_repair",
@@ -927,11 +1005,12 @@ async def repair_step_with_agent(
 ) -> Optional[dict]:
     """Send REPAIR_STEP_PROMPT + ARIA context + screenshot to the configured LLM; return repaired action dict."""
     from blop.engine.vision import _check_llm_api_key, _make_vision_message
+
     if not _check_llm_api_key():
         return None
 
-    from blop.prompts import REPAIR_STEP_PROMPT
     from blop.engine.llm_factory import make_planning_llm
+    from blop.prompts import REPAIR_STEP_PROMPT
 
     try:
         aria_tree = ""
@@ -974,7 +1053,7 @@ async def repair_step_with_agent(
         )
         prompt = mask_text(prompt)
 
-        llm = make_planning_llm(temperature=0.2, max_output_tokens=300)
+        llm = make_planning_llm(temperature=0.2, max_output_tokens=300, role="repair")
         msg = _make_vision_message(prompt, b64)
         response = await llm.ainvoke([msg])
         text = str(response.content) if hasattr(response, "content") else str(response)
@@ -1016,7 +1095,17 @@ def _repair_flow_context_suffix(
 from blop.engine.dom_utils import extract_interactive_nodes_flat as _extract_interactive_nodes_flat
 
 
-async def _take_step_screenshot(page: "Page", run_id: str, case_id: str, step_idx: int) -> Optional[str]:
+async def _take_step_screenshot(
+    page: "Page",
+    run_id: str,
+    case_id: str,
+    step_idx: int,
+    *,
+    evidence_policy=None,
+    trigger: str = "step",
+) -> Optional[str]:
+    if evidence_policy is not None and not should_capture_screenshot(evidence_policy, trigger):
+        return None
     try:
         path = file_store.screenshot_path(run_id, case_id, step_idx)
         await page.screenshot(path=path)
@@ -1050,6 +1139,7 @@ async def _evaluate_assertions(page: "Page", deferred_asserts: list) -> list[dic
     # Batch evaluate remaining semantic assertions in a single vision call
     if semantic_batch:
         from blop.engine.vision import assert_all_by_vision
+
         texts = [t for _, t in semantic_batch]
         try:
             vision_results = await assert_all_by_vision(page, texts)
@@ -1123,9 +1213,7 @@ def _trace_to_failure_case(
     case_id: str,
 ) -> FailureCase:
     """Convert a ReplayTrace to a FailureCase."""
-    assertion_failures = [
-        r["assertion"] for r in trace.assertion_results if not r.get("passed", True)
-    ]
+    assertion_failures = [r["assertion"] for r in trace.assertion_results if not r.get("passed", True)]
     failed_steps = [r for r in trace.step_results if r.status == "fail"]
     failure_reason_codes = sorted({r.failure_reason for r in failed_steps if r.failure_reason})
 
@@ -1151,8 +1239,7 @@ def _trace_to_failure_case(
         status = "blocked"
         if not trace.raw_result:
             trace.raw_result = (
-                "Session expired mid-run. Re-run after refreshing auth profile "
-                "with capture_auth_session."
+                "Session expired mid-run. Re-run after refreshing auth profile with capture_auth_session."
             )
 
     repro: list[str] = []
@@ -1176,11 +1263,7 @@ def _trace_to_failure_case(
         if r.repair_confidence > 0:
             repair_confidences.append(r.repair_confidence)
 
-    avg_repair_confidence = (
-        round(sum(repair_confidences) / len(repair_confidences), 4)
-        if repair_confidences
-        else 0.0
-    )
+    avg_repair_confidence = round(sum(repair_confidences) / len(repair_confidences), 4) if repair_confidences else 0.0
     healing_decision = "none"
     if any(r.status == "repaired" for r in trace.step_results):
         healing_decision = "auto_heal"
@@ -1188,6 +1271,7 @@ def _trace_to_failure_case(
         healing_decision = "propose_patch"
 
     from blop.schemas import HealedStep
+
     healed_steps: list[HealedStep] = []
     for r in trace.step_results:
         if r.status == "repaired" and (r.healed_selector or r.healed_role):
@@ -1196,15 +1280,17 @@ def _trace_to_failure_case(
                 if s.step_id == r.step_id:
                     original_sel = s.selector
                     break
-            healed_steps.append(HealedStep(
-                step_id=r.step_id,
-                original_selector=original_sel,
-                healed_selector=r.healed_selector,
-                healed_locator_type=r.healed_locator_type,
-                healed_role=r.healed_role,
-                healed_name=r.healed_name,
-                repair_confidence=r.repair_confidence,
-            ))
+            healed_steps.append(
+                HealedStep(
+                    step_id=r.step_id,
+                    original_selector=original_sel,
+                    healed_selector=r.healed_selector,
+                    healed_locator_type=r.healed_locator_type,
+                    healed_role=r.healed_role,
+                    healed_name=r.healed_name,
+                    repair_confidence=r.repair_confidence,
+                )
+            )
 
     return FailureCase(
         case_id=case_id,
@@ -1245,6 +1331,7 @@ def _trace_to_failure_case(
 # ---------------------------------------------------------------------------
 # Goal-replay fallback (original behaviour, kept for goal_fallback mode)
 # ---------------------------------------------------------------------------
+
 
 async def execute_flow(
     flow: RecordedFlow,
@@ -1372,10 +1459,12 @@ async def _goal_fallback(
 ) -> FailureCase:
     """Original goal-based agent replay."""
     from browser_use import Agent, BrowserSession
+
     from blop.engine.browser import make_browser_profile
-    from blop.engine.llm_factory import make_agent_llm
+    from blop.engine.llm_factory import make_agent_llm, make_planning_llm
 
     run_headless = False if verbose else headless
+    evidence_policy = resolve_evidence_policy()
 
     browser_profile = make_browser_profile(headless=run_headless, storage_state=storage_state)
     browser_session = BrowserSession(browser_profile=browser_profile)
@@ -1388,10 +1477,13 @@ async def _goal_fallback(
     final_url = ""
 
     try:
-        llm = make_agent_llm()
+        llm = make_agent_llm(role="agent")
+        page_extraction_llm = make_planning_llm(temperature=0.0, max_output_tokens=256, role="summary")
         from blop.engine.auth_prompt import append_runtime_auth_guidance
+
         task = append_runtime_auth_guidance(f"Navigate to {app_url} then: {flow.goal}")
         from blop.engine.recording import SPA_AGENT_RULES
+
         _is_heavy = getattr(flow, "spa_hints", None) and getattr(flow.spa_hints, "is_editor_heavy", False)
         _system_msg = SPA_AGENT_RULES
         if _is_heavy:
@@ -1400,8 +1492,15 @@ async def _goal_fallback(
                 "Wait patiently — up to 45 seconds — for the canvas view to initialise before declaring failure. "
                 "Only assert on DOM toolbar elements, never on canvas content."
             )
-        agent = Agent(task=task, llm=llm, browser_session=browser_session, use_vision=True,
-                      extend_system_message=_system_msg)
+        agent = Agent(
+            task=task,
+            llm=llm,
+            browser_session=browser_session,
+            use_vision="auto",
+            flash_mode=True,
+            page_extraction_llm=page_extraction_llm,
+            extend_system_message=_system_msg,
+        )
 
         screenshot_task: Optional[asyncio.Task] = None
         step_idx = 0
@@ -1410,7 +1509,11 @@ async def _goal_fallback(
             nonlocal step_idx
             while True:
                 try:
-                    await asyncio.sleep(3)
+                    if not should_capture_screenshot(evidence_policy, "periodic"):
+                        return
+                    await asyncio.sleep(evidence_policy.screenshot_interval_secs)
+                    if step_idx >= evidence_policy.max_screenshots:
+                        return
                     shot_path = file_store.screenshot_path(run_id, case_id, step_idx)
                     await browser_session.take_screenshot(path=shot_path)
                     screenshots.append(shot_path)
@@ -1420,8 +1523,8 @@ async def _goal_fallback(
                 except Exception:
                     _log.debug("poll screenshot failed", exc_info=True)
 
-        # Always capture screenshots — provides evidence the agent is doing real work
-        screenshot_task = asyncio.create_task(_poll_screenshots())
+        if should_capture_screenshot(evidence_policy, "periodic"):
+            screenshot_task = asyncio.create_task(_poll_screenshots())
 
         goal_trace_path: Optional[str] = None
         try:
@@ -1429,10 +1532,11 @@ async def _goal_fallback(
 
             # Guaranteed final screenshot after agent completes
             try:
-                final_path = file_store.screenshot_path(run_id, case_id, 999)
-                await browser_session.take_screenshot(path=final_path)
-                if final_path not in screenshots:
-                    screenshots.append(final_path)
+                if should_capture_screenshot(evidence_policy, "final"):
+                    final_path = file_store.screenshot_path(run_id, case_id, 999)
+                    await browser_session.take_screenshot(path=final_path)
+                    if final_path not in screenshots:
+                        screenshots.append(final_path)
             except Exception:
                 _log.debug("goal fallback final screenshot failed", exc_info=True)
 
@@ -1461,10 +1565,21 @@ async def _goal_fallback(
             # When no done action was found, fall back to keyword scanning of raw_result.
             # This catches cases where the agent silently ended without a done action.
             if not done_found:
-                _kw_fail = any(w in raw_result.lower() for w in (
-                    "error", "fail", "broken", "exception", "crash",
-                    "404", "500", "unable", "could not", "cannot",
-                ))
+                _kw_fail = any(
+                    w in raw_result.lower()
+                    for w in (
+                        "error",
+                        "fail",
+                        "broken",
+                        "exception",
+                        "crash",
+                        "404",
+                        "500",
+                        "unable",
+                        "could not",
+                        "cannot",
+                    )
+                )
                 if _kw_fail:
                     done_success = False
 
@@ -1506,7 +1621,7 @@ async def _goal_fallback(
 
         try:
             ctx = getattr(browser_session, "context", None)
-            if ctx and ctx.pages:
+            if ctx and ctx.pages and should_capture_screenshot(evidence_policy, "failure"):
                 final_path = file_store.screenshot_path(run_id, case_id, step_idx)
                 await ctx.pages[0].screenshot(path=final_path)
                 screenshots.append(final_path)
@@ -1537,7 +1652,7 @@ async def _goal_fallback(
         repro_steps=[],
         console_errors=console_errors,
         network_errors=network_errors,
-        screenshots=screenshots,
+        screenshots=cap_artifact_paths(screenshots, limit=evidence_policy.artifact_cap),
         raw_result=raw_result,
         replay_mode="goal_fallback",
         trace_path=goal_trace_path,
@@ -1565,6 +1680,7 @@ async def run_flows(
     auto_rerecord: bool = False,
     profile_name: Optional[str] = None,
     execution_metadata: dict[str, dict] | None = None,
+    on_case_completed: Callable[[FailureCase, RecordedFlow], Awaitable[None] | None] | None = None,
 ) -> list[FailureCase]:
     """Execute all flows in parallel with bounded worker slots and section-aware ordering."""
     import uuid as _uuid
@@ -1574,10 +1690,7 @@ async def run_flows(
 
     # Playwright tracing with DOM snapshots is memory-intensive; reduce concurrency
     # whenever at least one flow will execute in step-replay mode.
-    _tracing_active = any(
-        (getattr(flow, "run_mode_override", None) or run_mode) != "goal_fallback"
-        for flow in flows
-    )
+    _tracing_active = any((getattr(flow, "run_mode_override", None) or run_mode) != "goal_fallback" for flow in flows)
     default_workers = 3 if _tracing_active else 5
     worker_count = max(1, min(BLOP_REPLAY_CONCURRENCY or default_workers, len(flows)))
     ordered_flows = _interleave_flows_by_entry_area(flows)
@@ -1601,7 +1714,7 @@ async def run_flows(
                 }
             cid = _uuid.uuid4().hex
             try:
-                results[original_idx] = await execute_flow(
+                result_case = await execute_flow(
                     flow=flow,
                     app_url=app_url,
                     run_id=run_id,
@@ -1613,6 +1726,14 @@ async def run_flows(
                     auto_rerecord=auto_rerecord,
                     profile_name=profile_name,
                 )
+                results[original_idx] = result_case
+                if on_case_completed is not None:
+                    try:
+                        maybe = on_case_completed(result_case, flow)
+                        if inspect.isawaitable(maybe):
+                            await maybe
+                    except Exception:
+                        _log.debug("run_flows on_case_completed failed", exc_info=True)
             except Exception as exc:
                 results[original_idx] = exc
             finally:
@@ -1630,15 +1751,17 @@ async def run_flows(
                 str(result),
                 exc_info=True,
             )
-            cases.append(FailureCase(
-                run_id=run_id,
-                flow_id=flows[i].flow_id if i < len(flows) else "unknown",
-                flow_name=flows[i].flow_name if i < len(flows) else "unknown",
-                status="error",
-                raw_result=str(result),
-                replay_mode="orchestration_error",
-                failure_reason_codes=["orchestration_error"],
-            ))
+            cases.append(
+                FailureCase(
+                    run_id=run_id,
+                    flow_id=flows[i].flow_id if i < len(flows) else "unknown",
+                    flow_name=flows[i].flow_name if i < len(flows) else "unknown",
+                    status="error",
+                    raw_result=str(result),
+                    replay_mode="orchestration_error",
+                    failure_reason_codes=["orchestration_error"],
+                )
+            )
         elif result is not None:
             cases.append(result)
 

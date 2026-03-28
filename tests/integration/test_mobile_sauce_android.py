@@ -15,7 +15,8 @@ Prerequisites:
     # Install APK:
     #   adb install tests/apps/mda-android.apk
 
-Run:
+Default ``pytest tests/`` skips these (``-m "not mobile"`` in pyproject). Run explicitly:
+
     pytest tests/integration/test_mobile_sauce_android.py -m mobile -v
 
 Scenarios covered (per TestEvolve + dev.to critical test scenario articles):
@@ -32,9 +33,11 @@ Scenarios covered (per TestEvolve + dev.to critical test scenario articles):
     11. Search / filter (core feature)
     12. Full blop record → replay pipeline (end-to-end)
 """
+
 from __future__ import annotations
 
 import os
+
 import pytest
 
 appium = pytest.importorskip("appium", reason="pip install blop-mcp[mobile]")
@@ -66,6 +69,7 @@ def android_target() -> MobileDeviceTarget:
 @pytest.fixture
 async def driver(android_target):
     from blop.engine.mobile.driver import make_appium_driver
+
     d = await make_appium_driver(android_target)
     yield d
     try:
@@ -76,23 +80,33 @@ async def driver(android_target):
 
 # ── Scenario 1: App launches ──────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_app_launches_and_shows_home(driver):
     """App should launch and display the product catalog."""
     page_source = driver.page_source
-    assert any(kw in page_source for kw in [
-        "Sauce Labs", "Products", "Catalog", "Backpack", "Cart",
-    ]), f"Home screen not found. Source snippet: {page_source[:500]}"
+    assert any(
+        kw in page_source
+        for kw in [
+            "Sauce Labs",
+            "Products",
+            "Catalog",
+            "Backpack",
+            "Cart",
+        ]
+    ), f"Home screen not found. Source snippet: {page_source[:500]}"
 
 
 # ── Scenario 2: Valid login ───────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_login_with_valid_credentials(driver):
     """Standard user should be able to log in successfully."""
+    import asyncio
+
     from blop.engine.mobile.appium_selector import find_element
     from blop.engine.mobile.interaction import tap
-    import asyncio
 
     # Navigate to menu → login
     menu_sel = MobileSelector(accessibility_id="Menu", content_desc="Menu", text="Menu")
@@ -118,6 +132,7 @@ async def test_login_with_valid_credentials(driver):
     )
     username_field = await find_element(driver, username_sel, "android")
     import asyncio as _asyncio
+
     loop = _asyncio.get_event_loop()
     await loop.run_in_executor(None, username_field.clear)
     await loop.run_in_executor(None, lambda: username_field.send_keys("standard_user"))
@@ -144,12 +159,14 @@ async def test_login_with_valid_credentials(driver):
 
 # ── Scenario 3: Invalid login shows error ────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_login_with_invalid_credentials_shows_error(driver):
     """Wrong password should display an error message, not crash."""
+    import asyncio
+
     from blop.engine.mobile.appium_selector import find_element
     from blop.engine.mobile.interaction import tap
-    import asyncio
 
     # Navigate to login (fresh session assumed)
     menu_sel = MobileSelector(content_desc="Menu", text="Menu")
@@ -164,6 +181,7 @@ async def test_login_with_invalid_credentials_shows_error(driver):
         pass
 
     import asyncio as _asyncio
+
     loop = _asyncio.get_event_loop()
 
     username_sel = MobileSelector(
@@ -198,13 +216,14 @@ async def test_login_with_invalid_credentials_shows_error(driver):
 
 # ── Scenario 4: Product catalog scrolls ──────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_product_catalog_scrolls(driver):
     """Scrolling the product list should reveal more items."""
-    from blop.engine.mobile.interaction import scroll
     import asyncio
 
-    page_before = driver.page_source
+    from blop.engine.mobile.interaction import scroll
+
     await scroll(driver, direction="down", distance_pct=0.5)
     await asyncio.sleep(0.8)
     page_after = driver.page_source
@@ -216,12 +235,14 @@ async def test_product_catalog_scrolls(driver):
 
 # ── Scenario 5: Add item to cart ─────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_add_item_to_cart(driver):
     """Tapping 'Add to Cart' on a product should add it to the cart."""
+    import asyncio
+
     from blop.engine.mobile.appium_selector import find_element
     from blop.engine.mobile.interaction import tap
-    import asyncio
 
     add_to_cart_sel = MobileSelector(
         accessibility_id="Add To Cart button",
@@ -244,12 +265,14 @@ async def test_add_item_to_cart(driver):
 
 # ── Scenario 6: Navigate via bottom tab bar ───────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_navigate_via_tab_bar(driver):
     """Tapping cart icon in the tab bar should navigate to cart screen."""
+    import asyncio
+
     from blop.engine.mobile.appium_selector import find_element
     from blop.engine.mobile.interaction import tap
-    import asyncio
 
     cart_sel = MobileSelector(
         content_desc="Cart",
@@ -269,6 +292,7 @@ async def test_navigate_via_tab_bar(driver):
 
 # ── Scenario 7: Screenshot evidence ──────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_screenshot_evidence_captured(driver, tmp_path):
     """Screenshots should produce valid non-empty PNG files."""
@@ -282,6 +306,7 @@ async def test_screenshot_evidence_captured(driver, tmp_path):
 
 # ── Scenario 8: Device log capture (logcat) ──────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_logcat_captured(driver, tmp_path):
     """Android logcat should be capturable from the Appium session."""
@@ -294,12 +319,14 @@ async def test_logcat_captured(driver, tmp_path):
 
 # ── Scenario 9: Back navigation ───────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_back_navigation_returns_to_catalog(driver):
     """Pressing back from product detail should return to catalog."""
-    from blop.engine.mobile.appium_selector import find_element
-    from blop.engine.mobile.interaction import tap, press_back
     import asyncio
+
+    from blop.engine.mobile.appium_selector import find_element
+    from blop.engine.mobile.interaction import press_back, tap
 
     # Tap first product
     product_sel = MobileSelector(
@@ -322,6 +349,7 @@ async def test_back_navigation_returns_to_catalog(driver):
 
 # ── Scenario 10: Full blop record → replay pipeline ──────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_blop_record_and_replay_android_flow(android_target, tmp_path, monkeypatch):
     """End-to-end: build a RecordedFlow, persist to DB, reload, execute_mobile_flow.
@@ -329,14 +357,14 @@ async def test_blop_record_and_replay_android_flow(android_target, tmp_path, mon
     This validates the full blop mobile pipeline:
       record_mobile_flow → save_flow → get_flow → execute_mobile_flow → FailureCase
     """
-    import uuid
     import datetime
-    from blop.schemas import RecordedFlow, FlowStep, MobileSelector
+    import uuid
 
     db_path = str(tmp_path / "test_android.db")
     monkeypatch.setenv("BLOP_DB_PATH", db_path)
 
     from blop.storage.sqlite import init_db
+
     await init_db()
 
     run_id = uuid.uuid4().hex
@@ -378,7 +406,8 @@ async def test_blop_record_and_replay_android_flow(android_target, tmp_path, mon
         mobile_target=android_target,
     )
 
-    from blop.storage.sqlite import save_flow, get_flow
+    from blop.storage.sqlite import get_flow, save_flow
+
     await save_flow(flow)
 
     loaded = await get_flow(flow.flow_id)
@@ -387,6 +416,7 @@ async def test_blop_record_and_replay_android_flow(android_target, tmp_path, mon
     assert len(loaded.steps) == 4
 
     from blop.engine.mobile.regression import execute_mobile_flow
+
     case = await execute_mobile_flow(loaded, run_id=run_id)
 
     # Validate FailureCase structure
@@ -406,17 +436,18 @@ async def test_blop_record_and_replay_android_flow(android_target, tmp_path, mon
 
 # ── Scenario 11: run_mobile_flows concurrency ─────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_run_mobile_flows_handles_multiple_flows(android_target, tmp_path, monkeypatch):
     """run_mobile_flows should handle a list of flows without crashing."""
-    import uuid
     import datetime
-    from blop.schemas import RecordedFlow, FlowStep
+    import uuid
 
     db_path = str(tmp_path / "test_concurrent.db")
     monkeypatch.setenv("BLOP_DB_PATH", db_path)
 
     from blop.storage.sqlite import init_db
+
     await init_db()
 
     flows = []
@@ -437,6 +468,7 @@ async def test_run_mobile_flows_handles_multiple_flows(android_target, tmp_path,
         flows.append(flow)
 
     from blop.engine.mobile.regression import run_mobile_flows
+
     run_id = uuid.uuid4().hex
     cases = await run_mobile_flows(flows, run_id=run_id, max_concurrent=1)
 

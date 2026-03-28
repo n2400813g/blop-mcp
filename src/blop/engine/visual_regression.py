@@ -1,4 +1,5 @@
 """Visual regression engine — pixel diff + LLM vision triage."""
+
 from __future__ import annotations
 
 import logging
@@ -87,6 +88,7 @@ async def compare_screenshots(
 
     if not current_screenshot_path:
         from blop.storage.files import baseline_dir
+
         current_screenshot_path = str(baseline_dir(flow_id) / f"step_{step_index:03d}_current.png")
         await page.screenshot(path=current_screenshot_path, full_page=False, type="png")
 
@@ -116,7 +118,7 @@ async def _vision_triage(baseline_path: str, current_path: str, diff_ratio: floa
     """Ask the vision LLM whether the visual difference is a real regression or benign."""
     import base64
 
-    from blop.engine.vision import _check_llm_api_key, _llm, _make_vision_message
+    from blop.engine.vision import _check_llm_api_key, _llm
 
     if not BLOP_ALLOW_SCREENSHOT_LLM:
         _log.info("visual triage skipped: BLOP_ALLOW_SCREENSHOT_LLM is disabled")
@@ -148,21 +150,28 @@ async def _vision_triage(baseline_path: str, current_path: str, diff_ratio: floa
         provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
         if provider in ("anthropic", "openai"):
             from langchain_core.messages import HumanMessage
-            msg = HumanMessage(content=[
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{baseline_b64}"}},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{current_b64}"}},
-            ])
+
+            msg = HumanMessage(
+                content=[
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{baseline_b64}"}},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{current_b64}"}},
+                ]
+            )
         else:
             from browser_use.llm.messages import UserMessage
-            msg = UserMessage(content=[
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{baseline_b64}"}},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{current_b64}"}},
-            ])
+
+            msg = UserMessage(
+                content=[
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{baseline_b64}"}},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{current_b64}"}},
+                ]
+            )
 
         import json
         import re
+
         response = await llm.ainvoke([msg])
         text = str(response.content) if hasattr(response, "content") else str(response)
         m = re.search(r"\{.*\}", text, re.DOTALL)
@@ -215,7 +224,13 @@ async def compare_visual_baseline(flow_id: str, step_index: int | None = None) -
                 result["is_regression"] = triage.get("is_meaningful", True)
             return result
 
-        return {"flow_id": flow_id, "step_index": step_index, "baseline_path": golden, "has_baseline": True, "has_current": False}
+        return {
+            "flow_id": flow_id,
+            "step_index": step_index,
+            "baseline_path": golden,
+            "has_baseline": True,
+            "has_current": False,
+        }
 
     baselines = sorted(bdir.glob("step_*.png"))
     baseline_only = [b for b in baselines if "_current" not in b.name and "_diff" not in b.name]

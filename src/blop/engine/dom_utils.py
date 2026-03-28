@@ -1,12 +1,25 @@
 """Shared DOM / ARIA-tree helpers used across engine modules."""
+
 from __future__ import annotations
 
 from typing import Optional
 
-INTERACTIVE_ROLES = frozenset({
-    "button", "link", "textbox", "checkbox", "radio", "combobox",
-    "listbox", "menuitem", "tab", "switch", "searchbox", "spinbutton",
-})
+INTERACTIVE_ROLES = frozenset(
+    {
+        "button",
+        "link",
+        "textbox",
+        "checkbox",
+        "radio",
+        "combobox",
+        "listbox",
+        "menuitem",
+        "tab",
+        "switch",
+        "searchbox",
+        "spinbutton",
+    }
+)
 
 
 def extract_nodes_flat(

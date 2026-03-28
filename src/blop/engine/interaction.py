@@ -1,4 +1,5 @@
 """Resilient browser interaction helpers with CSS → text → vision fallback chain."""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
@@ -167,8 +168,9 @@ async def wait_for_editor_ready(
 async def find_in_shadow_dom(page: "Page", css_selector: str) -> bool:
     """Return True if css_selector matches any element anywhere, including inside shadow roots."""
     try:
-        return bool(await page.evaluate(
-            """(selector) => {
+        return bool(
+            await page.evaluate(
+                """(selector) => {
                 function searchShadow(root) {
                     if (root.querySelector(selector)) return true;
                     for (const el of root.querySelectorAll('*')) {
@@ -178,8 +180,9 @@ async def find_in_shadow_dom(page: "Page", css_selector: str) -> bool:
                 }
                 return searchShadow(document);
             }""",
-            css_selector,
-        ))
+                css_selector,
+            )
+        )
     except Exception:
         return False
 
@@ -282,6 +285,7 @@ async def safe_click(
 
     if fallback_vision:
         from blop.engine.vision import click_by_vision
+
         try:
             await click_by_vision(page, selector)
             return True
@@ -307,6 +311,7 @@ async def safe_fill(
 
     if fallback_vision:
         from blop.engine.vision import find_element_coords
+
         try:
             coords = await find_element_coords(page, selector)
             if coords:

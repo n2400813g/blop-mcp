@@ -21,6 +21,14 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Sync dev dependencies
+        run: uv sync --extra dev
+
+      - name: Ruff lint and format
+        run: |
+          uv run ruff check src tests
+          uv run ruff format --check src tests
+
       - name: Build distributions
         run: uv run --with build python -m build
 

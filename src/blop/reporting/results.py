@@ -1,4 +1,5 @@
 """Aggregate run data into structured RunResult report."""
+
 from __future__ import annotations
 
 import os
@@ -145,7 +146,13 @@ def infer_top_failure_mode(report: dict) -> str:
 
     auth = report.get("auth_provenance", {}) or {}
     session_status = auth.get("session_validation_status")
-    if session_status in {"expired_session", "redirected_to_auth", "unresolved_storage_state", "missing_profile", "validation_error"}:
+    if session_status in {
+        "expired_session",
+        "redirected_to_auth",
+        "unresolved_storage_state",
+        "missing_profile",
+        "validation_error",
+    }:
         return "auth_session_failure"
 
     failure_kinds = (report.get("coverage_summary", {}) or {}).get("failure_kinds", []) or []
@@ -173,9 +180,7 @@ def describe_failure_classification(report: dict) -> dict:
 
     rationale_map = {
         "waiting_auth": "Replay did not start because auth could not be validated before execution.",
-        "auth_session_failure": (
-            f"Replay evidence points to auth/session issues{auth_status_suffix}."
-        ),
+        "auth_session_failure": (f"Replay evidence points to auth/session issues{auth_status_suffix}."),
         "automation_fragility": "Failures align with replay drift or selector fragility rather than a confirmed product bug.",
         "environment_or_infra": "Failures look environmental, infrastructural, or runtime-related rather than journey-specific.",
         "product_regression": "Evidence points to an actual product behavior regression in a tested journey.",
@@ -184,7 +189,9 @@ def describe_failure_classification(report: dict) -> dict:
     confidence = "medium"
     if mode in {"waiting_auth", "auth_session_failure"} and auth.get("session_validation_status"):
         confidence = "high"
-    elif mode in {"environment_or_infra", "product_regression", "automation_fragility"} and coverage.get("failure_kinds"):
+    elif mode in {"environment_or_infra", "product_regression", "automation_fragility"} and coverage.get(
+        "failure_kinds"
+    ):
         confidence = "high"
     elif status in _TERMINAL_RUN_STATUSES and report.get("failed_cases"):
         confidence = "medium"
@@ -309,7 +316,8 @@ def _compute_release_recommendation(
     critical_journey_failures_total = len(revenue_failures) + len(activation_failures)
 
     critical_drifted_passes = [
-        c for c in cases
+        c
+        for c in cases
         if c.status == "pass"
         and c.business_criticality in ("revenue", "activation")
         and getattr(getattr(c, "drift_summary", None), "drift_detected", False)
@@ -332,31 +340,31 @@ def _compute_release_recommendation(
         fired = gate.enabled and len(failures_for_gate) >= gate.min_failures
         contribution: str = gate.on_failure if fired else "none"
 
-        gate_results.append(PolicyGateResult(
-            criticality=gate.criticality,
-            gate_enabled=gate.enabled,
-            failures_found=len(failures_for_gate),
-            threshold=gate.min_failures,
-            fired=fired,
-            decision_contribution=contribution,  # type: ignore[arg-type]
-            rationale=(
-                f"{len(failures_for_gate)} {gate.criticality} failure(s) — gate fires {gate.on_failure}."
-                if fired else
-                f"Gate disabled for {gate.criticality}."
-                if not gate.enabled else
-                f"{len(failures_for_gate)} {gate.criticality} failure(s) — below threshold of {gate.min_failures}."
-                if failures_for_gate else
-                f"No {gate.criticality} failures."
-            ),
-        ))
+        gate_results.append(
+            PolicyGateResult(
+                criticality=gate.criticality,
+                gate_enabled=gate.enabled,
+                failures_found=len(failures_for_gate),
+                threshold=gate.min_failures,
+                fired=fired,
+                decision_contribution=contribution,  # type: ignore[arg-type]
+                rationale=(
+                    f"{len(failures_for_gate)} {gate.criticality} failure(s) — gate fires {gate.on_failure}."
+                    if fired
+                    else f"Gate disabled for {gate.criticality}."
+                    if not gate.enabled
+                    else f"{len(failures_for_gate)} {gate.criticality} failure(s) — below threshold of {gate.min_failures}."
+                    if failures_for_gate
+                    else f"No {gate.criticality} failures."
+                ),
+            )
+        )
 
         if fired:
             if contribution == "BLOCK" and decision != "BLOCK":
                 decision = "BLOCK"
                 contributing_gates.append(gate.criticality)
-                rationale_parts.append(
-                    f"{len(failures_for_gate)} {gate.criticality} failure(s) trigger BLOCK gate."
-                )
+                rationale_parts.append(f"{len(failures_for_gate)} {gate.criticality} failure(s) trigger BLOCK gate.")
             elif contribution == "INVESTIGATE" and decision == "SHIP":
                 decision = "INVESTIGATE"
                 contributing_gates.append(gate.criticality)
@@ -365,9 +373,7 @@ def _compute_release_recommendation(
                 )
 
     # Ungated criticalities with failures still elevate SHIP → INVESTIGATE
-    ungated_failures = sum(
-        len(v) for k, v in by_criticality.items() if k not in gated_criticalities
-    )
+    ungated_failures = sum(len(v) for k, v in by_criticality.items() if k not in gated_criticalities)
     if ungated_failures and decision == "SHIP":
         decision = "INVESTIGATE"
         rationale_parts.append(f"{ungated_failures} failure(s) in ungated criticality levels.")
@@ -380,9 +386,7 @@ def _compute_release_recommendation(
     # Drifted critical passes
     if critical_drifted_passes and decision == "SHIP":
         decision = "INVESTIGATE"
-        rationale_parts.append(
-            f"{len(critical_drifted_passes)} critical journey pass(es) required disallowed drift."
-        )
+        rationale_parts.append(f"{len(critical_drifted_passes)} critical journey pass(es) required disallowed drift.")
 
     # Global flag: block_on_any_failure
     if effective_policy.block_on_any_failure and failed and decision != "BLOCK":
@@ -670,9 +674,7 @@ def build_evidence_quality(report: dict) -> dict:
     trace_case_count = sum(1 for case in cases if case.get("trace_path"))
     assertion_backed_case_count = sum(1 for case in cases if _extract_observed_assertions(case))
     failure_kinds = {
-        case.get("failure_kind", "unknown")
-        for case in cases
-        if case.get("status") in ("fail", "error", "blocked")
+        case.get("failure_kind", "unknown") for case in cases if case.get("status") in ("fail", "error", "blocked")
     }
     confidence_drivers: list[str] = []
     if screenshot_case_count:
@@ -702,15 +704,9 @@ def build_replay_trust_summary(report: dict) -> dict:
     review_required_cases = [case for case in cases if case.get("healing_review_required")]
     stale_cases = [case for case in cases if (case.get("flow_staleness", {}) or {}).get("stale")]
     repair_confidences = [
-        float(case.get("repair_confidence", 0.0))
-        for case in cases
-        if float(case.get("repair_confidence", 0.0)) > 0
+        float(case.get("repair_confidence", 0.0)) for case in cases if float(case.get("repair_confidence", 0.0)) > 0
     ]
-    avg_repair_confidence = (
-        round(sum(repair_confidences) / len(repair_confidences), 4)
-        if repair_confidences
-        else 0.0
-    )
+    avg_repair_confidence = round(sum(repair_confidences) / len(repair_confidences), 4) if repair_confidences else 0.0
     if review_required_cases:
         summary = "Replay relied on low-confidence healing or proposed patches. Review the affected journey before trusting the result."
     elif stale_cases:
@@ -771,9 +767,7 @@ def build_drift_summary(report: dict) -> dict:
 
 
 async def build_report(run: dict, cases: list[FailureCase]) -> dict:
-    severity_counts: dict[str, int] = {
-        "blocker": 0, "high": 0, "medium": 0, "low": 0, "none": 0, "pass": 0, "error": 0
-    }
+    severity_counts: dict[str, int] = {"blocker": 0, "high": 0, "medium": 0, "low": 0, "none": 0, "pass": 0, "error": 0}
     for c in cases:
         if c.status == "pass":
             severity_counts["pass"] = severity_counts.get("pass", 0) + 1
@@ -791,7 +785,9 @@ async def build_report(run: dict, cases: list[FailureCase]) -> dict:
         "recommended_next_action": status_meta["recommended_next_action"],
         "is_terminal": status_meta["is_terminal"],
         "top_failure_mode": "waiting_auth" if status == "waiting_auth" else "unknown",
-        "recommended_remediation_steps": remediation_steps_for_failure_mode("waiting_auth" if status == "waiting_auth" else "unknown"),
+        "recommended_remediation_steps": remediation_steps_for_failure_mode(
+            "waiting_auth" if status == "waiting_auth" else "unknown"
+        ),
     }
     if status == "waiting_auth":
         extra["waiting_auth_message"] = (
@@ -802,6 +798,7 @@ async def build_report(run: dict, cases: list[FailureCase]) -> dict:
     policy: ReleasePolicy = DEFAULT_RELEASE_POLICY
     try:
         from blop.storage.sqlite import get_default_policy
+
         stored = await get_default_policy()
         if stored is not None:
             policy = stored
@@ -812,6 +809,7 @@ async def build_report(run: dict, cases: list[FailureCase]) -> dict:
     stability_bucket: str | None = None
     try:
         from blop.stability import classify_report_stability
+
         case_dicts = [c.model_dump() for c in cases]
         failed_dicts = [c.model_dump() for c in failed]
         stab = classify_report_stability({"cases": case_dicts, "failed_cases": failed_dicts, "status": status})
@@ -847,6 +845,7 @@ async def build_report(run: dict, cases: list[FailureCase]) -> dict:
     # BLO-77: surface stability gate summary alongside the release recommendation
     try:
         from blop.stability import build_stability_gate_summary
+
         report["stability_gate_summary"] = build_stability_gate_summary(
             {"failed_cases": [c.model_dump() for c in failed], "stability_bucket": stability_bucket}
         )

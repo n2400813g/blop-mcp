@@ -3,6 +3,7 @@
 This module intentionally avoids including raw credential values in any prompt
 text that may be sent to third-party LLM providers.
 """
+
 from __future__ import annotations
 
 import os

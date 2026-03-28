@@ -5,7 +5,8 @@ import os
 import re
 
 from blop.engine import auth as auth_engine
-from blop.engine import classifier, regression as regression_engine
+from blop.engine import classifier
+from blop.engine import regression as regression_engine
 from blop.schemas import DebugResult, FailureCase
 from blop.storage import sqlite
 
@@ -48,6 +49,7 @@ async def debug_test_case(run_id: str, case_id: str) -> dict:
     new_case = await classifier.classify_case(new_case, run["app_url"])
 
     from blop.storage.files import console_log_path
+
     log_path = console_log_path(run_id, case_id)
     console_log = ""
     if os.path.exists(log_path):
@@ -74,6 +76,7 @@ async def debug_test_case(run_id: str, case_id: str) -> dict:
 async def _explain_failure(case: FailureCase, flow, url: str) -> str:
     """Generate a plain-English explanation of why the test failed."""
     from blop.config import check_llm_api_key
+
     has_key, _ = check_llm_api_key()
     if not has_key or case.status == "pass":
         return ""
@@ -86,9 +89,9 @@ async def _explain_failure(case: FailureCase, flow, url: str) -> str:
         step_desc = flow.steps[step_index].description
 
     try:
-        from blop.engine.llm_factory import make_planning_llm, make_message
+        from blop.engine.llm_factory import make_message, make_planning_llm
 
-        llm = make_planning_llm(temperature=0.2, max_output_tokens=600)
+        llm = make_planning_llm(temperature=0.2, max_output_tokens=600, role="summary")
         from blop.engine.secrets import mask_text
 
         prompt = NEXT_ACTIONS_PROMPT.format(

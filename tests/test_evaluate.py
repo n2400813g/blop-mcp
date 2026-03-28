@@ -8,8 +8,8 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_evaluate_web_task_persists_run_artifacts_and_format(tmp_path):
-    from blop.tools import evaluate
     from blop.storage import sqlite
+    from blop.tools import evaluate
 
     db_path = str(tmp_path / "evaluate.db")
     app_url = "https://example.com"
@@ -34,10 +34,13 @@ async def test_evaluate_web_task_persists_run_artifacts_and_format(tmp_path):
 
     with patch.dict(os.environ, {"BLOP_DB_PATH": db_path}):
         await sqlite.init_db()
-        with patch(
-            "blop.tools.evaluate.auth_engine.auto_storage_state_from_env",
-            new=AsyncMock(return_value=None),
-        ), patch("blop.tools.evaluate._run_evaluation", new=AsyncMock(return_value=fake_report)):
+        with (
+            patch(
+                "blop.tools.evaluate.auth_engine.auto_storage_state_from_env",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("blop.tools.evaluate._run_evaluation", new=AsyncMock(return_value=fake_report)),
+        ):
             result = await evaluate.evaluate_web_task(
                 app_url=app_url,
                 task="Open homepage and verify it loads",
@@ -68,8 +71,8 @@ async def test_evaluate_web_task_persists_run_artifacts_and_format(tmp_path):
 
 @pytest.mark.asyncio
 async def test_evaluate_web_task_promotes_to_recorded_flow_when_requested(tmp_path):
-    from blop.tools import evaluate
     from blop.storage import sqlite
+    from blop.tools import evaluate
 
     db_path = str(tmp_path / "evaluate_promote.db")
 
@@ -100,7 +103,7 @@ async def test_evaluate_web_task_promotes_to_recorded_flow_when_requested(tmp_pa
             with patch("blop.tools.evaluate._run_evaluation", new=AsyncMock(return_value=fake_report)):
                 with patch(
                     "blop.tools.evaluate._promote_to_recorded_flow",
-                    new=AsyncMock(return_value="flow_promoted_123"),
+                    new=AsyncMock(return_value=("flow_promoted_123", None)),
                 ) as promote_mock:
                     result = await evaluate.evaluate_web_task(
                         app_url="https://example.com",
@@ -116,10 +119,60 @@ async def test_evaluate_web_task_promotes_to_recorded_flow_when_requested(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_evaluate_web_task_synthetic_recorded_flow_when_pass_and_no_agent_steps(tmp_path):
+    from blop.storage import sqlite
+    from blop.tools import evaluate
+
+    db_path = str(tmp_path / "evaluate_synthetic.db")
+    fake_report = {
+        "summary": ["Task completed successfully"],
+        "agent_steps": [],
+        "evidence": {
+            "console_errors": [],
+            "console_log_count": 0,
+            "network_failures": [],
+            "network_request_count": 0,
+            "screenshots": [],
+            "trace_path": None,
+        },
+        "pass_fail": "pass",
+        "raw_result": "None",
+        "elapsed_secs": 0.5,
+        "_network_log_path": None,
+        "_console_log_path": None,
+    }
+
+    with patch.dict(os.environ, {"BLOP_DB_PATH": db_path}):
+        await sqlite.init_db()
+        with (
+            patch(
+                "blop.tools.evaluate.auth_engine.auto_storage_state_from_env",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("blop.tools.evaluate._run_evaluation", new=AsyncMock(return_value=fake_report)),
+        ):
+            result = await evaluate.evaluate_web_task(
+                app_url="https://example.com",
+                task="Do something on the page",
+                save_as_recorded_flow=True,
+                flow_name="synthetic_smoke",
+                format="json",
+            )
+
+        assert result.get("recorded_flow_id"), result
+        assert result.get("recorded_flow_synthetic") is True
+        assert result.get("recorded_flow_promotion") == "synthetic_empty_agent_steps"
+        loaded = await sqlite.get_flow(result["recorded_flow_id"])
+        assert loaded is not None
+        assert loaded.flow_name == "synthetic_smoke"
+        assert len(loaded.steps) == 3
+
+
+@pytest.mark.asyncio
 async def test_evaluate_web_task_persists_failure_case_for_step_budget_exhaustion(tmp_path):
+    from blop.storage import sqlite
     from blop.tools import evaluate
     from blop.tools.results import get_test_results
-    from blop.storage import sqlite
 
     db_path = str(tmp_path / "evaluate_fail.db")
     fake_report = {
@@ -142,10 +195,13 @@ async def test_evaluate_web_task_persists_failure_case_for_step_budget_exhaustio
 
     with patch.dict(os.environ, {"BLOP_DB_PATH": db_path}):
         await sqlite.init_db()
-        with patch(
-            "blop.tools.evaluate.auth_engine.auto_storage_state_from_env",
-            new=AsyncMock(return_value=None),
-        ), patch("blop.tools.evaluate._run_evaluation", new=AsyncMock(return_value=fake_report)):
+        with (
+            patch(
+                "blop.tools.evaluate.auth_engine.auto_storage_state_from_env",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("blop.tools.evaluate._run_evaluation", new=AsyncMock(return_value=fake_report)),
+        ):
             result = await evaluate.evaluate_web_task(
                 app_url="https://example.com",
                 task="Explore the public site and report blockers",

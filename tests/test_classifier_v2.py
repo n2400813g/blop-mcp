@@ -1,4 +1,5 @@
 """Tests for engine/classifier.py — assertion-first severity with SaaS scenarios."""
+
 from __future__ import annotations
 
 import pytest
@@ -29,6 +30,7 @@ def make_case(
 # ---------------------------------------------------------------------------
 # Deterministic classifier tests
 # ---------------------------------------------------------------------------
+
 
 def test_revenue_flow_assertion_failure_is_blocker():
     """checkout_with_credit_card (revenue) with assertion failure → blocker."""
@@ -166,21 +168,41 @@ def test_blocked_status_is_blocker():
 # classify_run aggregation
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_classify_run_returns_severity_counts():
     """classify_run returns dict with expected severity_counts keys."""
     from blop.engine.classifier import classify_run
 
     cases = [
-        FailureCase(run_id="r1", flow_id="f1", flow_name="checkout_with_credit_card",
-                    status="fail", severity="blocker", business_criticality="revenue"),
-        FailureCase(run_id="r1", flow_id="f2", flow_name="view_usage_dashboard",
-                    status="pass", severity="none", business_criticality="retention"),
-        FailureCase(run_id="r1", flow_id="f3", flow_name="help_center_search",
-                    status="fail", severity="medium", business_criticality="support"),
+        FailureCase(
+            run_id="r1",
+            flow_id="f1",
+            flow_name="checkout_with_credit_card",
+            status="fail",
+            severity="blocker",
+            business_criticality="revenue",
+        ),
+        FailureCase(
+            run_id="r1",
+            flow_id="f2",
+            flow_name="view_usage_dashboard",
+            status="pass",
+            severity="none",
+            business_criticality="retention",
+        ),
+        FailureCase(
+            run_id="r1",
+            flow_id="f3",
+            flow_name="help_center_search",
+            status="fail",
+            severity="medium",
+            business_criticality="support",
+        ),
     ]
 
     import os
+
     with __import__("unittest.mock", fromlist=["patch"]).patch.dict(os.environ, {}, clear=True):
         result = await classify_run(cases, "https://example.com")
 

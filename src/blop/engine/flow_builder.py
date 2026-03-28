@@ -1,4 +1,5 @@
 """Shared builders for RecordedFlow and FlowStep construction."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone

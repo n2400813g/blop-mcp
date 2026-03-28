@@ -1,41 +1,64 @@
-"""Capability-based tool grouping — selectively enable MCP tools.
+"""Capability-based tool grouping for the Playwright-compat browser_* surface.
 
-Configure via BLOP_CAPABILITIES env var (comma-separated) or --caps CLI arg.
-Default capability groups still control the optional legacy surface.
-The canonical MVP tools are registered separately and are always available:
-  validate_release_setup
-  discover_critical_journeys
-  run_release_check
-  triage_release_blocker
+MCP registration is **not** fully driven by this module. Actual exposure is set in
+``server.py`` using:
+
+- **BLOP_ENABLE_LEGACY_MCP_TOOLS** (default ``false``): when ``true``, registers deprecated
+  aliases ``discover_test_flows``, ``run_regression_test``, ``validate_setup``.
+- **BLOP_ENABLE_COMPAT_TOOLS** (default ``false``): when ``true``, registers ``browser_*``,
+  ``blop_v2_*``, assertions, reporting, storage helpers, etc.
+
+The **always-on** surface (unless you change server code) includes: canonical release tools
+(``validate_release_setup``, ``discover_critical_journeys``, ``run_release_check``,
+``triage_release_blocker``), auth tools, context-read tools, atomic browser tools
+(``navigate_to_url``, ``perform_step``, …), ``record_test_flow``, ``get_test_results``,
+``cancel_run``, ``evaluate_web_task``, and related helpers.
+
+``BLOP_CAPABILITIES`` / ``BLOP_CAPABILITIES_PROFILE`` select which **compat_browser** tool
+names are allowed when compat mode is on: ``is_tool_enabled("browser_navigate")`` is used
+by ``_safe_compat_call`` so a tool can be registered but blocked if the capability set does
+not include ``compat_browser``.
+
+Configure via ``BLOP_CAPABILITIES`` env (comma-separated) or ``--caps`` CLI arg.
 
 Default legacy capability profile:
   development: "core,auth,debug"
   production: "core,auth"
 
-Groups:
-  core       : legacy discover/record/run/results tools
+Groups (for **compat_browser** gating and documentation):
+  core       : always merged into ``get_enabled_tools()`` — regression helpers that compat
+               callers may expect to be "on" when checking capability sets
   auth       : auth profile capture and persistence
-  debug      : legacy validation/debug helpers
-  analytics  : legacy analytics and run-status tools
-  v2         : v2 surface tools
+  debug      : legacy validation/debug helpers (names only; many are compat-gated in server)
+  analytics  : legacy analytics and run-status tool names
+  v2         : v2 surface tool names
   assertions : structured assertion tools (verify_*)
   security   : security scanning tools
   reporting  : reporting and visual comparison helpers
   compat_browser : Playwright-MCP-compatible browser_* tool surface
+  legacy_mcp : deprecated MCP aliases (discover_test_flows, run_regression_test,
+               validate_setup) — **not** registered unless ``BLOP_ENABLE_LEGACY_MCP_TOOLS=true``
 """
+
 from __future__ import annotations
 
 import os
 
+# Names gated by BLOP_ENABLE_LEGACY_MCP_TOOLS in server.py (documentation / tooling).
+LEGACY_MCP_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "discover_test_flows",
+        "run_regression_test",
+        "validate_setup",
+    }
+)
+
 TOOL_GROUPS: dict[str, set[str]] = {
     "core": {
-        "discover_test_flows",
-        "explore_site_inventory",
         "record_test_flow",
-        "run_regression_test",
         "get_test_results",
-        "list_recorded_tests",
     },
+    "legacy_mcp": set(LEGACY_MCP_TOOL_NAMES),
     "auth": {
         "save_auth_profile",
         "capture_auth_session",
@@ -147,12 +170,11 @@ def get_enabled_capabilities() -> list[str]:
 
 
 def get_enabled_tools() -> set[str]:
-    """Return the set of tool names that should be exposed based on enabled capabilities."""
+    """Return tool names considered enabled for **compat_browser** permission checks."""
     caps = get_enabled_capabilities()
     tools: set[str] = set()
     for cap in caps:
         tools.update(TOOL_GROUPS.get(cap, set()))
-    # core is always on
     tools.update(TOOL_GROUPS["core"])
     return tools
 

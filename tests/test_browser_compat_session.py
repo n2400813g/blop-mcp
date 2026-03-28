@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -132,7 +133,9 @@ async def test_browser_session_manager_tabs_list_and_select():
 async def test_browser_compat_wrapper_delegates_to_session_manager():
     from blop.tools import browser_compat
 
-    with patch.object(browser_compat.SESSION_MANAGER, "navigate", new=AsyncMock(return_value={"url": "https://example.com"})) as nav:
+    with patch.object(
+        browser_compat.SESSION_MANAGER, "navigate", new=AsyncMock(return_value={"url": "https://example.com"})
+    ) as nav:
         result = await browser_compat.browser_navigate("https://example.com", profile_name="staging")
 
     nav.assert_awaited_once_with("https://example.com", profile_name="staging")
@@ -248,3 +251,53 @@ def test_browser_session_manager_resolve_output_path_blocks_absolute_path():
     manager = BrowserSessionManager()
     with pytest.raises(ValueError):
         manager._resolve_output_path("/tmp/escape.png", default_ext=".png")
+
+
+@pytest.mark.asyncio
+async def test_browser_session_manager_clicks_id_anchored_ref_with_real_playwright():
+    manager = BrowserSessionManager()
+
+    with patch(
+        "blop.engine.browser_session_manager.auth_engine.auto_storage_state_from_env",
+        new=AsyncMock(return_value=None),
+    ):
+        try:
+            await manager.ensure_started()
+        except Exception as exc:
+            message = str(exc)
+            if "Executable doesn't exist" in message or "download new browsers" in message:
+                pytest.skip("Playwright Chromium is not installed for real-browser compat tests")
+            raise
+
+        try:
+            page = manager._current_page()
+            await page.set_content(
+                """
+                <html>
+                  <body>
+                    <nav id="narvbarx">
+                      <div id="navbarExample">
+                        <ul>
+                          <li><a href="#" onclick="window.__clicked = (window.__clicked || 0) + 100; return false;">Home</a></li>
+                          <li><a href="#" onclick="window.__clicked = (window.__clicked || 0) + 1; return false;">Contact</a></li>
+                        </ul>
+                      </div>
+                    </nav>
+                  </body>
+                </html>
+                """
+            )
+
+            snapshot = await manager.snapshot()
+            markdown = snapshot.get("snapshot") or ""
+            match = re.search(r'Contact" \[ref=(e\d+)\]', markdown)
+            assert match, markdown
+
+            result = await manager.click(ref=match.group(1), selector=None)
+            clicked = await page.evaluate("() => window.__clicked || 0")
+
+            assert clicked == 1
+            assert result["selector"].startswith("div#navbarExample >")
+            assert "body > div#navbarExample" not in result["selector"]
+        finally:
+            await manager.close()

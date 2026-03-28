@@ -1,4 +1,5 @@
 """Tests for tools/validate.py — validate_setup tool."""
+
 from __future__ import annotations
 
 import os
@@ -312,7 +313,9 @@ async def test_validate_release_setup_auth_warning_prioritizes_refresh():
                             new_callable=AsyncMock,
                             return_value="/tmp/auth.json",
                         ):
-                            with patch("blop.engine.auth.validate_auth_session", new_callable=AsyncMock, return_value=False):
+                            with patch(
+                                "blop.engine.auth.validate_auth_session", new_callable=AsyncMock, return_value=False
+                            ):
                                 result = await validate_release_setup(
                                     app_url="https://example.com",
                                     profile_name="prod",
@@ -328,8 +331,8 @@ async def test_validate_release_setup_auth_warning_prioritizes_refresh():
 @pytest.mark.asyncio
 async def test_validate_profile_valid_passes():
     """profile_name provided and resolves successfully → auth_profile check passes."""
-    from blop.tools.validate import validate_setup
     from blop.schemas import AuthProfile
+    from blop.tools.validate import validate_setup
 
     mock_browser = AsyncMock()
     mock_playwright = AsyncMock()
@@ -347,7 +350,9 @@ async def test_validate_profile_valid_passes():
         with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
             with patch("blop.storage.sqlite.init_db", new_callable=AsyncMock):
                 with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=mock_profile):
-                    with patch("blop.engine.auth.resolve_storage_state", new_callable=AsyncMock, return_value='{"cookies":[]}'):
+                    with patch(
+                        "blop.engine.auth.resolve_storage_state", new_callable=AsyncMock, return_value='{"cookies":[]}'
+                    ):
                         result = await validate_setup(profile_name="prod")
 
     assert result["status"] == "ready"
@@ -358,8 +363,8 @@ async def test_validate_profile_valid_passes():
 
 @pytest.mark.asyncio
 async def test_validate_expired_storage_state_surfaces_primary_action():
-    from blop.tools.validate import validate_setup
     from blop.schemas import AuthProfile
+    from blop.tools.validate import validate_setup
 
     mock_browser = AsyncMock()
     mock_playwright = AsyncMock()
@@ -377,8 +382,14 @@ async def test_validate_expired_storage_state_surfaces_primary_action():
         with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
             with patch("blop.storage.sqlite.init_db", new_callable=AsyncMock):
                 with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=mock_profile):
-                    with patch("blop.engine.auth.resolve_storage_state_for_profile", new_callable=AsyncMock, return_value="/tmp/prod.json"):
-                        with patch("blop.engine.auth.validate_auth_session", new_callable=AsyncMock, return_value=False):
+                    with patch(
+                        "blop.engine.auth.resolve_storage_state_for_profile",
+                        new_callable=AsyncMock,
+                        return_value="/tmp/prod.json",
+                    ):
+                        with patch(
+                            "blop.engine.auth.validate_auth_session", new_callable=AsyncMock, return_value=False
+                        ):
                             result = await validate_setup(app_url="https://example.com", profile_name="prod")
 
     assert result["status"] == "warnings"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import uuid
@@ -22,6 +23,26 @@ from blop.schemas import (
 )
 
 _log = get_logger("sqlite")
+
+_RUN_HEALTH_BUFFER_LIMIT = max(1, int(os.getenv("BLOP_RUN_HEALTH_BUFFER_LIMIT", "16")))
+_ARTIFACT_BUFFER_LIMIT = max(1, int(os.getenv("BLOP_ARTIFACT_BUFFER_LIMIT", "24")))
+_RUN_HEALTH_FLUSH_EVENTS = {
+    "case_completed",
+    "run_completed",
+    "run_failed",
+    "run_cancelled",
+    "run_force_terminated",
+}
+_RUN_HEALTH_BUFFERS: dict[str, list[dict]] = {}
+_ARTIFACT_BUFFERS: dict[str, list[dict]] = {}
+_BUFFER_LOCK: asyncio.Lock | None = None
+
+
+def _buffer_lock() -> asyncio.Lock:
+    global _BUFFER_LOCK
+    if _BUFFER_LOCK is None:
+        _BUFFER_LOCK = asyncio.Lock()
+    return _BUFFER_LOCK
 
 
 def _db_path() -> str:
@@ -132,6 +153,16 @@ async def init_db() -> None:
             )
         """)
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS run_observations (
+                run_id TEXT NOT NULL,
+                observation_key TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                updated_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (run_id, observation_key),
+                FOREIGN KEY(run_id) REFERENCES runs(run_id)
+            )
+        """)
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS release_snapshots (
                 release_id TEXT PRIMARY KEY,
                 app_url TEXT NOT NULL,
@@ -223,10 +254,17 @@ async def init_db() -> None:
                 created_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS projects (
+                project_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                repo_url TEXT,
+                metadata_json TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
         # Telemetry index for faster time-range queries
-        await db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_ts_signals ON telemetry_signals(app_url, ts)"
-        )
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ts_signals ON telemetry_signals(app_url, ts)")
         # Performance indexes on hot query paths
         await db.execute("CREATE INDEX IF NOT EXISTS idx_runs_app_status ON runs(app_url, status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_cases_run ON run_cases(run_id)")
@@ -239,10 +277,7 @@ async def init_db() -> None:
 
         # Startup recovery: mark any runs orphaned in "running" state as "failed"
         # (happens when the server process was killed mid-run)
-        await db.execute(
-            "UPDATE runs SET status = 'failed', completed_at = datetime('now') "
-            "WHERE status = 'running'"
-        )
+        await db.execute("UPDATE runs SET status = 'failed', completed_at = datetime('now') WHERE status = 'running'")
         await db.commit()
 
 
@@ -282,6 +317,7 @@ async def _migrate(db) -> None:
         (25, "run_cases", "device_log_path", "TEXT"),
         (26, "run_cases", "crash_report_path", "TEXT"),
         (27, "run_cases", "platform", "TEXT DEFAULT 'web'"),
+        (28, "release_snapshots", "project_id", "TEXT"),
     ]
 
     current_version = await _get_schema_version(db)
@@ -298,9 +334,7 @@ async def _migrate(db) -> None:
                 # Column already exists (e.g. re-run after partial failure): still advance
                 await _set_schema_version(db, version)
             else:
-                raise RuntimeError(
-                    f"Migration {version} failed — {table}.{column}: {exc}"
-                ) from exc
+                raise RuntimeError(f"Migration {version} failed — {table}.{column}: {exc}") from exc
 
     await db.commit()
 
@@ -386,106 +420,142 @@ async def save_flow(flow: RecordedFlow) -> None:
         await db.commit()
 
 
+_FLOW_FULL_SELECT = """SELECT flow_id, flow_name, app_url, goal, steps_json, created_at,
+                          assertions_json, entry_url, spa_hints_json, business_criticality, run_mode_override,
+                          intent_contract_json, platform, mobile_target_json
+                   FROM recorded_flows"""
+_FLOW_LEGACY_SELECT = """SELECT flow_id, flow_name, app_url, goal, steps_json, created_at,
+                          assertions_json, entry_url, spa_hints_json, business_criticality, run_mode_override
+                   FROM recorded_flows"""
+_FLOW_SUMMARY_SELECT = (
+    "SELECT flow_id, flow_name, app_url, goal, created_at, business_criticality, "
+    "run_mode_override, entry_url, platform, intent_contract_json "
+    "FROM recorded_flows"
+)
+_FLOW_SUMMARY_LEGACY_SELECT = (
+    "SELECT flow_id, flow_name, app_url, goal, created_at, business_criticality, "
+    "run_mode_override, entry_url, platform "
+    "FROM recorded_flows"
+)
+
+
+def _ensure_flow_step_shape(step_payload: dict) -> dict:
+    step_payload.setdefault("target_text", None)
+    step_payload.setdefault("dom_fingerprint", None)
+    step_payload.setdefault("url_before", None)
+    step_payload.setdefault("url_after", None)
+    step_payload.setdefault("screenshot_path", None)
+    step_payload.setdefault("aria_role", None)
+    step_payload.setdefault("aria_name", None)
+    step_payload.setdefault("aria_snapshot", None)
+    step_payload.setdefault("testid_selector", None)
+    step_payload.setdefault("label_text", None)
+    step_payload.setdefault("structured_assertion", None)
+    step_payload.setdefault("mobile_selector", None)
+    step_payload.setdefault("swipe_direction", None)
+    step_payload.setdefault("swipe_distance_pct", None)
+    step_payload.setdefault("touch_x_pct", None)
+    step_payload.setdefault("touch_y_pct", None)
+    step_payload.setdefault("pinch_scale", None)
+    return step_payload
+
+
+def _deserialize_flow_row(row) -> RecordedFlow:
+    from blop.schemas import FlowStep, IntentContract, MobileDeviceTarget, SpaHints
+
+    steps_data = json.loads(row[4]) if row[4] else []
+    steps = [FlowStep(**_ensure_flow_step_shape(dict(step_payload))) for step_payload in steps_data]
+
+    assertions_json: list[str] = []
+    if row[6]:
+        try:
+            assertions_json = json.loads(row[6])
+        except Exception:
+            _log.debug("failed to parse assertions_json for flow", exc_info=True)
+
+    spa_hints = SpaHints()
+    if row[8]:
+        try:
+            spa_hints = SpaHints.model_validate_json(row[8])
+        except Exception:
+            _log.debug("failed to parse spa_hints for flow", exc_info=True)
+
+    intent_contract = None
+    if len(row) > 11 and row[11]:
+        try:
+            intent_contract = IntentContract.model_validate_json(row[11])
+        except Exception:
+            _log.debug("failed to parse intent_contract_json for flow", exc_info=True)
+
+    platform = "web"
+    if len(row) > 12 and row[12]:
+        platform = row[12]
+
+    mobile_target = None
+    if len(row) > 13 and row[13]:
+        try:
+            mobile_target = MobileDeviceTarget.model_validate_json(row[13])
+        except Exception:
+            _log.debug("failed to parse mobile_target_json for flow", exc_info=True)
+
+    return RecordedFlow(
+        flow_id=row[0],
+        flow_name=row[1],
+        app_url=row[2],
+        goal=row[3],
+        steps=steps,
+        created_at=row[5],
+        assertions_json=assertions_json,
+        entry_url=row[7],
+        spa_hints=spa_hints,
+        business_criticality=row[9] or "other",
+        run_mode_override=row[10] if len(row) > 10 else None,
+        intent_contract=intent_contract,
+        platform=platform,
+        mobile_target=mobile_target,
+    )
+
+
+def _flow_summary_from_row(row) -> dict:
+    return {
+        "flow_id": row[0],
+        "flow_name": row[1],
+        "app_url": row[2],
+        "goal": row[3],
+        "created_at": row[4],
+        "business_criticality": row[5] or "other",
+        "run_mode_override": row[6] if len(row) > 6 else None,
+        "entry_url": row[7] if len(row) > 7 else None,
+        "platform": row[8] if len(row) > 8 and row[8] else "web",
+        "has_intent_contract": bool(row[9]) if len(row) > 9 else False,
+    }
+
+
 async def get_flow(flow_id: str) -> RecordedFlow | None:
-    from blop.schemas import FlowStep, SpaHints
     async with aiosqlite.connect(_db_path()) as db:
         row = None
         try:
             async with db.execute(
-                """SELECT flow_id, flow_name, app_url, goal, steps_json, created_at,
-                          assertions_json, entry_url, spa_hints_json, business_criticality, run_mode_override,
-                          intent_contract_json, platform, mobile_target_json
-                   FROM recorded_flows WHERE flow_id = ?""",
+                f"{_FLOW_FULL_SELECT} WHERE flow_id = ?",
                 (flow_id,),
             ) as cursor:
                 row = await cursor.fetchone()
         except Exception as exc:
-            if "intent_contract_json" not in str(exc) and "platform" not in str(exc) and "mobile_target_json" not in str(exc):
+            if (
+                "intent_contract_json" not in str(exc)
+                and "platform" not in str(exc)
+                and "mobile_target_json" not in str(exc)
+            ):
                 raise
             # Fallback for pre-migration databases
             async with db.execute(
-                """SELECT flow_id, flow_name, app_url, goal, steps_json, created_at,
-                          assertions_json, entry_url, spa_hints_json, business_criticality, run_mode_override
-                   FROM recorded_flows WHERE flow_id = ?""",
+                f"{_FLOW_LEGACY_SELECT} WHERE flow_id = ?",
                 (flow_id,),
             ) as cursor:
                 row = await cursor.fetchone()
 
         if row:
-                steps_data = json.loads(row[4])
-                steps = []
-                for s in steps_data:
-                    # Handle old records that may lack new fields
-                    s.setdefault("target_text", None)
-                    s.setdefault("dom_fingerprint", None)
-                    s.setdefault("url_before", None)
-                    s.setdefault("url_after", None)
-                    s.setdefault("screenshot_path", None)
-                    # Semantic locator fields (added in v2)
-                    s.setdefault("aria_role", None)
-                    s.setdefault("aria_name", None)
-                    s.setdefault("aria_snapshot", None)
-                    s.setdefault("testid_selector", None)
-                    s.setdefault("label_text", None)
-                    s.setdefault("structured_assertion", None)
-                    # Mobile fields (added in v3)
-                    s.setdefault("mobile_selector", None)
-                    s.setdefault("swipe_direction", None)
-                    s.setdefault("swipe_distance_pct", None)
-                    s.setdefault("touch_x_pct", None)
-                    s.setdefault("touch_y_pct", None)
-                    s.setdefault("pinch_scale", None)
-                    steps.append(FlowStep(**s))
-
-                assertions_json: list[str] = []
-                if row[6]:
-                    try:
-                        assertions_json = json.loads(row[6])
-                    except Exception:
-                        _log.debug("failed to parse assertions_json for flow", exc_info=True)
-                spa_hints = SpaHints()
-                if row[8]:
-                    try:
-                        spa_hints = SpaHints.model_validate_json(row[8])
-                    except Exception:
-                        _log.debug("failed to parse spa_hints for flow", exc_info=True)
-
-                intent_contract = None
-                if len(row) > 11 and row[11]:
-                    try:
-                        from blop.schemas import IntentContract
-                        intent_contract = IntentContract.model_validate_json(row[11])
-                    except Exception:
-                        _log.debug("failed to parse intent_contract_json for flow", exc_info=True)
-
-                platform = "web"
-                if len(row) > 12 and row[12]:
-                    platform = row[12]
-
-                mobile_target = None
-                if len(row) > 13 and row[13]:
-                    try:
-                        from blop.schemas import MobileDeviceTarget
-                        mobile_target = MobileDeviceTarget.model_validate_json(row[13])
-                    except Exception:
-                        _log.debug("failed to parse mobile_target_json for flow", exc_info=True)
-
-                return RecordedFlow(
-                    flow_id=row[0],
-                    flow_name=row[1],
-                    app_url=row[2],
-                    goal=row[3],
-                    steps=steps,
-                    created_at=row[5],
-                    assertions_json=assertions_json,
-                    entry_url=row[7],
-                    spa_hints=spa_hints,
-                    business_criticality=row[9] or "other",
-                    run_mode_override=row[10] if len(row) > 10 else None,
-                    intent_contract=intent_contract,
-                    platform=platform,
-                    mobile_target=mobile_target,
-                )
+            return _deserialize_flow_row(row)
     return None
 
 
@@ -493,29 +563,88 @@ async def list_flows() -> list[dict]:
     async with aiosqlite.connect(_db_path()) as db:
         rows = []
         try:
+            async with db.execute(f"{_FLOW_SUMMARY_SELECT} ORDER BY created_at DESC") as cursor:
+                rows = await cursor.fetchall()
+        except Exception as exc:
+            if "intent_contract_json" not in str(exc) and "platform" not in str(exc):
+                raise
+            async with db.execute(f"{_FLOW_SUMMARY_LEGACY_SELECT} ORDER BY created_at DESC") as cursor:
+                rows = await cursor.fetchall()
+        return [_flow_summary_from_row(r) for r in rows]
+
+
+async def list_flows_full(
+    app_url: str | None = None,
+    criticality_filter: list[str] | None = None,
+) -> list[RecordedFlow]:
+    clauses: list[str] = []
+    params: list[object] = []
+    if app_url:
+        clauses.append("app_url = ?")
+        params.append(app_url)
+    if criticality_filter:
+        deduped = [value for value in dict.fromkeys(criticality_filter) if value]
+        if deduped:
+            placeholders = ",".join("?" for _ in deduped)
+            clauses.append(f"business_criticality IN ({placeholders})")
+            params.extend(deduped)
+    where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    async with aiosqlite.connect(_db_path()) as db:
+        rows = []
+        try:
             async with db.execute(
-                "SELECT flow_id, flow_name, app_url, goal, created_at, run_mode_override, intent_contract_json FROM recorded_flows ORDER BY created_at DESC"
+                f"{_FLOW_FULL_SELECT}{where_sql} ORDER BY created_at DESC",
+                params,
             ) as cursor:
                 rows = await cursor.fetchall()
         except Exception as exc:
-            if "intent_contract_json" not in str(exc):
+            if (
+                "intent_contract_json" not in str(exc)
+                and "platform" not in str(exc)
+                and "mobile_target_json" not in str(exc)
+            ):
                 raise
             async with db.execute(
-                "SELECT flow_id, flow_name, app_url, goal, created_at, run_mode_override FROM recorded_flows ORDER BY created_at DESC"
+                f"{_FLOW_LEGACY_SELECT}{where_sql} ORDER BY created_at DESC",
+                params,
             ) as cursor:
                 rows = await cursor.fetchall()
-        return [
-            {
-                "flow_id": r[0],
-                "flow_name": r[1],
-                "app_url": r[2],
-                "goal": r[3],
-                "created_at": r[4],
-                "run_mode_override": r[5] if len(r) > 5 else None,
-                "has_intent_contract": bool(r[6]) if len(r) > 6 else False,
-            }
-            for r in rows
-        ]
+    return [_deserialize_flow_row(row) for row in rows]
+
+
+async def get_flows(flow_ids: list[str]) -> list[RecordedFlow]:
+    if not flow_ids:
+        return []
+    ordered_ids = [flow_id for flow_id in flow_ids if isinstance(flow_id, str) and flow_id.strip()]
+    if not ordered_ids:
+        return []
+    placeholders = ",".join("?" for _ in ordered_ids)
+    flow_map: dict[str, RecordedFlow] = {}
+    async with aiosqlite.connect(_db_path()) as db:
+        rows = []
+        try:
+            async with db.execute(
+                f"{_FLOW_FULL_SELECT} WHERE flow_id IN ({placeholders})",
+                ordered_ids,
+            ) as cursor:
+                rows = await cursor.fetchall()
+        except Exception as exc:
+            if (
+                "intent_contract_json" not in str(exc)
+                and "platform" not in str(exc)
+                and "mobile_target_json" not in str(exc)
+            ):
+                raise
+            async with db.execute(
+                f"{_FLOW_LEGACY_SELECT} WHERE flow_id IN ({placeholders})",
+                ordered_ids,
+            ) as cursor:
+                rows = await cursor.fetchall()
+    for row in rows:
+        flow = _deserialize_flow_row(row)
+        flow_map[flow.flow_id] = flow
+    return [flow_map[flow_id] for flow_id in ordered_ids if flow_id in flow_map]
 
 
 async def find_flow_by_url_and_name(app_url: str, flow_name: str) -> dict | None:
@@ -743,9 +872,32 @@ async def list_runs(limit: int = 20, status: str | None = None) -> list[dict]:
             ]
 
 
+def _case_insert_row(case: FailureCase) -> tuple:
+    return (
+        case.case_id,
+        case.run_id,
+        case.flow_id,
+        case.status,
+        case.severity,
+        case.model_dump_json(),
+        case.replay_mode,
+        case.step_failure_index,
+        json.dumps(case.assertion_failures),
+        case.business_criticality,
+        json.dumps([h.model_dump() for h in case.healed_steps]) if case.healed_steps else None,
+        1 if case.rerecorded else 0,
+    )
+
+
 async def save_case(case: FailureCase) -> None:
+    await save_cases([case])
+
+
+async def save_cases(cases: list[FailureCase]) -> None:
+    if not cases:
+        return
     async with aiosqlite.connect(_db_path()) as db:
-        await db.execute(
+        await db.executemany(
             """
             INSERT OR REPLACE INTO run_cases
             (case_id, run_id, flow_id, status, severity, result_json,
@@ -753,20 +905,7 @@ async def save_case(case: FailureCase) -> None:
              healed_steps_json, rerecorded)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (
-                case.case_id,
-                case.run_id,
-                case.flow_id,
-                case.status,
-                case.severity,
-                case.model_dump_json(),
-                case.replay_mode,
-                case.step_failure_index,
-                json.dumps(case.assertion_failures),
-                case.business_criticality,
-                json.dumps([h.model_dump() for h in case.healed_steps]) if case.healed_steps else None,
-                1 if case.rerecorded else 0,
-            ),
+            [_case_insert_row(case) for case in cases],
         )
         await db.commit()
 
@@ -787,6 +926,28 @@ async def list_cases_for_run(run_id: str) -> list[FailureCase]:
             return cases
 
 
+async def list_cases_for_runs(run_ids: list[str]) -> dict[str, list[FailureCase]]:
+    if not run_ids:
+        return {}
+    ordered_run_ids = [run_id for run_id in run_ids if isinstance(run_id, str) and run_id.strip()]
+    if not ordered_run_ids:
+        return {}
+    placeholders = ",".join("?" for _ in ordered_run_ids)
+    grouped: dict[str, list[FailureCase]] = {run_id: [] for run_id in ordered_run_ids}
+    async with aiosqlite.connect(_db_path()) as db:
+        async with db.execute(
+            f"SELECT run_id, result_json FROM run_cases WHERE run_id IN ({placeholders}) ORDER BY rowid ASC",
+            ordered_run_ids,
+        ) as cursor:
+            rows = await cursor.fetchall()
+            for run_id, payload in rows:
+                try:
+                    grouped.setdefault(run_id, []).append(FailureCase.model_validate_json(payload))
+                except Exception:
+                    _log.debug("failed to parse result_json for batched run cases", exc_info=True)
+    return grouped
+
+
 async def get_case(case_id: str) -> FailureCase | None:
     async with aiosqlite.connect(_db_path()) as db:
         async with db.execute(
@@ -802,16 +963,66 @@ async def get_case(case_id: str) -> FailureCase | None:
                 return None
 
 
-async def save_artifact(run_id: str, case_id: str | None, artifact_type: str, path: str) -> None:
+async def _write_artifacts(records: list[dict]) -> None:
+    if not records:
+        return
     async with aiosqlite.connect(_db_path()) as db:
-        await db.execute(
+        await db.executemany(
             """
             INSERT INTO artifacts (artifact_id, run_id, case_id, artifact_type, path)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (str(uuid.uuid4()), run_id, case_id, artifact_type, path),
+            [
+                (
+                    record.get("artifact_id") or str(uuid.uuid4()),
+                    record["run_id"],
+                    record.get("case_id"),
+                    record["artifact_type"],
+                    record["path"],
+                )
+                for record in records
+            ],
         )
         await db.commit()
+
+
+async def save_artifacts(records: list[dict]) -> None:
+    if not records:
+        return
+    async with _buffer_lock():
+        grouped: dict[str, list[dict]] = {}
+        for record in records:
+            run_id = str(record["run_id"])
+            grouped.setdefault(run_id, []).append(
+                {
+                    "artifact_id": record.get("artifact_id") or str(uuid.uuid4()),
+                    "run_id": run_id,
+                    "case_id": record.get("case_id"),
+                    "artifact_type": record["artifact_type"],
+                    "path": record["path"],
+                }
+            )
+        for run_id, items in grouped.items():
+            _ARTIFACT_BUFFERS.setdefault(run_id, []).extend(items)
+    await flush_buffered_writes(run_ids=list(grouped))
+
+
+async def save_artifact(run_id: str, case_id: str | None, artifact_type: str, path: str) -> None:
+    should_flush = False
+    async with _buffer_lock():
+        buffer = _ARTIFACT_BUFFERS.setdefault(run_id, [])
+        buffer.append(
+            {
+                "artifact_id": str(uuid.uuid4()),
+                "run_id": run_id,
+                "case_id": case_id,
+                "artifact_type": artifact_type,
+                "path": path,
+            }
+        )
+        should_flush = len(buffer) >= _ARTIFACT_BUFFER_LIMIT
+    if should_flush:
+        await flush_buffered_writes(run_id=run_id)
 
 
 async def save_site_inventory(app_url: str, inventory_dict: dict) -> None:
@@ -854,6 +1065,7 @@ async def get_latest_site_inventory(app_url: str) -> dict | None:
 
 
 async def list_artifacts_for_run(run_id: str) -> list[dict]:
+    await flush_buffered_writes(run_id=run_id)
     async with aiosqlite.connect(_db_path()) as db:
         async with db.execute(
             """
@@ -885,7 +1097,6 @@ async def update_flow_step_selector(flow_id: str, step_id: int, updates: dict) -
     ``testid_selector``, ``label_text``, or ``target_text``.
     Returns True if the flow was found and updated.
     """
-    from blop.schemas import FlowStep, SpaHints
 
     async with aiosqlite.connect(_db_path()) as db:
         try:
@@ -1039,25 +1250,132 @@ async def list_context_graphs(app_url: str, limit: int = 5) -> list[dict]:
             ]
 
 
-async def save_run_health_event(run_id: str, event_type: str, payload: dict) -> None:
+async def upsert_run_observation(run_id: str, observation_key: str, payload: dict) -> None:
+    """Idempotent agent observation: same (run_id, observation_key) overwrites payload."""
     async with aiosqlite.connect(_db_path()) as db:
         await db.execute(
             """
-            INSERT INTO run_health_events (event_id, run_id, event_type, payload_json)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO run_observations (run_id, observation_key, payload_json, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(run_id, observation_key) DO UPDATE SET
+                payload_json = excluded.payload_json,
+                updated_at = datetime('now')
             """,
-            (
-                str(uuid.uuid4()),
-                run_id,
-                event_type,
-                json.dumps(payload),
-            ),
+            (run_id, observation_key, json.dumps(payload)),
         )
         await db.commit()
 
 
+async def get_run_observation(run_id: str, observation_key: str) -> dict | None:
+    async with aiosqlite.connect(_db_path()) as db:
+        async with db.execute(
+            """
+            SELECT payload_json, updated_at
+            FROM run_observations
+            WHERE run_id = ? AND observation_key = ?
+            """,
+            (run_id, observation_key),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            payload = json.loads(row[0]) if row[0] else {}
+            payload["updated_at"] = row[1]
+            return payload
+
+
+async def _write_run_health_events(events: list[dict]) -> None:
+    if not events:
+        return
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.executemany(
+            """
+            INSERT INTO run_health_events (event_id, run_id, event_type, payload_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (
+                    event.get("event_id") or str(uuid.uuid4()),
+                    event["run_id"],
+                    event["event_type"],
+                    json.dumps(event.get("payload", {})),
+                )
+                for event in events
+            ],
+        )
+        await db.commit()
+
+
+async def flush_buffered_writes(
+    run_id: str | None = None,
+    *,
+    run_ids: list[str] | None = None,
+) -> None:
+    flush_ids: list[str] = []
+    if run_ids:
+        flush_ids.extend(run_ids)
+    if run_id:
+        flush_ids.append(run_id)
+    if not flush_ids:
+        async with _buffer_lock():
+            flush_ids = list(dict.fromkeys([*_RUN_HEALTH_BUFFERS.keys(), *_ARTIFACT_BUFFERS.keys()]))
+    if not flush_ids:
+        return
+
+    async with _buffer_lock():
+        normalized_ids = list(dict.fromkeys(flush_ids))
+        event_batches = {rid: _RUN_HEALTH_BUFFERS.pop(rid, []) for rid in normalized_ids}
+        artifact_batches = {rid: _ARTIFACT_BUFFERS.pop(rid, []) for rid in normalized_ids}
+
+    for rid in normalized_ids:
+        if event_batches.get(rid):
+            await _write_run_health_events(event_batches[rid])
+        if artifact_batches.get(rid):
+            await _write_artifacts(artifact_batches[rid])
+
+
+async def save_run_health_event(run_id: str, event_type: str, payload: dict) -> None:
+    should_flush = False
+    async with _buffer_lock():
+        buffer = _RUN_HEALTH_BUFFERS.setdefault(run_id, [])
+        buffer.append(
+            {
+                "event_id": str(uuid.uuid4()),
+                "run_id": run_id,
+                "event_type": event_type,
+                "payload": payload,
+            }
+        )
+        should_flush = len(buffer) >= _RUN_HEALTH_BUFFER_LIMIT or event_type in _RUN_HEALTH_FLUSH_EVENTS
+    if should_flush:
+        await flush_buffered_writes(run_id=run_id)
+
+
+async def save_run_health_events(events: list[dict]) -> None:
+    if not events:
+        return
+    async with _buffer_lock():
+        grouped: dict[str, list[dict]] = {}
+        for event in events:
+            run_id = str(event["run_id"])
+            grouped.setdefault(run_id, []).append(
+                {
+                    "event_id": event.get("event_id") or str(uuid.uuid4()),
+                    "run_id": run_id,
+                    "event_type": event["event_type"],
+                    "payload": event.get("payload", {}),
+                }
+            )
+            if event["event_type"] in _RUN_HEALTH_FLUSH_EVENTS:
+                grouped[run_id][-1]["_flush_now"] = True
+        for run_id, items in grouped.items():
+            _RUN_HEALTH_BUFFERS.setdefault(run_id, []).extend(items)
+    await flush_buffered_writes(run_ids=list(grouped))
+
+
 async def list_run_health_events(run_id: str, limit: int = 500) -> list[dict]:
     safe_limit = max(1, min(limit, 2000))
+    await flush_buffered_writes(run_id=run_id)
     async with aiosqlite.connect(_db_path()) as db:
         async with db.execute(
             """
@@ -1089,18 +1407,32 @@ async def list_run_health_events(run_id: str, limit: int = 500) -> list[dict]:
 
 
 async def save_release_snapshot(snapshot: ReleaseSnapshot) -> None:
+    """Persist graph/context snapshot; preserves brief_json, run_id, and project_id if row exists."""
     async with aiosqlite.connect(_db_path()) as db:
+        async with db.execute(
+            """
+            SELECT brief_json, run_id, project_id FROM release_snapshots WHERE release_id = ?
+            """,
+            (snapshot.release_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        brief_json = row[0] if row else None
+        run_id = row[1] if row else None
+        project_id = row[2] if row else None
         await db.execute(
             """
             INSERT OR REPLACE INTO release_snapshots
-            (release_id, app_url, created_at, snapshot_json)
-            VALUES (?, ?, ?, ?)
+            (release_id, app_url, created_at, snapshot_json, brief_json, run_id, project_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 snapshot.release_id,
                 snapshot.app_url,
                 snapshot.created_at,
                 snapshot.model_dump_json(),
+                brief_json,
+                run_id,
+                project_id,
             ),
         )
         await db.commit()
@@ -1420,20 +1752,48 @@ async def save_release_brief(
     app_url: str,
     brief: dict,
 ) -> None:
-    """Persist a ReleaseBrief as brief_json in the release_snapshots table."""
+    """Persist a ReleaseBrief as brief_json; keeps existing snapshot_json and project_id when set."""
     async with aiosqlite.connect(_db_path()) as db:
+        async with db.execute(
+            """
+            SELECT snapshot_json, brief_json, run_id, project_id, created_at
+            FROM release_snapshots WHERE release_id = ?
+            """,
+            (release_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        snapshot_json = json.dumps({})
+        project_id: str | None = None
+        created_at_keep: str | None = None
+        if row:
+            prev_snap, _prev_brief, _prev_run, prev_proj, prev_created = row
+            created_at_keep = prev_created
+            if prev_proj:
+                project_id = prev_proj
+            if prev_snap:
+                try:
+                    parsed = json.loads(prev_snap)
+                    if isinstance(parsed, dict) and parsed:
+                        snapshot_json = prev_snap
+                    elif prev_snap.strip() not in ("", "{}"):
+                        snapshot_json = prev_snap
+                except Exception:
+                    snapshot_json = prev_snap if prev_snap else json.dumps({})
+
         await db.execute(
             """
             INSERT OR REPLACE INTO release_snapshots
-            (release_id, app_url, created_at, snapshot_json, brief_json, run_id)
-            VALUES (?, ?, datetime('now'), ?, ?, ?)
+            (release_id, app_url, created_at, snapshot_json, brief_json, run_id, project_id)
+            VALUES (?, ?, COALESCE(?, datetime('now')), ?, ?, ?, ?)
             """,
             (
                 release_id,
                 app_url,
-                json.dumps({}),
+                created_at_keep,
+                snapshot_json,
                 json.dumps(brief),
                 run_id,
+                project_id,
             ),
         )
         await db.commit()
@@ -1458,6 +1818,167 @@ async def get_release_brief(release_id: str) -> dict | None:
                 return brief
             except Exception:
                 return None
+
+
+async def get_release_row(release_id: str) -> dict | None:
+    """Full release_snapshots row for HTTP API (registration + brief pointers)."""
+    async with aiosqlite.connect(_db_path()) as db:
+        async with db.execute(
+            """
+            SELECT release_id, app_url, created_at, snapshot_json, brief_json, run_id, project_id
+            FROM release_snapshots WHERE release_id = ?
+            """,
+            (release_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "release_id": row[0],
+                "app_url": row[1],
+                "created_at": row[2],
+                "snapshot_json": row[3],
+                "brief_json": row[4],
+                "run_id": row[5],
+                "project_id": row[6],
+            }
+
+
+async def get_release_id_for_run(run_id: str) -> dict | None:
+    """Map a run back to API release context (release_snapshots.run_id)."""
+    if not run_id:
+        return None
+    async with aiosqlite.connect(_db_path()) as db:
+        async with db.execute(
+            """
+            SELECT release_id, app_url FROM release_snapshots
+            WHERE run_id = ? LIMIT 1
+            """,
+            (run_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            return {"release_id": row[0], "app_url": row[1]}
+
+
+async def upsert_release_registration(
+    *,
+    release_id: str,
+    app_url: str,
+    project_id: str | None,
+    registration_metadata: dict,
+) -> None:
+    """Create or update API release registration without clobbering brief_json/run_id."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(_db_path()) as db:
+        async with db.execute(
+            """
+            SELECT snapshot_json, brief_json, run_id, project_id, created_at
+            FROM release_snapshots WHERE release_id = ?
+            """,
+            (release_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        snapshot_json: str
+        brief_j: str | None = None
+        run_j: str | None = None
+        proj: str | None = project_id
+        created_keep: str | None = None
+
+        if row:
+            prev_snap, brief_j, run_j, prev_proj, created_keep = row
+            if proj is None and prev_proj:
+                proj = prev_proj
+            if prev_snap:
+                try:
+                    old = ReleaseSnapshot.model_validate_json(prev_snap)
+                    merged_meta = {**(old.metadata or {}), **registration_metadata}
+                    snap = old.model_copy(
+                        update={"app_url": app_url, "metadata": merged_meta, "release_id": release_id}
+                    )
+                    snapshot_json = snap.model_dump_json()
+                except Exception:
+                    snap = ReleaseSnapshot(
+                        release_id=release_id,
+                        app_url=app_url,
+                        created_at=now,
+                        metadata=registration_metadata,
+                    )
+                    snapshot_json = snap.model_dump_json()
+            else:
+                snap = ReleaseSnapshot(
+                    release_id=release_id,
+                    app_url=app_url,
+                    created_at=created_keep or now,
+                    metadata=registration_metadata,
+                )
+                snapshot_json = snap.model_dump_json()
+        else:
+            snap = ReleaseSnapshot(
+                release_id=release_id,
+                app_url=app_url,
+                created_at=now,
+                metadata=registration_metadata,
+            )
+            snapshot_json = snap.model_dump_json()
+
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO release_snapshots
+            (release_id, app_url, created_at, snapshot_json, brief_json, run_id, project_id)
+            VALUES (?, ?, COALESCE(?, datetime('now')), ?, ?, ?, ?)
+            """,
+            (release_id, app_url, created_keep, snapshot_json, brief_j, run_j, proj),
+        )
+        await db.commit()
+
+
+async def save_project(
+    project_id: str,
+    name: str,
+    repo_url: str | None = None,
+    metadata: dict | None = None,
+) -> None:
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(
+            """
+            INSERT INTO projects (project_id, name, repo_url, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(project_id) DO UPDATE SET
+                name = excluded.name,
+                repo_url = excluded.repo_url,
+                metadata_json = excluded.metadata_json
+            """,
+            (project_id, name, repo_url, json.dumps(metadata or {})),
+        )
+        await db.commit()
+
+
+async def get_project(project_id: str) -> dict | None:
+    async with aiosqlite.connect(_db_path()) as db:
+        async with db.execute(
+            """
+            SELECT project_id, name, repo_url, metadata_json, created_at
+            FROM projects WHERE project_id = ?
+            """,
+            (project_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            try:
+                meta = json.loads(row[3]) if row[3] else {}
+            except Exception:
+                meta = {}
+            return {
+                "project_id": row[0],
+                "name": row[1],
+                "repo_url": row[2],
+                "metadata": meta,
+                "created_at": row[4],
+            }
 
 
 async def archive_old_runs(older_than_days: int = 30, keep_failed: bool = True) -> dict:
@@ -1543,7 +2064,9 @@ async def get_latest_correlation_report(app_url: str, window: str) -> dict | Non
                 "report": report,
             }
 
+
 # ── Release Policy CRUD (BLO-74) ──────────────────────────────────────────────
+
 
 async def save_policy(policy: ReleasePolicy) -> None:
     """Persist a ReleasePolicy. If is_default=True, clears the flag on all others first."""
@@ -1588,9 +2111,7 @@ async def get_policy(policy_id: str) -> ReleasePolicy | None:
 async def get_default_policy() -> ReleasePolicy | None:
     """Return the policy marked is_default=1, or None if none is saved."""
     async with aiosqlite.connect(_db_path()) as db:
-        async with db.execute(
-            "SELECT policy_json FROM release_policies WHERE is_default = 1 LIMIT 1"
-        ) as cursor:
+        async with db.execute("SELECT policy_json FROM release_policies WHERE is_default = 1 LIMIT 1") as cursor:
             row = await cursor.fetchone()
             if not row:
                 return None

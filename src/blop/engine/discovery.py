@@ -1,4 +1,5 @@
 """Inventory-first discovery: BFS crawl → Gemini planning → quality gate."""
+
 from __future__ import annotations
 
 import ast
@@ -17,6 +18,7 @@ from blop.config import (
     BLOP_SPA_SETTLE_MS,
 )
 from blop.engine.auth import resolve_storage_state_for_profile
+from blop.engine.browser_pool import BROWSER_POOL
 from blop.engine.interaction import wait_for_spa_ready
 from blop.engine.logger import get_logger
 from blop.engine.secrets import mask_text
@@ -215,14 +217,33 @@ async def _extract_page_inventory(page, url: str) -> _CrawlPageResult:
     auth_signals: list[str] = []
     business_signals: list[str] = []
     for signal in (
-        "sign in", "login", "log in", "sign up", "register", "logout",
-        "dashboard", "/auth", "/login", "/signup", "get started", "create account",
+        "sign in",
+        "login",
+        "log in",
+        "sign up",
+        "register",
+        "logout",
+        "dashboard",
+        "/auth",
+        "/login",
+        "/signup",
+        "get started",
+        "create account",
     ):
         if signal in page_text_lower and signal not in auth_signals:
             auth_signals.append(signal)
     for signal in (
-        "pricing", "contact", "integration", "oauth", "checkout",
-        "payment", "subscribe", "onboarding", "demo", "trial", "plans",
+        "pricing",
+        "contact",
+        "integration",
+        "oauth",
+        "checkout",
+        "payment",
+        "subscribe",
+        "onboarding",
+        "demo",
+        "trial",
+        "plans",
     ):
         if signal in page_text_lower and signal not in business_signals:
             business_signals.append(signal)
@@ -383,7 +404,15 @@ def _heuristic_flows_from_inventory(inventory: SiteInventory) -> list[dict]:
     unique_signals = list(dict.fromkeys(signals))
     flows: list[dict] = []
 
-    def _append_once(flow_name: str, goal: str, assertions: list[str], *, criticality: str = "other", severity: str = "medium", confidence: float = 0.62) -> None:
+    def _append_once(
+        flow_name: str,
+        goal: str,
+        assertions: list[str],
+        *,
+        criticality: str = "other",
+        severity: str = "medium",
+        confidence: float = 0.62,
+    ) -> None:
         if any(existing.get("flow_name") == flow_name for existing in flows):
             return
         flows.append(
@@ -571,7 +600,8 @@ async def _capture_page_structure(page, max_nodes: int = 50) -> list[dict]:
 
     # Tier 4: DOM query — compute effective ARIA role from HTML semantics
     try:
-        dom_nodes = await page.evaluate("""(maxNodes) => {
+        dom_nodes = await page.evaluate(
+            """(maxNodes) => {
             const TAG_ROLE = {a:'link',button:'button',select:'combobox',textarea:'textbox',h1:'heading',h2:'heading',h3:'heading'};
             const INPUT_ROLE = {checkbox:'checkbox',radio:'radio',button:'button',submit:'button',reset:'button'};
             const SELECTORS = ['a[href]','button','input:not([type="hidden"])','select','textarea','[role]','h1','h2','h3'];
@@ -605,7 +635,9 @@ async def _capture_page_structure(page, max_nodes: int = 50) -> list[dict]:
                 }
             }
             return results;
-        }""", max_nodes)
+        }""",
+            max_nodes,
+        )
         return dom_nodes or []
     except Exception:
         return []
@@ -614,8 +646,21 @@ async def _capture_page_structure(page, max_nodes: int = 50) -> list[dict]:
 def _parse_aria_snapshot_text(aria_text: str, max_nodes: int = 50) -> list[dict]:
     """Parse Playwright aria_snapshot() YAML-like text into role/name dicts."""
     import re
-    _INTERACTIVE = {"button", "link", "textbox", "checkbox", "radio", "combobox",
-                    "listbox", "menuitem", "tab", "switch", "searchbox", "spinbutton"}
+
+    _INTERACTIVE = {
+        "button",
+        "link",
+        "textbox",
+        "checkbox",
+        "radio",
+        "combobox",
+        "listbox",
+        "menuitem",
+        "tab",
+        "switch",
+        "searchbox",
+        "spinbutton",
+    }
     nodes = []
     for line in aria_text.splitlines():
         line = line.strip()
@@ -642,8 +687,6 @@ async def inventory_site(
     exclude_url_pattern: Optional[str] = None,
 ) -> SiteInventory:
     """Parallel crawl up to depth max_depth; extract buttons, links, forms, headings, and signals."""
-    from playwright.async_api import async_playwright
-
     base_origin = urlparse(app_url).netloc
     all_buttons: list[dict] = []
     all_links: list[dict] = []
@@ -662,6 +705,7 @@ async def inventory_site(
 
     try:
         from blop.storage.sqlite import get_latest_context_graph
+
         previous_graph = await get_latest_context_graph(app_url, profile_name=profile_name)
         if previous_graph:
             for node in previous_graph.nodes:
@@ -740,103 +784,97 @@ async def inventory_site(
         for discovered_url in result.discovered_urls:
             _enqueue_url(discovered_url, depth=result.depth + 1, source_url=result.url)
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+    bootstrap_lease = await BROWSER_POOL.acquire(headless=True, storage_state=storage_state)
+    browser = bootstrap_lease.browser
+    bootstrap_context = bootstrap_lease.context
+    bootstrap_page = bootstrap_lease.page
+    try:
+        bootstrap_urls = [app_url]
+        if seed_urls:
+            bootstrap_urls.extend(seed for seed in seed_urls if seed and seed != app_url)
+
         try:
-            bootstrap_urls = [app_url]
-            if seed_urls:
-                bootstrap_urls.extend(seed for seed in seed_urls if seed and seed != app_url)
-
-            bootstrap_context = await _create_crawl_context(browser, storage_state=storage_state)
-            bootstrap_page = await bootstrap_context.new_page()
-            try:
-                for bootstrap_url in bootstrap_urls:
-                    if crawled_pages >= adaptive_max_pages or not _url_allowed(bootstrap_url):
-                        continue
-                    if bootstrap_url in visited:
-                        continue
-                    visited.add(bootstrap_url)
-                    scheduled_pages += 1
-                    bootstrap_item = _CrawlWorkItem(
-                        url=bootstrap_url,
-                        depth=0,
-                        priority=1.0 if bootstrap_url == app_url else 0.9,
-                        area_key=_route_area_key(bootstrap_url),
-                        source_url=app_url,
-                    )
-                    result = await _crawl_one_page(bootstrap_page, bootstrap_item, worker_slot=0)
-                    if result.error:
-                        scheduled_pages = max(0, scheduled_pages - 1)
-                    _absorb_result(result)
-            finally:
-                try:
-                    await bootstrap_page.close()
-                except Exception:
-                    _log.debug("Failed to close bootstrap crawl page", exc_info=True)
-                try:
-                    await bootstrap_context.close()
-                except Exception:
-                    _log.debug("Failed to close bootstrap crawl context", exc_info=True)
-
-            if frontier and crawled_pages < adaptive_max_pages:
-                effective_worker_count = max(1, min(worker_count, len(frontier)))
-                active_worker_count = effective_worker_count
-                condition = asyncio.Condition()
-
-                async def worker_loop(worker_slot: int) -> None:
-                    nonlocal scheduled_pages
-                    context = await _create_crawl_context(browser, storage_state=storage_state)
-                    page = await context.new_page()
-                    try:
-                        while True:
-                            async with condition:
-                                while True:
-                                    if crawled_pages >= adaptive_max_pages and not inflight:
-                                        return
-                                    if frontier and scheduled_pages < adaptive_max_pages:
-                                        item = _choose_next_work_item(frontier, area_page_counts)
-                                        frontier_urls.discard(item.url)
-                                        inflight.add(item.url)
-                                        visited.add(item.url)
-                                        scheduled_pages += 1
-                                        break
-                                    if not frontier and not inflight:
-                                        return
-                                    await condition.wait()
-
-                            result = await _crawl_one_page(page, item, worker_slot=worker_slot)
-
-                            async with condition:
-                                inflight.discard(item.url)
-                                if result.error:
-                                    scheduled_pages = max(crawled_pages, scheduled_pages - 1)
-                                _absorb_result(result)
-                                condition.notify_all()
-                    finally:
-                        try:
-                            await page.close()
-                        except Exception:
-                            _log.debug("Failed to close crawl worker page", exc_info=True)
-                        try:
-                            await context.close()
-                        except Exception:
-                            _log.debug("Failed to close crawl worker context", exc_info=True)
-
-                await asyncio.gather(
-                    *(worker_loop(worker_slot) for worker_slot in range(1, effective_worker_count + 1))
+            for bootstrap_url in bootstrap_urls:
+                if crawled_pages >= adaptive_max_pages or not _url_allowed(bootstrap_url):
+                    continue
+                if bootstrap_url in visited:
+                    continue
+                visited.add(bootstrap_url)
+                scheduled_pages += 1
+                bootstrap_item = _CrawlWorkItem(
+                    url=bootstrap_url,
+                    depth=0,
+                    priority=1.0 if bootstrap_url == app_url else 0.9,
+                    area_key=_route_area_key(bootstrap_url),
+                    source_url=app_url,
                 )
+                result = await _crawl_one_page(bootstrap_page, bootstrap_item, worker_slot=0)
+                if result.error:
+                    scheduled_pages = max(0, scheduled_pages - 1)
+                _absorb_result(result)
         finally:
-            await browser.close()
+            try:
+                await bootstrap_lease.close()
+            except Exception:
+                _log.debug("Failed to close bootstrap crawl lease", exc_info=True)
+
+        if frontier and crawled_pages < adaptive_max_pages:
+            effective_worker_count = max(1, min(worker_count, len(frontier)))
+            active_worker_count = effective_worker_count
+            condition = asyncio.Condition()
+
+            async def worker_loop(worker_slot: int) -> None:
+                nonlocal scheduled_pages
+                context = await _create_crawl_context(browser, storage_state=storage_state)
+                page = await context.new_page()
+                try:
+                    while True:
+                        async with condition:
+                            while True:
+                                if crawled_pages >= adaptive_max_pages and not inflight:
+                                    return
+                                if frontier and scheduled_pages < adaptive_max_pages:
+                                    item = _choose_next_work_item(frontier, area_page_counts)
+                                    frontier_urls.discard(item.url)
+                                    inflight.add(item.url)
+                                    visited.add(item.url)
+                                    scheduled_pages += 1
+                                    break
+                                if not frontier and not inflight:
+                                    return
+                                await condition.wait()
+
+                        result = await _crawl_one_page(page, item, worker_slot=worker_slot)
+
+                        async with condition:
+                            inflight.discard(item.url)
+                            if result.error:
+                                scheduled_pages = max(crawled_pages, scheduled_pages - 1)
+                            _absorb_result(result)
+                            condition.notify_all()
+                finally:
+                    try:
+                        await page.close()
+                    except Exception:
+                        _log.debug("Failed to close crawl worker page", exc_info=True)
+                    try:
+                        await context.close()
+                    except Exception:
+                        _log.debug("Failed to close crawl worker context", exc_info=True)
+
+            await asyncio.gather(*(worker_loop(worker_slot) for worker_slot in range(1, effective_worker_count + 1)))
+    finally:
+        try:
+            await bootstrap_context.close()
+        except Exception:
+            pass
 
     crawl_finished = time.monotonic()
     normalized_buttons = _normalize_inventory_buttons(all_buttons)[:30]
     normalized_links = _normalize_inventory_links(all_links)[:40]
     normalized_forms = _normalize_inventory_forms(all_forms)[:10]
     normalized_headings = sorted(_dedupe_keep_order(all_headings), key=str.lower)[:20]
-    normalized_page_structures = {
-        url: page_structures[url]
-        for url in sorted(page_structures)
-    }
+    normalized_page_structures = {url: page_structures[url] for url in sorted(page_structures)}
     return SiteInventory(
         app_url=app_url,
         routes=sorted(list(all_routes))[:30],
@@ -865,36 +903,29 @@ async def get_page_structure(
     profile_name: Optional[str] = None,
 ) -> dict:
     """Capture a single-page interactive structure snapshot via Playwright accessibility tree."""
-    from playwright.async_api import async_playwright
     from blop.engine.interaction import wait_for_spa_ready
 
     storage_state = await resolve_storage_state_for_profile(profile_name, allow_auto_env=False)
     url = target_url or app_url
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        ctx_kwargs: dict = {}
-        if storage_state:
-            ctx_kwargs["storage_state"] = storage_state
-        context = await browser.new_context(**ctx_kwargs)
-        page = await context.new_page()
+    lease = await BROWSER_POOL.acquire(headless=True, storage_state=storage_state)
+    page = lease.page
+    try:
         try:
-            try:
-                await page.goto(url, wait_until="networkidle", timeout=20000)
-            except Exception:
-                await page.goto(url, timeout=20000)
-            await wait_for_spa_ready(page, settle_ms=2500, timeout_ms=15000)
-            nodes = await _capture_page_structure(page, max_nodes=80)
-            return {
-                "app_url": app_url,
-                "requested_url": url,
-                "current_url": page.url,
-                "interactive_nodes": nodes,
-                "interactive_node_count": len(nodes),
-            }
-        finally:
-            await page.close()
-            await browser.close()
+            await page.goto(url, wait_until="networkidle", timeout=20000)
+        except Exception:
+            await page.goto(url, timeout=20000)
+        await wait_for_spa_ready(page, settle_ms=2500, timeout_ms=15000)
+        nodes = await _capture_page_structure(page, max_nodes=80)
+        return {
+            "app_url": app_url,
+            "requested_url": url,
+            "current_url": page.url,
+            "interactive_nodes": nodes,
+            "interactive_node_count": len(nodes),
+        }
+    finally:
+        await lease.close()
 
 
 async def plan_flows_from_inventory(
@@ -904,8 +935,8 @@ async def plan_flows_from_inventory(
     include_meta: bool = False,
 ) -> list[dict] | tuple[list[dict], dict]:
     """Send inventory to LLM with DISCOVER_PROMPT and return typed flows."""
+    from blop.engine.llm_factory import make_message, make_planning_llm
     from blop.prompts import DISCOVER_PROMPT
-    from blop.engine.llm_factory import make_planning_llm, make_message
 
     provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
     fallback_meta = {"planning_fallback": False, "planning_error": None}
@@ -945,13 +976,14 @@ async def plan_flows_from_inventory(
         archetype_str = ""
         try:
             from blop.engine.context_graph import detect_app_archetype
+
             archetype_str = detect_app_archetype(inventory)
         except Exception:
             _log.debug("Failed to detect app archetype for thinking budget", exc_info=True)
         if archetype_str in ("editor_heavy", "checkout_heavy") or len(inventory.routes) > 12:
             llm_kwargs["thinking_budget"] = thinking_budget
 
-    llm = make_planning_llm(**llm_kwargs)
+    llm = make_planning_llm(**llm_kwargs, role="planner")
     inventory_text = json.dumps(inventory.to_dict(), separators=(",", ":"))
 
     extra_context = ""
@@ -1011,14 +1043,11 @@ def quality_gate_flows(inventory: SiteInventory, flows: list[dict]) -> tuple[boo
     if inventory.auth_signals:
         auth_kws = {"login", "auth", "signin", "signup", "register", "sign_in", "sign_up"}
         has_auth_flow = any(
-            any(kw in f.get("flow_name", "").lower() or kw in f.get("goal", "").lower()
-                for kw in auth_kws)
+            any(kw in f.get("flow_name", "").lower() or kw in f.get("goal", "").lower() for kw in auth_kws)
             for f in flows
         )
         if not has_auth_flow:
-            warnings.append(
-                f"Auth signals detected ({inventory.auth_signals[:3]}) but no auth flow proposed"
-            )
+            warnings.append(f"Auth signals detected ({inventory.auth_signals[:3]}) but no auth flow proposed")
 
     # Confidence gate
     confidences = [f.get("confidence", 0.5) for f in flows]
@@ -1053,6 +1082,7 @@ async def discover_flows(
     )
     try:
         from blop.storage.sqlite import save_site_inventory
+
         await save_site_inventory(app_url, inventory.to_dict())
     except Exception:
         _log.debug("Failed to save site inventory in discover_flows", exc_info=True)
@@ -1079,17 +1109,10 @@ async def discover_flows(
         diff_context_graph,
         get_context_graph_summary,
     )
-    from blop.storage.sqlite import get_flow, get_latest_context_graph, list_flows, save_context_graph
+    from blop.storage.sqlite import get_latest_context_graph, list_flows_full, save_context_graph
 
     previous_graph = await get_latest_context_graph(app_url, profile_name=profile_name)
-    flow_refs = await list_flows()
-    recorded_flows = []
-    for flow_ref in flow_refs:
-        if flow_ref.get("app_url") != app_url:
-            continue
-        flow_obj = await get_flow(flow_ref["flow_id"])
-        if flow_obj is not None:
-            recorded_flows.append(flow_obj)
+    recorded_flows = await list_flows_full(app_url=app_url)
     current_graph = build_context_graph(
         app_url=app_url,
         inventory=inventory,
@@ -1157,6 +1180,7 @@ async def explore_site_inventory(
     )
     try:
         from blop.storage.sqlite import save_site_inventory
+
         await save_site_inventory(app_url, inventory.to_dict())
     except Exception:
         _log.debug("Failed to save site inventory in explore_site_inventory", exc_info=True)
@@ -1194,7 +1218,7 @@ async def _flows_from_repo(
     if not files:
         files = glob_module.glob(os.path.join(repo_path, "**/*.{ts,tsx,js,jsx}"), recursive=True)[:30]
 
-    from blop.engine.llm_factory import make_planning_llm, make_message
+    from blop.engine.llm_factory import make_message, make_planning_llm
 
     provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
     has_key = (
@@ -1205,7 +1229,7 @@ async def _flows_from_repo(
     if not files or not has_key:
         return await plan_flows_from_inventory(inventory, business_goal=business_goal)
 
-    llm = make_planning_llm(temperature=0.7, max_output_tokens=2000)
+    llm = make_planning_llm(temperature=0.7, max_output_tokens=2000, role="planner")
     file_list = "\n".join(files[:50])
     extra = f"\nBusiness goal: {business_goal}" if business_goal else ""
 

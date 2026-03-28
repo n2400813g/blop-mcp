@@ -1,4 +1,5 @@
 """Security scanning MCP tool wrappers."""
+
 from __future__ import annotations
 
 import ipaddress
@@ -18,6 +19,7 @@ async def security_scan(
         return {"error": f"Unsupported scan type: {scan_type}. Use 'semgrep'."}
 
     from blop.engine.security import run_semgrep_scan
+
     return await run_semgrep_scan(
         repo_path=repo_path,
         ruleset=ruleset,
@@ -63,4 +65,5 @@ async def security_scan_url(
             return {"error": f"Refusing to scan non-public address: {ip}"}
 
     from blop.engine.security import scan_http_headers
+
     return await scan_http_headers(app_url)

@@ -42,8 +42,10 @@ Documentation = "https://github.com/n2400813g/blop-mcp/blob/main/README.md"
 [project.optional-dependencies]
 dev = [
   "build>=1.2.2",
+  "pre-commit>=4.0",
   "pytest>=7.0",
   "pytest-asyncio>=0.21",
+  "ruff>=0.9",
   "twine>=5.1.1",
 ]
 anthropic = [
@@ -82,10 +84,14 @@ include = ["blop*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Opt-in real Appium/device tests: pytest tests/ -m mobile …
+# (Cloud BLOP_MOBILE_PROVIDER still needs a matching vendor device pool.)
+addopts = ["-m", "not mobile"]
 markers = [
   "happy_path: end-to-end release confidence workflow tests",
   "slow: slower browser or network-backed tests",
   "integration: tests that require external services or a real browser runtime",
+  "network: tests that touch the public internet",
   "mobile: tests that require Appium server + iOS simulator or Android emulator",
 ]
 
@@ -103,3 +109,13 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 ignore = ["E501"]
+
+# Deferred imports after env/bootstrap (logging suppression, test env).
+[tool.ruff.lint.per-file-ignores]
+"src/blop/server.py" = ["E402"]
+"src/blop/engine/regression.py" = ["E402"]
+"src/blop/engine/discovery.py" = ["E402"]
+"tests/integration/test_mobile_dvia_ios.py" = ["E402"]
+"tests/integration/test_mobile_sauce_android.py" = ["E402"]
+"tests/test_mobile_selector.py" = ["E402"]
+"tests/test_sqlite_integration.py" = ["E402"]

@@ -1,11 +1,10 @@
 """Tests for make_planning_llm, make_agent_llm, and make_message from blop.engine.llm_factory."""
+
 from __future__ import annotations
 
 import os
 import sys
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from blop.engine import llm_factory
 
@@ -55,7 +54,9 @@ def test_planning_llm_openai():
 def test_planning_llm_model_override():
     """make_planning_llm uses BLOP_LLM_MODEL override when set."""
     mock_chat_google = MagicMock()
-    with patch.dict(os.environ, {"BLOP_LLM_PROVIDER": "google", "BLOP_LLM_MODEL": "custom-model", "GOOGLE_API_KEY": "key"}):
+    with patch.dict(
+        os.environ, {"BLOP_LLM_PROVIDER": "google", "BLOP_LLM_MODEL": "custom-model", "GOOGLE_API_KEY": "key"}
+    ):
         with patch("browser_use.llm.ChatGoogle", mock_chat_google):
             llm_factory.make_planning_llm(temperature=0.3, max_output_tokens=2000)
     call_kwargs = mock_chat_google.call_args[1]
@@ -71,6 +72,41 @@ def test_agent_llm_google():
     mock_chat_google.assert_called_once()
     call_kwargs = mock_chat_google.call_args[1]
     assert call_kwargs["model"] == "gemini-2.5-flash"
+
+
+def test_planning_llm_role_specific_override():
+    """Role-specific overrides win over the generic BLOP_LLM_MODEL fallback."""
+    mock_chat_google = MagicMock()
+    with patch.dict(
+        os.environ,
+        {
+            "BLOP_LLM_PROVIDER": "google",
+            "GOOGLE_API_KEY": "key",
+            "BLOP_LLM_MODEL": "generic-model",
+            "BLOP_PLANNER_LLM_MODEL": "planner-model",
+        },
+    ):
+        with patch("browser_use.llm.ChatGoogle", mock_chat_google):
+            llm_factory.make_planning_llm(role="planner", temperature=0.1, max_output_tokens=256)
+    call_kwargs = mock_chat_google.call_args[1]
+    assert call_kwargs["model"] == "planner-model"
+
+
+def test_agent_llm_role_specific_override():
+    """Agent role override is respected without affecting other roles."""
+    mock_chat_google = MagicMock()
+    with patch.dict(
+        os.environ,
+        {
+            "BLOP_LLM_PROVIDER": "google",
+            "GOOGLE_API_KEY": "key",
+            "BLOP_AGENT_LLM_MODEL": "agent-model",
+        },
+    ):
+        with patch("browser_use.llm.ChatGoogle", mock_chat_google):
+            llm_factory.make_agent_llm(role="agent")
+    call_kwargs = mock_chat_google.call_args[1]
+    assert call_kwargs["model"] == "agent-model"
 
 
 def test_make_message_google():

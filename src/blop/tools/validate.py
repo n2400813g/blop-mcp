@@ -1,4 +1,5 @@
 """validate_setup tool — checks all preconditions before the user runs anything."""
+
 from __future__ import annotations
 
 import os
@@ -216,24 +217,31 @@ async def validate_setup(
     chromium_ok = False
     try:
         from playwright.async_api import async_playwright
+
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             await browser.close()
         chromium_ok = True
-    except Exception as exc:
+    except Exception:
         chromium_ok = False
-        err = str(exc)
 
     if chromium_ok:
         checks.append({"name": "chromium_installed", "passed": True, "message": "Chromium launches successfully"})
     else:
-        checks.append({"name": "chromium_installed", "passed": False, "message": "Chromium not found — run: playwright install chromium"})
+        checks.append(
+            {
+                "name": "chromium_installed",
+                "passed": False,
+                "message": "Chromium not found — run: playwright install chromium",
+            }
+        )
         blockers.append("Chromium not installed. Run: playwright install chromium")
 
     # 3. SQLite DB accessible
     db_ok = False
     try:
         from blop.storage.sqlite import init_db
+
         await init_db()
         db_ok = True
     except Exception as exc:
@@ -298,21 +306,37 @@ async def validate_setup(
         else:
             try:
                 import urllib.request
+
                 req = urllib.request.Request(app_url, headers={"User-Agent": "blop-validate/1.0"})
                 with urllib.request.urlopen(req, timeout=10) as resp:
-                    checks.append({"name": "app_url_reachable", "passed": True, "message": f"{app_url} responded with HTTP {resp.status}"})
+                    checks.append(
+                        {
+                            "name": "app_url_reachable",
+                            "passed": True,
+                            "message": f"{app_url} responded with HTTP {resp.status}",
+                        }
+                    )
             except Exception as exc:
-                checks.append({"name": "app_url_reachable", "passed": False, "message": f"{app_url} not reachable: {exc}"})
+                checks.append(
+                    {"name": "app_url_reachable", "passed": False, "message": f"{app_url} not reachable: {exc}"}
+                )
                 warnings.append(f"app_url {app_url!r} is not reachable. Ensure the app is running.")
 
     # 5. Auth profile valid (optional)
     if profile_name:
         try:
-            from blop.storage.sqlite import get_auth_profile
             from blop.engine.auth import resolve_storage_state_for_profile, validate_auth_session
+            from blop.storage.sqlite import get_auth_profile
+
             profile = await get_auth_profile(profile_name)
             if profile is None:
-                checks.append({"name": "auth_profile", "passed": False, "message": f"Profile '{profile_name}' not found — run save_auth_profile first"})
+                checks.append(
+                    {
+                        "name": "auth_profile",
+                        "passed": False,
+                        "message": f"Profile '{profile_name}' not found — run save_auth_profile first",
+                    }
+                )
                 warnings.append(f"Auth profile '{profile_name}' not found")
             else:
                 state = await resolve_storage_state_for_profile(
@@ -321,18 +345,42 @@ async def validate_setup(
                     profile=profile,
                 )
                 if not state:
-                    checks.append({"name": "auth_profile", "passed": False, "message": f"Profile '{profile_name}' could not resolve storage state"})
+                    checks.append(
+                        {
+                            "name": "auth_profile",
+                            "passed": False,
+                            "message": f"Profile '{profile_name}' could not resolve storage state",
+                        }
+                    )
                     warnings.append(f"Auth profile '{profile_name}' exists but storage state could not be resolved")
                 elif profile.auth_type == "storage_state" and app_url:
                     # Validate the session is still live, not just that the file exists
                     session_valid = await validate_auth_session(state, app_url)
                     if session_valid:
-                        checks.append({"name": "auth_profile", "passed": True, "message": f"Profile '{profile_name}' resolved and session is active"})
+                        checks.append(
+                            {
+                                "name": "auth_profile",
+                                "passed": True,
+                                "message": f"Profile '{profile_name}' resolved and session is active",
+                            }
+                        )
                     else:
-                        checks.append({"name": "auth_profile", "passed": False, "message": f"Profile '{profile_name}' storage state exists but session has expired — re-run capture_auth_session"})
+                        checks.append(
+                            {
+                                "name": "auth_profile",
+                                "passed": False,
+                                "message": f"Profile '{profile_name}' storage state exists but session has expired — re-run capture_auth_session",
+                            }
+                        )
                         warnings.append(f"Auth session for '{profile_name}' has expired")
                 else:
-                    checks.append({"name": "auth_profile", "passed": True, "message": f"Profile '{profile_name}' resolved successfully"})
+                    checks.append(
+                        {
+                            "name": "auth_profile",
+                            "passed": True,
+                            "message": f"Profile '{profile_name}' resolved successfully",
+                        }
+                    )
         except Exception as exc:
             checks.append({"name": "auth_profile", "passed": False, "message": f"Auth profile check failed: {exc}"})
             warnings.append(f"Auth profile validation error: {exc}")
@@ -341,19 +389,21 @@ async def validate_setup(
     if check_mobile:
         try:
             from blop.engine.mobile.driver import check_appium_reachable
+
             appium_ok, appium_msg = await check_appium_reachable()
             checks.append({"name": "appium_server", "passed": appium_ok, "message": appium_msg})
             if not appium_ok:
                 warnings.append(
-                    f"Appium server not reachable: {appium_msg}. "
-                    "Start it with: appium (requires npm install -g appium)"
+                    f"Appium server not reachable: {appium_msg}. Start it with: appium (requires npm install -g appium)"
                 )
         except ImportError:
-            checks.append({
-                "name": "appium_server",
-                "passed": False,
-                "message": "Mobile extra not installed — run: pip install blop-mcp[mobile]",
-            })
+            checks.append(
+                {
+                    "name": "appium_server",
+                    "passed": False,
+                    "message": "Mobile extra not installed — run: pip install blop-mcp[mobile]",
+                }
+            )
             warnings.append("Mobile extra not installed. Run: pip install blop-mcp[mobile]")
 
     if blockers:
@@ -372,7 +422,9 @@ async def validate_setup(
             elif "Chromium" in blocker:
                 suggested_next_steps.append("Install Chromium: playwright install chromium")
             elif "SQLite" in blocker or "database" in blocker.lower():
-                suggested_next_steps.append("Fix DB: ensure .blop/ directory is writable (mkdir -p .blop && chmod 755 .blop)")
+                suggested_next_steps.append(
+                    "Fix DB: ensure .blop/ directory is writable (mkdir -p .blop && chmod 755 .blop)"
+                )
             else:
                 suggested_next_steps.append(f"Fix blocker: {blocker}")
     elif status == "ready":
@@ -382,26 +434,16 @@ async def validate_setup(
                 "Re-capture auth session: capture_auth_session(login_url='https://your-app.com/login', profile_name='your_profile')"
             )
         if not app_url:
-            suggested_next_steps.append(
-                "Verify your app is reachable: validate_setup(app_url='https://your-app.com')"
-            )
+            suggested_next_steps.append("Verify your app is reachable: validate_setup(app_url='https://your-app.com')")
         else:
             if not profile_name:
                 suggested_next_steps.append(
                     "If your app requires login: capture_auth_session(login_url='https://your-app.com/login', profile_name='default')"
                 )
-            suggested_next_steps.append(
-                f"Discover test flows: discover_test_flows(app_url='{app_url}')"
-            )
-            suggested_next_steps.append(
-                "Record a flow: record_test_flow(app_url='...', flow_name='...', goal='...')"
-            )
-            suggested_next_steps.append(
-                "Run regression: run_regression_test(app_url='...', flow_ids=['...'])"
-            )
-            suggested_next_steps.append(
-                "Get results: get_test_results(run_id='...')"
-            )
+            suggested_next_steps.append(f"Discover test flows: discover_test_flows(app_url='{app_url}')")
+            suggested_next_steps.append("Record a flow: record_test_flow(app_url='...', flow_name='...', goal='...')")
+            suggested_next_steps.append("Run regression: run_regression_test(app_url='...', flow_ids=['...'])")
+            suggested_next_steps.append("Get results: get_test_results(run_id='...')")
     # Mobile-specific guidance
     if check_mobile:
         appium_failed = any(not c.get("passed") for c in checks if c.get("name") == "appium_server")
@@ -466,12 +508,10 @@ async def validate_release_setup(
             canonical_steps.append(
                 f"Review release-critical journey coverage: discover_critical_journeys(app_url='{app_url}')"
             )
-            canonical_steps.append(
-                "Inspect the recorded release-gating journey inventory: read blop://journeys"
-            )
+            canonical_steps.append("Inspect the recorded release-gating journey inventory: read blop://journeys")
         if profile_name:
             canonical_steps.append(
-                f"Re-check blocker evidence after auth issues are fixed: triage_release_blocker(release_id='...', run_id='...')"
+                "Re-check blocker evidence after auth issues are fixed: triage_release_blocker(release_id='...', run_id='...')"
             )
         else:
             canonical_steps.append(
@@ -479,9 +519,7 @@ async def validate_release_setup(
             )
     else:
         if app_url:
-            canonical_steps.append(
-                f"Discover critical journeys: discover_critical_journeys(app_url='{app_url}')"
-            )
+            canonical_steps.append(f"Discover critical journeys: discover_critical_journeys(app_url='{app_url}')")
             canonical_steps.append("Review recorded release-gating journeys: read blop://journeys")
             canonical_steps.append(
                 "If a release-gating journey is missing, record it with record_test_flow(app_url='...', flow_name='...', goal='...', business_criticality='revenue')"

@@ -5,13 +5,13 @@ Controlled by BLOP_SNAPSHOT_MODE env var:
   - "incremental" : diff against the previous snapshot and send only changed nodes
   - "none"        : skip snapshot entirely (fastest, least context)
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
 import os
 from typing import Optional
-
 
 _SNAPSHOT_MODE = os.getenv("BLOP_SNAPSHOT_MODE", "full").lower()
 
@@ -70,11 +70,7 @@ class SnapshotTracker:
     @staticmethod
     def _node_discriminator_hash(node: dict) -> str:
         """Build a stable short hash from non-key fields for duplicate disambiguation."""
-        discriminator_payload = {
-            k: node[k]
-            for k in sorted(node.keys())
-            if k not in {"id", "ref", "role", "name"}
-        }
+        discriminator_payload = {k: node[k] for k in sorted(node.keys()) if k not in {"id", "ref", "role", "name"}}
         serialized = json.dumps(
             discriminator_payload,
             sort_keys=True,
@@ -89,11 +85,7 @@ class SnapshotTracker:
         for node in current_nodes:
             id_val = node.get("id")
             stable_id = id_val if id_val is not None else node.get("ref")
-            id_part = (
-                str(stable_id)
-                if stable_id
-                else f"hash:{self._stable_node_id_hash(node)}"
-            )
+            id_part = str(stable_id) if stable_id else f"hash:{self._stable_node_id_hash(node)}"
             base_key = f"{node.get('role', '')}::{node.get('name', '')}::{id_part}"
             discriminator_hash = self._node_discriminator_hash(node)
             key = f"{base_key}::hash:{discriminator_hash}"
@@ -109,11 +101,7 @@ class SnapshotTracker:
             if prev is None or prev != node:
                 delta.append(node)
 
-        removed = [
-            {**self._previous_nodes[k], "_removed": True}
-            for k in self._previous_nodes
-            if k not in current_map
-        ]
+        removed = [{**self._previous_nodes[k], "_removed": True} for k in self._previous_nodes if k not in current_map]
         delta.extend(removed)
 
         self._previous_nodes = current_map

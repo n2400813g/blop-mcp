@@ -1,4 +1,5 @@
 """Tests for tools/record.py."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
@@ -64,7 +65,7 @@ async def test_record_flow_happy_path():
     assert saved_flow.business_criticality == "other"
     assert saved_flow.entry_url == "https://example.com"
     assert saved_flow.assertions_json
-    assert all(step.action == "assert" for step in saved_flow.steps[-len(saved_flow.assertions_json):])
+    assert all(step.action == "assert" for step in saved_flow.steps[-len(saved_flow.assertions_json) :])
 
 
 @pytest.mark.asyncio
@@ -119,20 +120,25 @@ async def test_record_flow_refreshes_existing_journey_metadata():
     with patch("blop.tools.record.recording.record_flow", mock_record_flow):
         with patch("blop.tools.record.sqlite.save_flow", mock_save_flow):
             with patch("blop.tools.record.sqlite.get_auth_profile", AsyncMock(return_value=None)):
-                with patch("blop.tools.record.sqlite.list_flows", new_callable=AsyncMock, return_value=existing):
-                    with patch("blop.tools.record.file_store.artifacts_dir", return_value="/tmp/runs/f1"):
-                        with patch("blop.engine.context_graph.detect_app_archetype", return_value="saas_app"):
-                            with patch("blop.engine.context_graph.editor_hints_from_archetype", return_value={}):
-                                with patch(
-                                    "blop.tools.record.auth_engine.auto_storage_state_from_env",
-                                    new=AsyncMock(return_value=None),
-                                ):
-                                    result = await record_test_flow(
-                                        app_url="https://example.com",
-                                        flow_name="checkout",
-                                        goal="Complete checkout",
-                                        business_criticality="revenue",
-                                    )
+                with patch(
+                    "blop.tools.record.sqlite.find_flow_by_url_and_name",
+                    new_callable=AsyncMock,
+                    return_value=existing[0],
+                ):
+                    with patch("blop.tools.record.sqlite.list_flows", new_callable=AsyncMock, return_value=existing):
+                        with patch("blop.tools.record.file_store.artifacts_dir", return_value="/tmp/runs/f1"):
+                            with patch("blop.engine.context_graph.detect_app_archetype", return_value="saas_app"):
+                                with patch("blop.engine.context_graph.editor_hints_from_archetype", return_value={}):
+                                    with patch(
+                                        "blop.tools.record.auth_engine.auto_storage_state_from_env",
+                                        new=AsyncMock(return_value=None),
+                                    ):
+                                        result = await record_test_flow(
+                                            app_url="https://example.com",
+                                            flow_name="checkout",
+                                            goal="Complete checkout",
+                                            business_criticality="revenue",
+                                        )
 
     assert result["refresh_summary"]["refresh_detected"] is True
     assert result["refresh_summary"]["previous_flow_id"] == "flow-old"
@@ -216,7 +222,10 @@ async def test_record_flow_uses_goal_url_as_entry_url_and_plan_anchor():
     assert saved_flow.entry_url == "https://testpages.eviltester.com/pages/input-elements/text-inputs/"
     assert saved_flow.intent_contract is not None
     assert saved_flow.intent_contract.target_surface == "public_site"
-    assert "https://testpages.eviltester.com/pages/input-elements/text-inputs/" in saved_flow.intent_contract.expected_url_patterns
+    assert (
+        "https://testpages.eviltester.com/pages/input-elements/text-inputs/"
+        in saved_flow.intent_contract.expected_url_patterns
+    )
     assert saved_flow.steps[-1].action == "assert"
     assert any(
         step.structured_assertion and step.structured_assertion.assertion_type == "url_contains"

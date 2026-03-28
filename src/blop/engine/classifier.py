@@ -1,14 +1,13 @@
 """Severity labelling: deterministic rules first, Gemini LLM fallback."""
+
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Optional
 
 from blop.engine.secrets import mask_text
 from blop.schemas import FailureCase
-
 
 # ---------------------------------------------------------------------------
 # Deterministic severity scoring
@@ -66,20 +65,20 @@ def classify_failure_class(case: FailureCase) -> tuple[Optional[str], float]:
         return "test_fragility", 0.81
 
     # Test fragility: selector/timeout failure on an SPA-navigation goal
-    error_text = " ".join([
-        case.raw_result.lower(),
-        *[r.lower() for r in case.repro_steps],
-        *[e.lower() for e in case.console_errors[:5]],
-    ])
+    error_text = " ".join(
+        [
+            case.raw_result.lower(),
+            *[r.lower() for r in case.repro_steps],
+            *[e.lower() for e in case.console_errors[:5]],
+        ]
+    )
     if any(kw in error_text for kw in _DOM_FRAGILITY_KEYWORDS):
         return "test_fragility", 0.80
     has_timeout_error = any(kw in error_text for kw in _SPA_TIMEOUT_KEYWORDS)
     has_spa_goal = any(kw in case.flow_name.lower() for kw in _SPA_GOAL_KEYWORDS)
     # Failure very early in a hybrid replay = navigation/loading issue, not product bug
     early_hybrid_fail = (
-        case.replay_mode == "hybrid_repair"
-        and case.step_failure_index is not None
-        and case.step_failure_index <= 2
+        case.replay_mode == "hybrid_repair" and case.step_failure_index is not None and case.step_failure_index <= 2
     )
     if (has_timeout_error and has_spa_goal) or early_hybrid_fail:
         return "test_fragility", 0.78
@@ -128,10 +127,7 @@ def classify_failure_deterministic(case: FailureCase) -> Optional[str]:
         return "blocker"
 
     # 4. HTTP 5xx
-    network_5xx = any(
-        err.startswith(("5", "500", "502", "503", "504"))
-        for err in case.network_errors
-    )
+    network_5xx = any(err.startswith(("5", "500", "502", "503", "504")) for err in case.network_errors)
     if network_5xx:
         return "blocker"
 
@@ -166,8 +162,18 @@ def classify_failure_deterministic(case: FailureCase) -> Optional[str]:
 # LLM-assisted classification
 # ---------------------------------------------------------------------------
 
+
 async def classify_case(case: FailureCase, url: str) -> FailureCase:
     """Assign severity, failure_class, and repro_steps. Deterministic rules first; Gemini fallback."""
+    # Mobile replay sets severity, failure_class, and evidence in the Appium engine — do not
+    # re-run web-centric deterministic rules that would overwrite (e.g. medium vs high).
+    if case.platform in ("ios", "android"):
+        if case.failure_class is None:
+            inferred_class, inferred_conf = classify_failure_class(case)
+            case.failure_class = inferred_class
+            case.failure_class_confidence = inferred_conf
+        return case
+
     # Always classify root cause
     if case.failure_class is None:
         inferred_class, inferred_conf = classify_failure_class(case)
@@ -181,14 +187,15 @@ async def classify_case(case: FailureCase, url: str) -> FailureCase:
         return case
 
     from blop.config import check_llm_api_key
+
     has_key, _ = check_llm_api_key()
     if not has_key:
         case.severity = "medium" if case.status == "fail" else "high"
         return case
 
-    from blop.engine.llm_factory import make_planning_llm, make_message
+    from blop.engine.llm_factory import make_message, make_planning_llm
 
-    llm = make_planning_llm(temperature=0.1, max_output_tokens=400)
+    llm = make_planning_llm(temperature=0.1, max_output_tokens=400, role="classifier")
     console_text = "\n".join(case.console_errors[:3]) or "none"
     network_text = "\n".join(case.network_errors[:3]) or "none"
     assertion_text = "\n".join(case.assertion_failures[:3]) or "none"
@@ -249,13 +256,12 @@ async def classify_run(cases: list[FailureCase], url: str) -> dict:
     next_actions: list[str] = []
 
     from blop.config import check_llm_api_key
+
     has_key, _ = check_llm_api_key()
     if failed and has_key:
         next_actions = await _generate_next_actions(failed, url)
 
-    severity_counts: dict[str, int] = {
-        "blocker": 0, "high": 0, "medium": 0, "low": 0, "none": 0, "pass": 0, "error": 0
-    }
+    severity_counts: dict[str, int] = {"blocker": 0, "high": 0, "medium": 0, "low": 0, "none": 0, "pass": 0, "error": 0}
     for c in cases:
         if c.status == "pass":
             severity_counts["pass"] = severity_counts.get("pass", 0) + 1
@@ -273,13 +279,14 @@ async def classify_run(cases: list[FailureCase], url: str) -> dict:
 
 async def _generate_next_actions(failed_cases: list[FailureCase], url: str) -> list[str]:
     from blop.config import check_llm_api_key
+
     has_key, _ = check_llm_api_key()
     if not has_key:
         return []
 
-    from blop.engine.llm_factory import make_planning_llm, make_message
+    from blop.engine.llm_factory import make_message, make_planning_llm
 
-    llm = make_planning_llm(temperature=0.3, max_output_tokens=300)
+    llm = make_planning_llm(temperature=0.3, max_output_tokens=300, role="summary")
 
     # Build a summary of failed cases
     failures_text = "\n".join(

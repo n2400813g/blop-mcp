@@ -43,7 +43,7 @@ def detect_app_archetype(inventory: SiteInventory) -> str:
     text = " ".join(
         inventory.headings
         + [b.get("text", "") for b in inventory.buttons]
-        + [l.get("text", "") for l in inventory.links]
+        + [link.get("text", "") for link in inventory.links]
         + inventory.routes
     ).lower()
 
@@ -160,7 +160,8 @@ def _build_journey_summaries(
         entry_route = _normalize_path(flow.get("starting_url") or flow.get("entry_url") or app_url)
         business_criticality = flow.get("business_criticality") or "other"
         auth_required = bool(profile_name) and any(
-            token in entry_route.lower() for token in ("dashboard", "settings", "billing", "workspace", "project", "checkout")
+            token in entry_route.lower()
+            for token in ("dashboard", "settings", "billing", "workspace", "project", "checkout")
         )
         confidence = float(flow.get("confidence", 0.82 if source_kind == "recorded_flow" else 0.62))
         confidence_reason = (
@@ -254,7 +255,9 @@ def _build_route_surfaces(
     return route_surfaces
 
 
-def _auth_boundary_summary(route_surfaces: list[dict], journeys: list[JourneySummary], profile_name: str | None) -> AuthBoundarySummary:
+def _auth_boundary_summary(
+    route_surfaces: list[dict], journeys: list[JourneySummary], profile_name: str | None
+) -> AuthBoundarySummary:
     anonymous = sum(1 for route in route_surfaces if route["auth_likelihood"] == "anonymous")
     authenticated = sum(1 for route in route_surfaces if route["auth_likelihood"] == "authenticated")
     mixed = sum(1 for route in route_surfaces if route["auth_likelihood"] == "mixed")
@@ -267,7 +270,9 @@ def _auth_boundary_summary(route_surfaces: list[dict], journeys: list[JourneySum
     )
 
 
-def _decision_summary(route_surfaces: list[dict], journeys: list[JourneySummary], profile_name: str | None) -> ContextGraphSummary:
+def _decision_summary(
+    route_surfaces: list[dict], journeys: list[JourneySummary], profile_name: str | None
+) -> ContextGraphSummary:
     critical_journeys = [journey for journey in journeys if journey.business_criticality in CRITICAL_JOURNEY_TYPES]
     covered_critical = [journey for journey in critical_journeys if journey.coverage_status == "recorded"]
     uncovered_critical = [journey.label for journey in critical_journeys if journey.coverage_status != "recorded"]
@@ -332,7 +337,9 @@ def build_context_graph(
                 metadata={
                     "goal": journey.goal,
                     "business_criticality": journey.business_criticality,
-                    "severity_if_broken": "blocker" if journey.business_criticality in CRITICAL_JOURNEY_TYPES else "high",
+                    "severity_if_broken": "blocker"
+                    if journey.business_criticality in CRITICAL_JOURNEY_TYPES
+                    else "high",
                     "journey_key": journey.journey_key,
                     "auth_required": journey.auth_required,
                     "entry_routes": journey.entry_routes,
@@ -389,7 +396,9 @@ def build_context_graph(
             "inventory_routes": len(inventory.routes),
             "inventory_forms": len(inventory.forms),
             "flow_count": len(flows),
-            "recorded_flow_count": len([flow for flow in recorded_flows or [] if _flow_access(flow).get("app_url") == app_url]),
+            "recorded_flow_count": len(
+                [flow for flow in recorded_flows or [] if _flow_access(flow).get("app_url") == app_url]
+            ),
             "route_surfaces": route_surfaces,
             "journeys": [journey.model_dump() for journey in journeys],
             "decision_summary": summary.model_dump(),
@@ -573,8 +582,27 @@ def get_impacted_journeys(
     limit: int = 5,
 ) -> list[ImpactedJourney]:
     stopwords = {
-        "src", "app", "lib", "pages", "components", "utils", "js", "ts", "tsx", "jsx",
-        "index", "test", "spec", "stories", "style", "css", "scss", "mod", "pkg", "go", "py",
+        "src",
+        "app",
+        "lib",
+        "pages",
+        "components",
+        "utils",
+        "js",
+        "ts",
+        "tsx",
+        "jsx",
+        "index",
+        "test",
+        "spec",
+        "stories",
+        "style",
+        "css",
+        "scss",
+        "mod",
+        "pkg",
+        "go",
+        "py",
     }
     changed_segments: list[str] = []
     for path in changed_files:
@@ -601,10 +629,7 @@ def get_impacted_journeys(
     for journey in journeys:
         route_text = " ".join(journey.entry_routes).lower()
         label_text = f"{journey.label} {journey.goal}".lower()
-        matched_segments = [
-            segment for segment in changed_segments
-            if segment in route_text or segment in label_text
-        ]
+        matched_segments = [segment for segment in changed_segments if segment in route_text or segment in label_text]
         if not matched_segments:
             continue
         match_score = float(len(matched_segments))
@@ -691,14 +716,20 @@ def build_impact_summary(
     out: list[ContextImpactSummary] = []
     for criticality in lens:
         changed = [
-            name for name in release_scope.changed_journeys
+            name
+            for name in release_scope.changed_journeys
             if current_journeys.get(name) and current_journeys[name].business_criticality == criticality
         ]
         uncovered = [
-            name for name in release_scope.newly_uncovered_journeys
+            name
+            for name in release_scope.newly_uncovered_journeys
             if current_journeys.get(name) and current_journeys[name].business_criticality == criticality
         ]
-        score = (len(changed) * 18.0) + (len(uncovered) * 22.0) + (10.0 if release_scope.auth_boundary_changed and criticality in CRITICAL_JOURNEY_TYPES else 0.0)
+        score = (
+            (len(changed) * 18.0)
+            + (len(uncovered) * 22.0)
+            + (10.0 if release_scope.auth_boundary_changed and criticality in CRITICAL_JOURNEY_TYPES else 0.0)
+        )
         risk_level = "blocker" if score >= 70 else "high" if score >= 40 else "medium" if score >= 15 else "low"
         out.append(
             ContextImpactSummary(

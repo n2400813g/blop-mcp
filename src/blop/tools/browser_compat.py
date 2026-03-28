@@ -1,4 +1,5 @@
 """Playwright-MCP-compatible browser_* tool wrappers for blop."""
+
 from __future__ import annotations
 
 from typing import Literal, Optional
@@ -166,9 +167,7 @@ async def browser_file_upload(paths: Optional[list[str]] = None) -> dict:
     return await SESSION_MANAGER.file_upload(paths)
 
 
-async def browser_tabs(
-    action: Literal["list", "new", "select", "close"], index: Optional[int] = None
-) -> dict:
+async def browser_tabs(action: Literal["list", "new", "select", "close"], index: Optional[int] = None) -> dict:
     """Manage tabs by listing, creating, selecting, or closing.
 
     Args:
@@ -325,8 +324,7 @@ async def browser_route(
                 continue
             if ":" not in value:
                 raise ValueError(
-                    "browser_route headers must use 'Key: Value' format; "
-                    f"got invalid entry at index {idx}: {header!r}"
+                    f"browser_route headers must use 'Key: Value' format; got invalid entry at index {idx}: {header!r}"
                 )
             key, _ = value.split(":", 1)
             if not key.strip():
@@ -590,4 +588,3 @@ async def browser_sessionstorage_clear() -> dict:
         A tool response payload describing clear status.
     """
     return await SESSION_MANAGER.sessionstorage_clear()
-

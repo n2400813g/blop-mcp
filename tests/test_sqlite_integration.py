@@ -2,9 +2,9 @@
 
 These tests exercise the actual SQL queries and migrations — no mocking.
 """
+
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 import uuid
@@ -22,10 +22,7 @@ from blop.schemas import (
     FlowStep,
     IncidentCluster,
     RecordedFlow,
-    ReleaseSnapshot,
-    RemediationDraft,
     SiteContextGraph,
-    SpaHints,
     TelemetrySignal,
 )
 from blop.storage import sqlite
@@ -58,10 +55,8 @@ async def test_save_and_get_auth_profile():
 
 @pytest.mark.asyncio
 async def test_list_auth_profiles():
-    p1 = AuthProfile(profile_name="profile-a", auth_type="env_login",
-                     login_url="https://example.com/login")
-    p2 = AuthProfile(profile_name="profile-b", auth_type="storage_state",
-                     storage_state_path="/tmp/state.json")
+    p1 = AuthProfile(profile_name="profile-a", auth_type="env_login", login_url="https://example.com/login")
+    p2 = AuthProfile(profile_name="profile-b", auth_type="storage_state", storage_state_path="/tmp/state.json")
     await sqlite.save_auth_profile(p1)
     await sqlite.save_auth_profile(p2)
 
@@ -172,7 +167,13 @@ async def test_create_run_with_initial_events_persists_transactional_startup():
         "flow_count": 2,
         "run_mode": "hybrid",
         "profile_name": "prod",
-        "startup_timing_ms": {"flow_lookup": 10, "auth_resolve": 5, "auth_validate": 3, "db_persist": 0, "total_launch": 0},
+        "startup_timing_ms": {
+            "flow_lookup": 10,
+            "auth_resolve": 5,
+            "auth_validate": 3,
+            "db_persist": 0,
+            "total_launch": 0,
+        },
     }
     auth_payload = {
         "profile_name": "prod",
@@ -181,7 +182,13 @@ async def test_create_run_with_initial_events_persists_transactional_startup():
         "storage_state_path": "/tmp/auth.json",
         "user_data_dir": None,
         "session_validation_status": "valid",
-        "startup_timing_ms": {"flow_lookup": 10, "auth_resolve": 5, "auth_validate": 3, "db_persist": 0, "total_launch": 0},
+        "startup_timing_ms": {
+            "flow_lookup": 10,
+            "auth_resolve": 5,
+            "auth_validate": 3,
+            "db_persist": 0,
+            "total_launch": 0,
+        },
     }
 
     await sqlite.create_run_with_initial_events(

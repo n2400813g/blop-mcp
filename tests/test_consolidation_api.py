@@ -96,4 +96,3 @@ async def test_server_browser_storage_state_includes_deprecation_notice():
     handler.assert_awaited_once_with(filename="state.json")
     assert result["status"] == "ok"
     assert result["deprecation_notice"]["replacement_tool"] == "storage_export"
-

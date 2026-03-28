@@ -1,4 +1,5 @@
 """Persistent Playwright session manager for browser_* compatibility tools."""
+
 from __future__ import annotations
 
 import asyncio
@@ -27,6 +28,7 @@ def _event_level_weight(level: str) -> int:
 
 class BrowserSessionManager:
     """Single-process browser session used by compatibility tools."""
+
     _MAX_EVENTS = 1000
 
     def __init__(self) -> None:
@@ -241,17 +243,20 @@ class BrowserSessionManager:
                     if (!(el instanceof Element)) return '';
                     const parts = [];
                     let node = el;
+                    let anchored = false;
                     while (node && node.nodeType === Node.ELEMENT_NODE && node !== document.body) {{
                         let sel = node.nodeName.toLowerCase();
                         if (node.id) {{
                             sel += '#' + CSS.escape(node.id);
                             parts.unshift(sel);
+                            anchored = true;
                             break;
                         }}
                         const testId = node.getAttribute('{test_id_attr}');
                         if (testId) {{
                             sel += '[{test_id_attr}=\"' + CSS.escape(testId) + '\"]';
                             parts.unshift(sel);
+                            anchored = true;
                             break;
                         }}
                         let nth = 1;
@@ -263,7 +268,7 @@ class BrowserSessionManager:
                         parts.unshift(sel);
                         node = node.parentElement;
                     }}
-                    parts.unshift('body');
+                    if (!anchored) parts.unshift('body');
                     return parts.join(' > ');
                 }}
                 const out = [];
@@ -457,9 +462,7 @@ class BrowserSessionManager:
         cutoff = 0 if all_messages else self._last_nav_console_idx
         min_weight = _event_level_weight(level)
         data = [
-            m
-            for m in self._console_events[cutoff:]
-            if _event_level_weight(str(m.get("level", "info"))) <= min_weight
+            m for m in self._console_events[cutoff:] if _event_level_weight(str(m.get("level", "info"))) <= min_weight
         ]
         return {"count": len(data), "messages": data}
 
@@ -696,4 +699,3 @@ class BrowserSessionManager:
 
 
 SESSION_MANAGER = BrowserSessionManager()
-

@@ -1,4 +1,5 @@
 """Performance timing collection — captures web vitals after navigation steps."""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

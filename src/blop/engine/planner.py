@@ -1,10 +1,11 @@
 """Parse natural language commands into structured ExecutionIntent."""
+
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from typing import Literal, Optional
+from urllib.parse import urlparse
 
 from blop.config import BLOP_DISCOVERY_MAX_PAGES
 from blop.schemas import ExecutionPlan, IntentContract
@@ -104,7 +105,9 @@ async def parse_command(
     )
 
 
-def _infer_goal_type(goal_text: str, target_surface: str) -> Literal["navigation", "milestone", "transaction", "gate_check", "editor_panel", "exploration"]:
+def _infer_goal_type(
+    goal_text: str, target_surface: str
+) -> Literal["navigation", "milestone", "transaction", "gate_check", "editor_panel", "exploration"]:
     lowered = (goal_text or "").lower()
     if any(token in lowered for token in ("upgrade", "pricing", "plan", "paywall", "billing")):
         return "gate_check"
@@ -119,7 +122,9 @@ def _infer_goal_type(goal_text: str, target_surface: str) -> Literal["navigation
     return "milestone"
 
 
-def _infer_target_surface(goal_text: str, scope: str) -> Literal["public_site", "authenticated_app", "editor", "billing", "settings", "unknown"]:
+def _infer_target_surface(
+    goal_text: str, scope: str
+) -> Literal["public_site", "authenticated_app", "editor", "billing", "settings", "unknown"]:
     lowered = (goal_text or "").lower()
     if any(token in lowered for token in ("editor", "canvas", "timeline", "captions", "ai agent")):
         return "editor"
@@ -167,7 +172,9 @@ def build_execution_plan(
     command: str | None = None,
     profile_name: str | None = None,
     business_criticality: str = "other",
-    planning_source: Literal["nl_command", "explicit_goal", "discovery_flow", "baseline_recipe", "legacy_unstructured"] = "explicit_goal",
+    planning_source: Literal[
+        "nl_command", "explicit_goal", "discovery_flow", "baseline_recipe", "legacy_unstructured"
+    ] = "explicit_goal",
     assertions: list[str] | None = None,
     run_mode: str | None = None,
 ) -> ExecutionPlan:
@@ -200,7 +207,6 @@ def build_execution_plan(
         intent.scope = "public"
 
     target_surface = _infer_target_surface(goal_text, intent.scope)
-    goal_type = _infer_goal_type(goal_text, target_surface)
     required_assertions = [a for a in (assertions or []) if a]
     if not required_assertions and goal_text:
         required_assertions = [goal_text]
@@ -222,7 +228,11 @@ def build_execution_plan(
     return ExecutionPlan(
         intent=intent.intent,
         goal_text=goal_text,
-        effective_auth_expectation="authenticated" if intent.scope == "authed" else "anonymous" if intent.scope == "public" else "mixed",
+        effective_auth_expectation="authenticated"
+        if intent.scope == "authed"
+        else "anonymous"
+        if intent.scope == "public"
+        else "mixed",
         target_surface=target_surface,
         intended_replay_mode=intended_replay_mode,
         expected_landing_url_patterns=list(dict.fromkeys(expected_patterns)),
@@ -230,7 +240,9 @@ def build_execution_plan(
         fallback_policy=fallback_policy,
         planning_source=planning_source,
         scope=intent.scope,
-        business_criticality=business_criticality if business_criticality in {"revenue", "activation", "retention", "support", "other"} else "other",
+        business_criticality=business_criticality
+        if business_criticality in {"revenue", "activation", "retention", "support", "other"}
+        else "other",
     )
 
 

@@ -3,22 +3,36 @@
 Action mode (default): Interactive elements only with highlight indices — minimal tokens.
 Verification mode: Include up to 150 static elements (text, headings, images) for assertion evaluation.
 """
+
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
 
 from blop.engine.dom_utils import INTERACTIVE_ROLES, extract_nodes_flat
 
-
-STATIC_ROLES = frozenset({
-    "heading", "img", "paragraph", "text", "cell", "row",
-    "listitem", "status", "alert", "tooltip", "dialog",
-    "banner", "navigation", "main", "contentinfo",
-})
+STATIC_ROLES = frozenset(
+    {
+        "heading",
+        "img",
+        "paragraph",
+        "text",
+        "cell",
+        "row",
+        "listitem",
+        "status",
+        "alert",
+        "tooltip",
+        "dialog",
+        "banner",
+        "navigation",
+        "main",
+        "contentinfo",
+    }
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +79,8 @@ async def capture_dom_context(
 
     # DOM fallback: compute effective roles from HTML semantics
     try:
-        dom_nodes = await page.evaluate("""(maxNodes) => {
+        dom_nodes = await page.evaluate(
+            """(maxNodes) => {
             const TAG_ROLE = {a:'link',button:'button',select:'combobox',textarea:'textbox',h1:'heading',h2:'heading',h3:'heading'};
             const INPUT_ROLE = {checkbox:'checkbox',radio:'radio',button:'button',submit:'button',reset:'button'};
             const SELECTORS = ['a[href]','button','input:not([type="hidden"])','select','textarea','[role]','h1','h2','h3'];
@@ -99,7 +114,9 @@ async def capture_dom_context(
                 }
             }
             return results;
-        }""", max_nodes)
+        }""",
+            max_nodes,
+        )
         return dom_nodes or []
     except Exception:
         return []

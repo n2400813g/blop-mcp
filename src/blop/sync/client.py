@@ -1,4 +1,5 @@
 """Fire-and-forget HTTP sync client for pushing blop-mcp run results to hosted blop."""
+
 import dataclasses
 import logging
 from typing import Any

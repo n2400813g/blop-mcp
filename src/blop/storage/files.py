@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 
@@ -15,6 +14,7 @@ _ALLOWED_REPORT_FORMATS = {"md", "txt", "json", "html"}
 def _runs_dir() -> Path:
     """Return the absolute path to the runs/ directory."""
     from blop.config import BLOP_RUNS_DIR
+
     if BLOP_RUNS_DIR:
         configured = Path(BLOP_RUNS_DIR)
         if configured.is_absolute():
@@ -41,18 +41,14 @@ def _validate_report_run_id(run_id: str) -> str:
 def _validate_component(value: str, *, field_name: str) -> str:
     token = _validate_report_token(value, field_name=field_name)
     if not _SAFE_COMPONENT_RE.fullmatch(token):
-        raise ValueError(
-            f"Invalid {field_name}: only letters, numbers, '_', '-', and '.' are allowed"
-        )
+        raise ValueError(f"Invalid {field_name}: only letters, numbers, '_', '-', and '.' are allowed")
     return token
 
 
 def _validate_report_format(fmt: str) -> str:
     safe_fmt = _validate_report_token(fmt.lower(), field_name="fmt")
     if safe_fmt not in _ALLOWED_REPORT_FORMATS:
-        raise ValueError(
-            f"Invalid fmt: must be one of {sorted(_ALLOWED_REPORT_FORMATS)}"
-        )
+        raise ValueError(f"Invalid fmt: must be one of {sorted(_ALLOWED_REPORT_FORMATS)}")
     return safe_fmt
 
 
@@ -129,6 +125,16 @@ def mobile_screenshot_path(run_id: str, case_id: str, step: int, platform: str =
     dir_ = _runs_dir() / "mobile" / platform / "screenshots" / run_id / case_id
     dir_.mkdir(parents=True, exist_ok=True)
     return str(dir_ / f"step_{step:03d}.png")
+
+
+def mobile_page_source_path(run_id: str, case_id: str, step: int, platform: str = "ios") -> str:
+    """Accessibility / UI hierarchy dump (Appium page_source XML) per replay step."""
+    run_id = _validate_component(run_id, field_name="run_id")
+    case_id = _validate_component(case_id, field_name="case_id")
+    platform = _validate_component(platform, field_name="platform")
+    dir_ = _runs_dir() / "mobile" / platform / "page_source" / run_id / case_id
+    dir_.mkdir(parents=True, exist_ok=True)
+    return str(dir_ / f"step_{step:03d}.xml")
 
 
 def device_log_path(run_id: str, case_id: str, platform: str = "ios") -> str:

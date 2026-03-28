@@ -4,6 +4,7 @@ JSON-RPC (MCP transport) requires clean stdout. All output goes to
 ``.blop/blop.log`` by default (or the path in ``BLOP_DEBUG_LOG``).
 Logging is always active — file stays quiet; stderr remains clean for MCP.
 """
+
 from __future__ import annotations
 
 import json
@@ -39,7 +40,10 @@ class _JsonFormatter(logging.Formatter):
             entry["exc"] = _redact_sensitive(self.formatException(record.exc_info))
         # Merge any extra keys passed via extra={...}
         skip = set(logging.LogRecord.__dict__.keys()) | {
-            "message", "asctime", "exc_text", "stack_info",
+            "message",
+            "asctime",
+            "exc_text",
+            "stack_info",
         }
         for key, val in record.__dict__.items():
             if key not in skip and not key.startswith("_"):
