@@ -1,7 +1,7 @@
 """MCP resource shape tests — real SQLite, no browser mocks."""
+
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 
 import pytest
@@ -25,6 +25,7 @@ def _make_flow(flow_id: str = "f1", criticality: str = "revenue") -> RecordedFlo
 # blop://journeys
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_journeys_resource_empty_db(tmp_db):
     """Empty DB → journeys resource returns {journeys: [], total: 0}."""
@@ -40,8 +41,7 @@ async def test_journeys_resource_revenue_flow_is_gated(tmp_db):
     """Revenue flow saved in DB → include_in_release_gating=True in resource."""
     from blop.engine.context_graph import build_context_graph
     from blop.schemas import SiteInventory
-    from blop.storage.sqlite import save_flow
-    from blop.storage.sqlite import save_context_graph
+    from blop.storage.sqlite import save_context_graph, save_flow
     from blop.tools.resources import journeys_resource
 
     flow = _make_flow("rev-flow-1", "revenue")
@@ -68,6 +68,7 @@ async def test_journeys_resource_revenue_flow_is_gated(tmp_db):
     journey = result["journeys"][0]
     assert journey["include_in_release_gating"] is True
     assert journey["journey_id"] == "rev-flow-1"
+    assert journey["app_url"] == "https://example.com"
     assert journey["coverage_status"] == "recorded"
 
 
@@ -89,6 +90,7 @@ async def test_journeys_resource_other_criticality_not_gated(tmp_db):
 # blop://release/{id}/brief
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_release_brief_resource_unknown_id_returns_error(tmp_db):
     """Unknown release_id → error dict (not exception)."""
@@ -103,8 +105,7 @@ async def test_release_brief_resource_after_save_returns_correct_fields(tmp_db):
     """After saving a brief, the resource returns the expected fields."""
     from blop.engine.context_graph import build_context_graph
     from blop.schemas import SiteInventory
-    from blop.storage.sqlite import save_context_graph
-    from blop.storage.sqlite import save_release_brief
+    from blop.storage.sqlite import save_context_graph, save_release_brief
     from blop.tools.resources import release_brief_resource
 
     brief = {
@@ -148,6 +149,7 @@ async def test_release_brief_resource_after_save_returns_correct_fields(tmp_db):
 # blop://release/{id}/artifacts
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_release_artifacts_resource_no_run_returns_error(tmp_db):
     """No run linked to release → artifacts resource returns error."""
@@ -161,6 +163,7 @@ async def test_release_artifacts_resource_no_run_returns_error(tmp_db):
 # ---------------------------------------------------------------------------
 # blop://release/{id}/incidents
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_release_incidents_resource_empty_returns_empty_list(tmp_db):

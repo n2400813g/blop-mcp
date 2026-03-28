@@ -46,10 +46,7 @@ async def test_capture_locator_attrs_supports_css_locators():
 
 
 def test_prefer_semantic_target_text_replaces_generic_action_words():
-    assert (
-        recording._prefer_semantic_target_text("click", "View Plans", "Upgrade")
-        == "View Plans"
-    )
+    assert recording._prefer_semantic_target_text("click", "View Plans", "Upgrade") == "View Plans"
     assert recording._prefer_semantic_target_text("Create", "View Plans") == "Create"
 
 

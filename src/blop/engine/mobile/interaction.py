@@ -1,4 +1,5 @@
 """Mobile interaction helpers for blop mobile engine (Appium 3 / W3C Actions)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -92,4 +93,5 @@ async def app_foreground(driver, app_id: str) -> None:
 def _get_action_chains(driver):
     """Return a W3C ActionChains instance (Selenium 4 / Appium 3)."""
     from selenium.webdriver.common.action_chains import ActionChains
+
     return ActionChains(driver)

@@ -1,4 +1,5 @@
 """discover_critical_journeys — MVP canonical tool for journey discovery."""
+
 from __future__ import annotations
 
 import hashlib
@@ -48,7 +49,10 @@ async def discover_critical_journeys(
     url_err = validate_app_url(app_url)
     if url_err:
         return {"error": url_err}
-    for param_name, pattern in [("include_url_pattern", include_url_pattern), ("exclude_url_pattern", exclude_url_pattern)]:
+    for param_name, pattern in [
+        ("include_url_pattern", include_url_pattern),
+        ("exclude_url_pattern", exclude_url_pattern),
+    ]:
         if pattern:
             try:
                 re.compile(pattern)

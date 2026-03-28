@@ -1,7 +1,9 @@
 """BrowserProfile factory."""
+
 from __future__ import annotations
 
 from browser_use import BrowserProfile
+
 from blop.config import BLOP_NETWORK_IDLE_WAIT
 
 # How long to wait for network idle after page load before the agent starts acting.
@@ -10,7 +12,9 @@ from blop.config import BLOP_NETWORK_IDLE_WAIT
 _NETWORK_IDLE_WAIT = BLOP_NETWORK_IDLE_WAIT
 
 
-def make_browser_profile(headless: bool, storage_state: str | None = None, user_data_dir: str | None = None) -> BrowserProfile:
+def make_browser_profile(
+    headless: bool, storage_state: str | None = None, user_data_dir: str | None = None
+) -> BrowserProfile:
     browser_args = [
         # Use software WebGL so canvas/WebGL apps (e.g. video editors) render correctly.
         # --disable-gpu breaks WebGL; swiftshader keeps it working without real GPU.

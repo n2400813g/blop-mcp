@@ -1,4 +1,5 @@
 """Data models for blop-mcp → hosted blop sync payloads."""
+
 from dataclasses import dataclass, field
 from typing import Any
 

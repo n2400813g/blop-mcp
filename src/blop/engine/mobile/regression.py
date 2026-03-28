@@ -2,16 +2,16 @@
 
 Mirrors the interface of engine/regression.py for mobile flows.
 """
+
 from __future__ import annotations
 
 import asyncio
-import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from blop.schemas import FailureCase, RecordedFlow
 
-from blop.storage.files import device_log_path, mobile_screenshot_path
+from blop.storage.files import device_log_path, mobile_page_source_path, mobile_screenshot_path
 
 
 async def execute_mobile_flow(
@@ -26,7 +26,7 @@ async def execute_mobile_flow(
     """
     from blop.engine.mobile.classifier import classify_mobile_failure
     from blop.engine.mobile.driver import make_appium_driver
-    from blop.engine.mobile.evidence import capture_device_logs, take_device_screenshot
+    from blop.engine.mobile.evidence import capture_device_logs, save_page_source, take_device_screenshot
     from blop.schemas import FailureCase
 
     assert flow.mobile_target is not None, "execute_mobile_flow requires flow.mobile_target"
@@ -35,6 +35,7 @@ async def execute_mobile_flow(
     case_id = f"{run_id}_{flow.flow_id}"
 
     screenshots: list[str] = []
+    accessibility_paths: list[str] = []
     log_path = device_log_path(run_id, case_id, platform)
 
     driver = await make_appium_driver(target)
@@ -51,6 +52,12 @@ async def execute_mobile_flow(
             try:
                 await take_device_screenshot(driver, path=step_screenshot)
                 screenshots.append(step_screenshot)
+            except Exception:
+                pass
+            step_a11y = mobile_page_source_path(run_id, case_id, step.step_id, platform)
+            try:
+                await save_page_source(driver, path=step_a11y)
+                accessibility_paths.append(step_a11y)
             except Exception:
                 pass
 
@@ -82,6 +89,7 @@ async def execute_mobile_flow(
     failure_class = None
     if status != "pass":
         from blop.engine.mobile.evidence import read_log_lines
+
         log_lines = read_log_lines(log_path) if log_path else []
         failure_class = classify_mobile_failure(
             error_message=error_message,
@@ -91,11 +99,10 @@ async def execute_mobile_flow(
         if failure_class is None:
             failure_class = "product_bug"
 
-    severity = "none" if status == "pass" else (
-        "blocker" if flow.business_criticality == "revenue" else "high"
-    )
+    severity = "none" if status == "pass" else ("blocker" if flow.business_criticality == "revenue" else "high")
 
     return FailureCase(
+        case_id=case_id,
         run_id=run_id,
         flow_id=flow.flow_id,
         flow_name=flow.flow_name,
@@ -107,8 +114,10 @@ async def execute_mobile_flow(
         step_failure_index=step_failure_index,
         business_criticality=flow.business_criticality,
         device_log_path=log_path,
+        mobile_accessibility_paths=accessibility_paths,
         platform=platform,
         raw_result=error_message,
+        replay_mode="appium_strict",
     )
 
 
@@ -133,20 +142,26 @@ async def run_mobile_flows(
 
     cases: list["FailureCase"] = []
     from blop.schemas import FailureCase
+
     for flow, result in zip(flows, results):
         if isinstance(result, Exception):
-            cases.append(FailureCase(
-                run_id=run_id,
-                flow_id=flow.flow_id,
-                flow_name=flow.flow_name,
-                status="error",
-                severity="high",
-                failure_class="env_issue",
-                failure_reason_codes=[str(result)],
-                business_criticality=flow.business_criticality,
-                platform=flow.platform,
-                raw_result=str(result),
-            ))
+            cases.append(
+                FailureCase(
+                    case_id=f"{run_id}_{flow.flow_id}",
+                    run_id=run_id,
+                    flow_id=flow.flow_id,
+                    flow_name=flow.flow_name,
+                    status="error",
+                    severity="high",
+                    failure_class="env_issue",
+                    failure_reason_codes=[str(result)],
+                    business_criticality=flow.business_criticality,
+                    platform=flow.platform,
+                    raw_result=str(result),
+                    replay_mode="appium_strict",
+                    mobile_accessibility_paths=[],
+                )
+            )
         else:
             cases.append(result)
 
@@ -159,7 +174,6 @@ async def _replay_step(driver, step, platform: str) -> dict:
     Returns {"ok": True} on success or {"ok": False, "error": str} on failure.
     """
     from blop.engine.mobile import interaction as intr
-    from blop.schemas import MobileSelector
 
     loop = asyncio.get_event_loop()
     action = step.action
@@ -168,6 +182,7 @@ async def _replay_step(driver, step, platform: str) -> dict:
         if action == "tap":
             if step.mobile_selector:
                 from blop.engine.mobile.appium_selector import find_element
+
                 element = await find_element(driver, step.mobile_selector, platform)
                 await intr.tap(driver, element)
             elif step.touch_x_pct is not None and step.touch_y_pct is not None:
@@ -189,6 +204,7 @@ async def _replay_step(driver, step, platform: str) -> dict:
             if not step.mobile_selector:
                 return {"ok": False, "error": "fill step missing mobile_selector"}
             from blop.engine.mobile.appium_selector import find_element
+
             element = await find_element(driver, step.mobile_selector, platform)
             await loop.run_in_executor(None, element.clear)
             await loop.run_in_executor(None, lambda: element.send_keys(step.value or ""))
@@ -217,6 +233,7 @@ async def _replay_step(driver, step, platform: str) -> dict:
         elif action == "long_press":
             if step.mobile_selector:
                 from blop.engine.mobile.appium_selector import find_element
+
                 element = await find_element(driver, step.mobile_selector, platform)
                 await intr.long_press(driver, element)
 
@@ -242,8 +259,9 @@ async def _evaluate_assertion(driver, assertion, platform: str) -> bool:
     if atype == "text_present":
         return bool(assertion.expected and assertion.expected in page_source)
     if atype == "element_visible" and assertion.target:
-        from blop.schemas import MobileSelector
         from blop.engine.mobile.appium_selector import find_element
+        from blop.schemas import MobileSelector
+
         sel = MobileSelector(accessibility_id=assertion.target, text=assertion.target)
         try:
             await find_element(driver, sel, platform)

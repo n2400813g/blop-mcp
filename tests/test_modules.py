@@ -1,12 +1,11 @@
 """Tests for previously-disconnected modules: secrets masking, network mocking, snapshots."""
+
 from __future__ import annotations
 
 import os
-import tempfile
 from pathlib import Path
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Secrets masking
@@ -16,6 +15,7 @@ import pytest
 class TestSecretsMasking:
     def setup_method(self):
         import blop.engine.secrets as s
+
         s._secrets_cache = None
 
     def test_mask_text_with_secrets(self, tmp_path):
@@ -24,6 +24,7 @@ class TestSecretsMasking:
         os.environ["BLOP_SECRETS_FILE"] = str(secrets_file)
 
         import blop.engine.secrets as s
+
         s._secrets_cache = None
 
         result = s.mask_text("The password is SuperSecret123 and key is abc-xyz-999")
@@ -37,6 +38,7 @@ class TestSecretsMasking:
         os.environ["BLOP_SECRETS_FILE"] = str(secrets_file)
 
         import blop.engine.secrets as s
+
         s._secrets_cache = None
 
         result = s.mask_text("nothing to redact here")
@@ -48,6 +50,7 @@ class TestSecretsMasking:
         os.environ["BLOP_SECRETS_FILE"] = str(secrets_file)
 
         import blop.engine.secrets as s
+
         s._secrets_cache = None
 
         data = {"key": "contains mytoken123 value", "nested": {"inner": "also mytoken123"}}
@@ -61,6 +64,7 @@ class TestSecretsMasking:
         os.environ["BLOP_SECRETS_FILE"] = str(secrets_file)
 
         import blop.engine.secrets as s
+
         s._secrets_cache = None
         assert s.has_secrets() is True
 
@@ -70,6 +74,7 @@ class TestSecretsMasking:
         os.environ["BLOP_SECRETS_FILE"] = str(secrets_file)
 
         import blop.engine.secrets as s
+
         s._secrets_cache = None
         assert s.reload_secrets() == 1
 
@@ -79,6 +84,7 @@ class TestSecretsMasking:
     def teardown_method(self):
         os.environ.pop("BLOP_SECRETS_FILE", None)
         import blop.engine.secrets as s
+
         s._secrets_cache = None
 
 
@@ -90,11 +96,12 @@ class TestSecretsMasking:
 class TestNetworkMocking:
     def setup_method(self):
         from blop.tools.network import _active_routes
+
         _active_routes.clear()
 
     @pytest.mark.asyncio
     async def test_mock_and_list_routes(self):
-        from blop.tools.network import mock_network_route, get_active_routes
+        from blop.tools.network import get_active_routes, mock_network_route
 
         result = await mock_network_route("**/api/users", status=200, body='{"users":[]}')
         assert result["status"] == "registered"
@@ -106,7 +113,7 @@ class TestNetworkMocking:
 
     @pytest.mark.asyncio
     async def test_clear_routes(self):
-        from blop.tools.network import mock_network_route, clear_network_routes, get_active_routes
+        from blop.tools.network import clear_network_routes, get_active_routes, mock_network_route
 
         await mock_network_route("**/api/a")
         await mock_network_route("**/api/b")
@@ -118,7 +125,7 @@ class TestNetworkMocking:
 
     @pytest.mark.asyncio
     async def test_multiple_routes(self):
-        from blop.tools.network import mock_network_route, get_active_routes
+        from blop.tools.network import get_active_routes, mock_network_route
 
         await mock_network_route("**/api/a", status=200)
         await mock_network_route("**/api/b", status=404, body="not found")

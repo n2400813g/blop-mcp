@@ -1,4 +1,5 @@
 """Tests for get_run_health_stream and get_risk_analytics from blop.tools.results."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
@@ -18,8 +19,20 @@ async def test_health_stream_happy_path():
         "app_url": "https://example.com",
     }
     events = [
-        {"event_id": "e1", "run_id": "run1", "event_type": "started", "payload": {}, "created_at": "2026-03-19T10:00:00Z"},
-        {"event_id": "e2", "run_id": "run1", "event_type": "case_complete", "payload": {"case_id": "c1"}, "created_at": "2026-03-19T10:01:00Z"},
+        {
+            "event_id": "e1",
+            "run_id": "run1",
+            "event_type": "started",
+            "payload": {},
+            "created_at": "2026-03-19T10:00:00Z",
+        },
+        {
+            "event_id": "e2",
+            "run_id": "run1",
+            "event_type": "case_complete",
+            "payload": {"case_id": "c1"},
+            "created_at": "2026-03-19T10:01:00Z",
+        },
     ]
     with patch("blop.storage.sqlite.get_run", new_callable=AsyncMock, return_value=run):
         with patch("blop.storage.sqlite.list_run_health_events", new_callable=AsyncMock, return_value=events):
@@ -71,18 +84,13 @@ async def test_risk_analytics_with_cases():
         business_criticality="revenue",
         step_failure_index=1,
     )
-    async def list_cases_side_effect(run_id: str):
-        if run_id == "run1":
-            return [case1, case2]
-        return [case3]
-
     with patch("blop.storage.sqlite.list_runs", new_callable=AsyncMock, return_value=runs):
         with patch(
-            "blop.storage.sqlite.list_cases_for_run",
+            "blop.storage.sqlite.list_cases_for_runs",
             new_callable=AsyncMock,
-            side_effect=list_cases_side_effect,
+            return_value={"run1": [case1, case2], "run2": [case3]},
         ):
-            with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=None):
+            with patch("blop.storage.sqlite.get_flows", new_callable=AsyncMock, return_value=[]):
                 with patch("blop.storage.sqlite.list_telemetry_signals", new_callable=AsyncMock, return_value=[]):
                     out = await results.get_risk_analytics(limit_runs=30)
 
@@ -112,7 +120,7 @@ async def test_risk_analytics_includes_internal_validation_signals():
     runs = [{"run_id": "run1", "app_url": "https://example.com"}]
 
     with patch("blop.storage.sqlite.list_runs", new_callable=AsyncMock, return_value=runs):
-        with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=[]):
+        with patch("blop.storage.sqlite.list_cases_for_runs", new_callable=AsyncMock, return_value={"run1": []}):
             with patch("blop.storage.sqlite.list_risk_calibration", new_callable=AsyncMock, return_value=[]):
                 with patch(
                     "blop.storage.sqlite.list_telemetry_signals",
@@ -283,14 +291,14 @@ async def test_get_test_results_stale_flow_guidance_prioritizes_refresh():
         )
     ]
     events: list[dict] = []
-    stale_flow = type("FlowStub", (), {"created_at": "2026-02-20T10:00:00Z"})()
+    stale_flow = type("FlowStub", (), {"flow_id": "flow-stale", "created_at": "2026-02-20T10:00:00Z"})()
 
     with patch("blop.storage.sqlite.get_run", new_callable=AsyncMock, return_value=run):
         with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=cases):
             with patch("blop.storage.sqlite.list_run_health_events", new_callable=AsyncMock, return_value=events):
                 with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=None):
                     with patch.dict("os.environ", {"BLOP_FLOW_STALE_DAYS": "14"}):
-                        with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=stale_flow):
+                        with patch("blop.storage.sqlite.get_flows", new_callable=AsyncMock, return_value=[stale_flow]):
                             out = await results.get_test_results("run-stale")
 
     assert out["stale_flow_guidance"].startswith("Refresh the stale recording")
@@ -599,8 +607,8 @@ async def test_risk_analytics_returns_bucket_measurement_summary():
     ]
 
     with patch("blop.storage.sqlite.list_runs", new_callable=AsyncMock, return_value=runs):
-        with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=cases):
-            with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=None):
+        with patch("blop.storage.sqlite.list_cases_for_runs", new_callable=AsyncMock, return_value={"run-1": cases}):
+            with patch("blop.storage.sqlite.get_flows", new_callable=AsyncMock, return_value=[]):
                 with patch("blop.storage.sqlite.list_telemetry_signals", new_callable=AsyncMock, return_value=[]):
                     with patch("blop.storage.sqlite.list_risk_calibration", new_callable=AsyncMock, return_value=[]):
                         out = await results.get_risk_analytics(limit_runs=30)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import os
 import stat
 from unittest.mock import AsyncMock, patch
@@ -35,9 +34,9 @@ async def test_migrate_advances_version_on_duplicate_column_error():
         with patch("blop.storage.sqlite._set_schema_version", new=AsyncMock()) as set_version:
             await sqlite._migrate(db)
 
-    # Starting at version 16 now runs migrations 17-27 (11 total),
+    # Starting at version 16 now runs migrations 17-28 (12 total),
     # all of which should still advance the version on duplicate-column errors.
-    assert set_version.await_count == 11
+    assert set_version.await_count == 12
     calls = set_version.await_args_list
     assert calls[0].args == (db, 17)
     assert calls[1].args == (db, 18)
@@ -50,11 +49,12 @@ async def test_migrate_advances_version_on_duplicate_column_error():
     assert calls[8].args == (db, 25)
     assert calls[9].args == (db, 26)
     assert calls[10].args == (db, 27)
+    assert calls[11].args == (db, 28)
 
 
 @pytest.mark.asyncio
 async def test_init_db_is_idempotent(tmp_path):
-    """Re-running init_db() on an existing v27 DB must not raise and must not regress schema_version."""
+    """Re-running init_db() on an existing v28 DB must not raise and must not regress schema_version."""
     db_path = str(tmp_path / "smoke.db")
     with patch.dict(os.environ, {"BLOP_DB_PATH": db_path}):
         await sqlite.init_db()
@@ -87,8 +87,4 @@ def test_npm_wizard_script_has_correct_shebang():
     assert file_mode & stat.S_IXUSR, "setup_mobile_test_env.sh is not executable"
     with open(script) as fh:
         first_line = fh.readline().strip()
-    assert first_line.startswith("#!") and "bash" in first_line, (
-        f"Expected bash shebang, got: {first_line!r}"
-    )
-
-
+    assert first_line.startswith("#!") and "bash" in first_line, f"Expected bash shebang, got: {first_line!r}"

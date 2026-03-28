@@ -1,4 +1,5 @@
 """Code generation from recordings — export flows as Playwright Python/TS scripts."""
+
 from __future__ import annotations
 
 import asyncio
@@ -27,6 +28,7 @@ def _esc_re(s: str | None) -> str:
     if not s:
         return ""
     import re
+
     return re.escape(s)
 
 
@@ -74,9 +76,9 @@ def generate_python(flow: RecordedFlow) -> str:
     lines: list[str] = []
     fn_name = f"test_{_sanitize_identifier(flow.flow_name)}"
     lines.append('"""Auto-generated Playwright test from blop recording.')
-    lines.append(f'Flow: {flow.flow_name}')
-    lines.append(f'Goal: {flow.goal}')
-    lines.append(f'App URL: {flow.app_url}')
+    lines.append(f"Flow: {flow.flow_name}")
+    lines.append(f"Goal: {flow.goal}")
+    lines.append(f"App URL: {flow.app_url}")
     lines.append('"""')
     lines.append("import re")
     lines.append("from playwright.sync_api import Playwright, sync_playwright, expect")
@@ -110,9 +112,9 @@ def generate_python(flow: RecordedFlow) -> str:
                 elif sa.assertion_type == "page_title":
                     lines.append(f'    expect(page).to_have_title(re.compile(r".*{_esc_re(sa.expected)}.*"))')
                 else:
-                    lines.append(f'    # TODO: manual assertion — {step.description or step.value}')
+                    lines.append(f"    # TODO: manual assertion — {step.description or step.value}")
             else:
-                lines.append(f'    # Assertion: {step.description or step.value}')
+                lines.append(f"    # Assertion: {step.description or step.value}")
         elif step.action == "wait":
             try:
                 wait_ms = int(float(step.value or "1") * 1000)
@@ -140,8 +142,8 @@ def generate_typescript(flow: RecordedFlow) -> str:
     """Generate a standalone Playwright TypeScript test from a recorded flow."""
     lines: list[str] = []
     fn_name = flow.flow_name.replace("-", "_").replace(" ", "_")
-    lines.append(f'// Auto-generated Playwright test from blop recording')
-    lines.append(f'// Flow: {flow.flow_name} | Goal: {flow.goal}')
+    lines.append("// Auto-generated Playwright test from blop recording")
+    lines.append(f"// Flow: {flow.flow_name} | Goal: {flow.goal}")
     lines.append("import { test, expect } from '@playwright/test';")
     lines.append("")
     lines.append(f"test('{_esc_ts(fn_name)} - {_esc_ts(flow.goal)}', async ({{ page }}) => {{")

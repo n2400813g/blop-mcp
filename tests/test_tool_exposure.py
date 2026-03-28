@@ -1,8 +1,7 @@
 """Tests for MCP tool and resource registration — tool_exposure category."""
+
 from __future__ import annotations
 
-import os
-import sys
 from unittest.mock import AsyncMock
 
 import pytest
@@ -32,6 +31,7 @@ def test_canonical_four_tools_always_registered():
     registered = _get_registered_tool_names()
     missing = CANONICAL_FOUR - registered
     assert not missing, f"Canonical tools not registered: {missing}"
+    assert "get_mcp_capabilities" in registered
 
 
 def test_authenticated_baseline_packager_is_registered():
@@ -41,12 +41,41 @@ def test_authenticated_baseline_packager_is_registered():
     assert "package_authenticated_saas_baseline" in registered
 
 
+def test_context_and_atomic_tools_registered():
+    import blop.server  # noqa: F401
+
+    registered = _get_registered_tool_names()
+    for name in (
+        "get_workspace_context",
+        "get_release_context",
+        "get_journeys_for_release",
+        "get_release_and_journeys",
+        "get_prd_and_acceptance_criteria",
+        "get_ux_taxonomy",
+        "navigate_to_url",
+        "navigate_to_journey",
+        "get_page_snapshot",
+        "perform_step",
+        "capture_artifact",
+        "record_run_observation",
+    ):
+        assert name in registered, f"missing {name}"
+
+
+def test_legacy_alias_tools_absent_by_default():
+    """Deprecated aliases must not register unless BLOP_ENABLE_LEGACY_MCP_TOOLS=true."""
+    import blop.config as cfg
+
+    if not cfg.BLOP_ENABLE_LEGACY_MCP_TOOLS:
+        registered = _get_registered_tool_names()
+        for name in ("discover_test_flows", "run_regression_test", "validate_setup"):
+            assert name not in registered, f"{name} must not register when legacy MCP tools are off"
+
+
 def test_compat_tools_absent_by_default():
     """With BLOP_ENABLE_COMPAT_TOOLS unset, compat tools must not appear."""
-    env = {k: v for k, v in os.environ.items() if k != "BLOP_ENABLE_COMPAT_TOOLS"}
     # We can't re-register — just verify the current registration state
     # (server was imported without the flag set by default in tests)
-    import blop.server as server
 
     # If compat tools are off, browser_navigate and list_runs should not be registered
     from blop.config import BLOP_ENABLE_COMPAT_TOOLS
@@ -68,14 +97,19 @@ def test_all_mvp_resources_registered():
     template_uris = set(getattr(resource_manager, "_templates", {}).keys())
     all_uri_str = " ".join(str(u) for u in exact_uris | template_uris)
 
-    assert "blop://journeys" in all_uri_str, f"blop://journeys not found. Exact: {exact_uris}, Templates: {template_uris}"
-    assert "blop://release" in all_uri_str, f"blop://release/* not found. Exact: {exact_uris}, Templates: {template_uris}"
+    assert "blop://journeys" in all_uri_str, (
+        f"blop://journeys not found. Exact: {exact_uris}, Templates: {template_uris}"
+    )
+    assert "blop://release" in all_uri_str, (
+        f"blop://release/* not found. Exact: {exact_uris}, Templates: {template_uris}"
+    )
     assert "blop://health" in all_uri_str, f"blop://health not found. Exact: {exact_uris}, Templates: {template_uris}"
 
 
 def test_safe_call_wraps_exceptions():
     """_safe_call must return an error dict when the handler raises."""
     import asyncio
+
     import blop.server as server
 
     async def _failing_handler(**kwargs):
@@ -100,6 +134,18 @@ def test_prompt_resources_marked_internal_debug():
 
     assert "Debug/internal resource" in (server.prompts_list_resource.__doc__ or "")
     assert "Debug/internal resource" in (server.prompt_resource.__doc__ or "")
+
+
+@pytest.mark.asyncio
+async def test_get_mcp_capabilities_returns_ok_envelope():
+    import blop.server as server
+
+    out = await server.get_mcp_capabilities()
+    assert out.get("ok") is True
+    data = out.get("data") or {}
+    assert data.get("health_resource_uri") == "blop://health"
+    assert isinstance(data.get("registered_tool_count"), int)
+    assert "canonical_release_tools" in data
 
 
 @pytest.mark.asyncio

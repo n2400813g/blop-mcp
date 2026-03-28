@@ -1,4 +1,5 @@
 """Export test reports in markdown, HTML, or JSON format."""
+
 from __future__ import annotations
 
 import html
@@ -41,8 +42,8 @@ def generate_markdown_report(
 
     lines.append("## Summary")
     lines.append("")
-    lines.append(f"| Metric | Count |")
-    lines.append(f"|--------|-------|")
+    lines.append("| Metric | Count |")
+    lines.append("|--------|-------|")
     lines.append(f"| Total cases | {len(cases)} |")
     lines.append(f"| Passed | {passed} |")
     lines.append(f"| Failed | {failed} |")
@@ -91,11 +92,11 @@ def generate_markdown_report(
             if c.failure_reason_codes:
                 lines.append(f"- **Reason codes:** {', '.join(c.failure_reason_codes)}")
             if c.assertion_failures:
-                lines.append(f"- **Assertion failures:**")
+                lines.append("- **Assertion failures:**")
                 for af in c.assertion_failures:
                     lines.append(f"  - {af}")
             if c.repro_steps:
-                lines.append(f"- **Repro steps:**")
+                lines.append("- **Repro steps:**")
                 for rs in c.repro_steps:
                     lines.append(f"  1. {rs}")
             if c.screenshots:

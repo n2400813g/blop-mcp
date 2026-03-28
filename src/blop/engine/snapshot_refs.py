@@ -1,4 +1,5 @@
 """Playwright-MCP-style accessibility snapshot with stable element refs."""
+
 from __future__ import annotations
 
 import json
@@ -23,6 +24,5 @@ def render_snapshot_markdown(nodes: list[SnapshotNode]) -> str:
     for node in nodes:
         suffix = " [disabled]" if node.disabled else ""
         escaped_name = json.dumps(node.name)[1:-1]
-        lines.append(f"  - {node.role} \"{escaped_name}\" [ref={node.ref}]{suffix}")
+        lines.append(f'  - {node.role} "{escaped_name}" [ref={node.ref}]{suffix}')
     return "\n".join(lines)
-

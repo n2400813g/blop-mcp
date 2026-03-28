@@ -3,6 +3,7 @@
 Rules fire before LLM classification. If no rule matches, the caller
 should fall back to engine/classifier.py classify_case() with platform context.
 """
+
 from __future__ import annotations
 
 _CRASH_SIGNALS = [
@@ -81,7 +82,16 @@ def classify_mobile_failure(
         return "auth_failure"
 
     # Appium server / environment issue (avoid matching normal assertion/wait timeouts)
-    if any(s in error_lower for s in ["connection refused", "webdriverexception", "connection timed out", "appium server timed out", "could not connect"]):
+    if any(
+        s in error_lower
+        for s in [
+            "connection refused",
+            "webdriverexception",
+            "connection timed out",
+            "appium server timed out",
+            "could not connect",
+        ]
+    ):
         return "env_issue"
 
     return None

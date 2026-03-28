@@ -9,21 +9,135 @@ import uuid
 from typing import Optional
 
 from blop.engine import auth as auth_engine
-from blop.engine import classifier, regression as regression_engine
+from blop.engine import classifier
+from blop.engine import regression as regression_engine
 from blop.engine.logger import get_logger
 from blop.reporting.results import explain_run_status
 from blop.schemas import RunStartedResult
-from blop.storage import sqlite, files as file_store
+from blop.storage import files as file_store
+from blop.storage import sqlite
 
 _log = get_logger("tools.regression")
 _RUN_TASKS: dict[str, asyncio.Task] = {}
 _PENDING_DB_FINALIZERS: set[asyncio.Task] = set()
 _TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "waiting_auth"}
+_RUN_CHECKPOINT_KEY = "durable_checkpoint"
+
+
+def _durability_mode() -> str:
+    from blop.config import BLOP_DURABILITY_MODE
+
+    return BLOP_DURABILITY_MODE
+
+
+def _build_checkpoint_payload(
+    *,
+    run_id: str,
+    app_url: str,
+    all_flow_ids: list[str],
+    completed_cases: list,
+    profile_name: str | None,
+    run_mode: str,
+    status: str,
+    reason: str | None = None,
+) -> dict:
+    completed_flow_ids = [
+        flow_id
+        for flow_id in dict.fromkeys(
+            getattr(case, "flow_id", None) for case in completed_cases if getattr(case, "flow_id", None)
+        )
+        if flow_id
+    ]
+    completed_case_ids = [
+        case_id
+        for case_id in dict.fromkeys(
+            getattr(case, "case_id", None) for case in completed_cases if getattr(case, "case_id", None)
+        )
+        if case_id
+    ]
+    remaining_flow_ids = [flow_id for flow_id in all_flow_ids if flow_id not in completed_flow_ids]
+    return {
+        "run_id": run_id,
+        "app_url": app_url,
+        "profile_name": profile_name,
+        "run_mode": run_mode,
+        "status": status,
+        "reason": reason,
+        "flow_ids": list(all_flow_ids),
+        "completed_flow_ids": completed_flow_ids,
+        "completed_case_ids": completed_case_ids,
+        "remaining_flow_ids": remaining_flow_ids,
+        "total_flow_count": len(all_flow_ids),
+        "completed_flow_count": len(completed_flow_ids),
+        "remaining_flow_count": len(remaining_flow_ids),
+        "last_case_id": completed_case_ids[-1] if completed_case_ids else None,
+        "updated_at": time.time(),
+    }
+
+
+async def _persist_checkpoint(
+    *,
+    run_id: str,
+    app_url: str,
+    all_flow_ids: list[str],
+    completed_cases: list,
+    profile_name: str | None,
+    run_mode: str,
+    status: str,
+    reason: str | None = None,
+    flush: bool = False,
+) -> dict:
+    payload = _build_checkpoint_payload(
+        run_id=run_id,
+        app_url=app_url,
+        all_flow_ids=all_flow_ids,
+        completed_cases=completed_cases,
+        profile_name=profile_name,
+        run_mode=run_mode,
+        status=status,
+        reason=reason,
+    )
+    await sqlite.upsert_run_observation(run_id, _RUN_CHECKPOINT_KEY, payload)
+    if flush or _durability_mode() == "sync":
+        await sqlite.flush_buffered_writes(run_id=run_id)
+    return payload
+
+
+async def _refresh_linked_release_brief(run_id: str) -> None:
+    try:
+        from blop.tools.release_check import refresh_release_brief_after_run
+
+        await refresh_release_brief_after_run(run_id)
+    except Exception:
+        _log.debug("refresh_linked_release_brief_failed run_id=%s", run_id, exc_info=True)
 
 
 def _auth_redirect_detected(url: str) -> bool:
     lowered = (url or "").lower()
     return any(token in lowered for token in ("/login", "/signin", "/sign-in", "/auth", "oauth"))
+
+
+def _regression_flow_mode(flows: list) -> tuple[str, str | None]:
+    """Return ('web'|'mobile', None) or ('error', message)."""
+    if not flows:
+        return "error", "no flows"
+    platforms = [getattr(f, "platform", "web") for f in flows]
+    if all(p == "web" for p in platforms):
+        return "web", None
+    if all(p in ("ios", "android") for p in platforms):
+        missing = [f.flow_id for f in flows if getattr(f, "mobile_target", None) is None]
+        if missing:
+            return (
+                "error",
+                "Mobile flows must have mobile_target set (re-record with record_test_flow "
+                f"platform=ios|android). Missing for flow_ids: {missing}",
+            )
+        return "mobile", None
+    return (
+        "error",
+        "Cannot mix web and mobile flows in one regression run. "
+        "Use separate run_regression_test calls for web-only vs mobile-only flow_ids.",
+    )
 
 
 def _execution_plan_summary(flows: list, run_mode: str, profile_name: str | None) -> dict:
@@ -117,6 +231,26 @@ def _spawn_background_task(coro) -> asyncio.Task | asyncio.Future:
     return placeholder
 
 
+def _register_run_task(run_id: str, task: asyncio.Task | asyncio.Future) -> None:
+    _RUN_TASKS[run_id] = task
+
+    def _on_task_done(t) -> None:
+        _RUN_TASKS.pop(run_id, None)
+        if not t.cancelled() and t.exception() is not None:
+
+            async def _safe_mark_failed():
+                try:
+                    await sqlite.update_run(run_id, "failed", [], None, [])
+                except Exception as exc:
+                    _log.error("task_done_db_failed run_id=%s error=%s", run_id, exc, exc_info=True)
+
+            pending = asyncio.create_task(_safe_mark_failed())
+            _PENDING_DB_FINALIZERS.add(pending)
+            pending.add_done_callback(lambda _: _PENDING_DB_FINALIZERS.discard(pending))
+
+    task.add_done_callback(_on_task_done)
+
+
 def cancel_run_task(run_id: str) -> bool:
     task = _RUN_TASKS.get(run_id)
     if not task or task.done():
@@ -140,11 +274,49 @@ async def _ensure_terminal_run_status(run_id: str, fallback_status: str) -> None
     )
 
 
+async def _mark_run_resumable(run_id: str, reason: str) -> None:
+    run = await sqlite.get_run(run_id)
+    if not run:
+        return
+    checkpoint = await sqlite.get_run_observation(run_id, _RUN_CHECKPOINT_KEY)
+    all_flow_ids = list(run.get("flow_ids") or [])
+    completed_cases = []
+    if checkpoint:
+        completed_case_ids = set(checkpoint.get("completed_case_ids") or [])
+        existing_cases = await sqlite.list_cases_for_runs([run_id])
+        completed_cases = [case for case in existing_cases if case.case_id in completed_case_ids]
+    await sqlite.update_run_status(run_id, "queued")
+    await _persist_checkpoint(
+        run_id=run_id,
+        app_url=run.get("app_url", ""),
+        all_flow_ids=all_flow_ids,
+        completed_cases=completed_cases,
+        profile_name=run.get("profile_name"),
+        run_mode=run.get("run_mode", "hybrid"),
+        status="queued",
+        reason=reason,
+        flush=True,
+    )
+    await sqlite.save_run_health_event(
+        run_id,
+        "run_checkpointed",
+        {
+            "reason": reason,
+            "resume_supported": True,
+            "completed_flow_count": len({case.flow_id for case in completed_cases}),
+            "remaining_flow_count": len(
+                [flow_id for flow_id in all_flow_ids if flow_id not in {case.flow_id for case in completed_cases}]
+            ),
+        },
+    )
+
+
 async def shutdown_run_tasks(timeout_secs: float = 10.0) -> dict:
     """Cancel and drain active regression tasks during process shutdown."""
     active = [(run_id, task) for run_id, task in _RUN_TASKS.items() if not task.done()]
     if not active:
         return {"cancelled": 0, "timed_out": 0, "forced": 0}
+    durability_mode = _durability_mode()
 
     for _, task in active:
         try:
@@ -162,11 +334,17 @@ async def shutdown_run_tasks(timeout_secs: float = 10.0) -> dict:
     for run_id, task in active:
         try:
             if task in pending:
-                await _ensure_terminal_run_status(run_id, "cancelled")
+                if durability_mode == "exit":
+                    await _ensure_terminal_run_status(run_id, "cancelled")
+                else:
+                    await _mark_run_resumable(run_id, "shutdown_timeout")
                 forced += 1
                 continue
             if task.cancelled():
-                await _ensure_terminal_run_status(run_id, "cancelled")
+                if durability_mode == "exit":
+                    await _ensure_terminal_run_status(run_id, "cancelled")
+                else:
+                    await _mark_run_resumable(run_id, "shutdown_cancelled")
             elif task.exception() is not None:
                 await _ensure_terminal_run_status(run_id, "failed")
         except Exception:
@@ -187,6 +365,7 @@ async def force_finalize_active_runs(reason: str = "process_shutdown") -> dict:
     """Best-effort terminalization for active runs when loop/task draining is unreliable."""
     active_run_ids = list(_RUN_TASKS.keys())
     forced = 0
+    durability_mode = _durability_mode()
     for run_id in active_run_ids:
         task = _RUN_TASKS.get(run_id)
         if task and not task.done():
@@ -195,18 +374,122 @@ async def force_finalize_active_runs(reason: str = "process_shutdown") -> dict:
             except Exception:
                 _log.debug("force finalize task cancel failed", exc_info=True)
         try:
-            await _ensure_terminal_run_status(run_id, "cancelled")
-            await sqlite.save_run_health_event(
-                run_id,
-                "run_cancelled",
-                {"event": "run_cancelled", "reason": reason},
-            )
+            if durability_mode == "exit":
+                await _ensure_terminal_run_status(run_id, "cancelled")
+                await sqlite.save_run_health_event(
+                    run_id,
+                    "run_cancelled",
+                    {"event": "run_cancelled", "reason": reason},
+                )
+            else:
+                await _mark_run_resumable(run_id, reason)
             forced += 1
         except Exception:
             _log.debug("force finalize status update failed", exc_info=True)
         finally:
             _RUN_TASKS.pop(run_id, None)
     return {"forced_cancelled": forced}
+
+
+async def resume_incomplete_runs(limit_per_status: int = 50) -> dict:
+    """Resume queued/running runs with saved checkpoints when durability is enabled."""
+    if _durability_mode() == "exit":
+        return {"eligible": 0, "resumed": 0, "waiting_auth": 0, "skipped": 0}
+
+    queued = await sqlite.list_runs(limit=limit_per_status, status="queued")
+    running = await sqlite.list_runs(limit=limit_per_status, status="running")
+    resumed = 0
+    waiting_auth = 0
+    skipped = 0
+    eligible = 0
+    seen: set[str] = set()
+
+    for run in queued + running:
+        run_id = str(run.get("run_id") or "")
+        if not run_id or run_id in seen:
+            continue
+        seen.add(run_id)
+        active_task = _RUN_TASKS.get(run_id)
+        if active_task and not active_task.done():
+            continue
+
+        checkpoint = await sqlite.get_run_observation(run_id, _RUN_CHECKPOINT_KEY)
+        if not checkpoint:
+            continue
+        remaining_flow_ids = list(checkpoint.get("remaining_flow_ids") or [])
+        if not remaining_flow_ids:
+            continue
+
+        eligible += 1
+        flows = await sqlite.get_flows(remaining_flow_ids)
+        if not flows:
+            skipped += 1
+            continue
+        flow_mode, flow_mode_err = _regression_flow_mode(flows)
+        if flow_mode == "error":
+            _log.warning("resume_incomplete_runs invalid_flow_set run_id=%s error=%s", run_id, flow_mode_err)
+            skipped += 1
+            continue
+
+        mobile_only = flow_mode == "mobile"
+        profile_name = run.get("profile_name")
+        storage_state: Optional[str] = None
+        if profile_name and not mobile_only:
+            profile = await sqlite.get_auth_profile(profile_name)
+            if profile is None:
+                waiting_auth += 1
+                await sqlite.update_run_status(run_id, "waiting_auth")
+                await sqlite.save_run_health_event(
+                    run_id,
+                    "run_waiting_auth",
+                    {"reason": "missing_profile", "profile_name": profile_name, "resumed_run": True},
+                )
+                continue
+            try:
+                storage_state = await auth_engine.resolve_storage_state(profile)
+            except Exception:
+                storage_state = None
+            if not storage_state:
+                waiting_auth += 1
+                await sqlite.update_run_status(run_id, "waiting_auth")
+                await sqlite.save_run_health_event(
+                    run_id,
+                    "run_waiting_auth",
+                    {"reason": "unresolved_storage_state", "profile_name": profile_name, "resumed_run": True},
+                )
+                continue
+
+        task = _spawn_background_task(
+            _run_and_persist(
+                run_id,
+                flows,
+                str(run.get("app_url") or ""),
+                storage_state,
+                bool(run.get("headless", True)),
+                str(run.get("run_mode") or "hybrid"),
+                False,
+                profile_name,
+                mobile_only=mobile_only,
+            )
+        )
+        _register_run_task(run_id, task)
+        await sqlite.save_run_health_event(
+            run_id,
+            "run_resumed",
+            {
+                "remaining_flow_count": len(flows),
+                "completed_flow_count": len(checkpoint.get("completed_flow_ids") or []),
+                "durability_mode": _durability_mode(),
+            },
+        )
+        resumed += 1
+
+    return {
+        "eligible": eligible,
+        "resumed": resumed,
+        "waiting_auth": waiting_auth,
+        "skipped": skipped,
+    }
 
 
 async def run_regression_test(
@@ -218,13 +501,10 @@ async def run_regression_test(
     command: Optional[str] = None,
     auto_rerecord: bool = False,
 ) -> dict:
+    from blop.config import check_llm_api_key, validate_app_url, validate_mobile_replay_app_url
     from blop.engine.planner import normalize_run_mode
-    from blop.config import check_llm_api_key, validate_app_url
-    run_mode = normalize_run_mode(run_mode)
 
-    url_err = validate_app_url(app_url)
-    if url_err:
-        return _start_error(url_err)
+    run_mode = normalize_run_mode(run_mode)
 
     _MAX_CONCURRENT = int(os.getenv("BLOP_MAX_CONCURRENT_RUNS", "10"))
     active = sum(1 for t in _RUN_TASKS.values() if not t.done())
@@ -239,37 +519,17 @@ async def run_regression_test(
     invalid_ids = [fid for fid in flow_ids if not isinstance(fid, str) or not fid.strip()]
     if invalid_ids:
         return _start_error("flow_ids must be a list of non-empty strings")
-    has_key, key_name = check_llm_api_key()
-    if not has_key:
-        return _start_error(
-            f"{key_name} is not set. Add it to your .env file or environment. "
-            "Without it, all test results will be invalid (assertions pass vacuously)."
-        )
-
-    # If command provided, parse for additional intent
-    if command:
-        from blop.engine.planner import parse_command
-        intent = await parse_command(command, app_url, profile_name=profile_name)
-        run_mode = normalize_run_mode(intent.run_mode)
-        if intent.profile_name and not profile_name:
-            profile_name = intent.profile_name
 
     launch_started = time.perf_counter()
     run_id = uuid.uuid4().hex
-    flows: list = []
-    missing_flow_ids: list[str] = []
     flow_lookup_started = time.perf_counter()
-    for fid in flow_ids:
-        flow = await sqlite.get_flow(fid)
-        if flow:
-            flows.append(flow)
-        else:
-            missing_flow_ids.append(fid)
+    flows = await sqlite.get_flows(flow_ids)
     flow_lookup_ms = int((time.perf_counter() - flow_lookup_started) * 1000)
+    found_flow_ids = {flow.flow_id for flow in flows}
+    missing_flow_ids = [fid for fid in flow_ids if fid not in found_flow_ids]
     if not flows:
         return _start_error(
-            "None of the provided flow_ids were found. "
-            "Use list_recorded_tests to get valid flow_ids first."
+            "None of the provided flow_ids were found. Use list_recorded_tests to get valid flow_ids first."
         )
     if missing_flow_ids:
         return _start_error(
@@ -277,8 +537,37 @@ async def run_regression_test(
             "Use list_recorded_tests and retry with only valid flow_ids."
         )
 
+    flow_mode, flow_mode_err = _regression_flow_mode(flows)
+    if flow_mode == "error":
+        return _start_error(flow_mode_err or "invalid flow set")
+    mobile_only = flow_mode == "mobile"
+
+    if mobile_only:
+        url_err = validate_mobile_replay_app_url(app_url)
+    else:
+        url_err = validate_app_url(app_url)
+    if url_err:
+        return _start_error(url_err)
+
+    if not mobile_only:
+        has_key, key_name = check_llm_api_key()
+        if not has_key:
+            return _start_error(
+                f"{key_name} is not set. Add it to your .env file or environment. "
+                "Without it, all test results will be invalid (assertions pass vacuously)."
+            )
+
+    # If command provided, parse for additional intent
+    if command:
+        from blop.engine.planner import parse_command
+
+        intent = await parse_command(command, app_url, profile_name=profile_name)
+        run_mode = normalize_run_mode(intent.run_mode)
+        if intent.profile_name and not profile_name:
+            profile_name = intent.profile_name
+
     profile = None
-    if profile_name:
+    if profile_name and not mobile_only:
         profile = await sqlite.get_auth_profile(profile_name)
         if profile is None:
             return _start_error(
@@ -359,12 +648,19 @@ async def run_regression_test(
 
     auth_context_payload = {
         "profile_name": profile_name,
-        "auth_used": bool(profile_name),
+        "auth_used": bool(profile_name) and not mobile_only,
         "auth_source": getattr(profile, "auth_type", None) if profile else None,
         "storage_state_path": storage_state,
         "user_data_dir": getattr(profile, "user_data_dir", None) if profile else None,
         "session_validation_status": "not_requested",
+        "mobile_only": mobile_only,
     }
+    if mobile_only and profile_name:
+        _log.info(
+            "run_regression_test: ignoring profile_name=%s for mobile-only replay",
+            profile_name,
+        )
+        auth_context_payload["session_validation_status"] = "not_applicable_mobile"
     auth_validate_ms = 0
     if storage_state:
         auth_validate_started = time.perf_counter()
@@ -376,7 +672,10 @@ async def run_regression_test(
             auth_context_payload["session_validation_error"] = str(exc)[:200]
         auth_validate_ms = int((time.perf_counter() - auth_validate_started) * 1000)
 
-    waiting_auth = profile and auth_context_payload["session_validation_status"] in {"expired_session", "validation_error"}
+    waiting_auth = profile and auth_context_payload["session_validation_status"] in {
+        "expired_session",
+        "validation_error",
+    }
     startup_timing_ms = {
         "flow_lookup": flow_lookup_ms,
         "auth_resolve": auth_resolve_ms,
@@ -390,6 +689,7 @@ async def run_regression_test(
         "run_mode": run_mode,
         "profile_name": profile_name,
         "startup_timing_ms": startup_timing_ms,
+        "flow_execution_mode": "mobile" if mobile_only else "web",
     }
     auth_context_payload = {**auth_context_payload, "startup_timing_ms": startup_timing_ms}
 
@@ -406,6 +706,18 @@ async def run_regression_test(
         run_queued_payload=queued_payload,
         auth_context_payload=auth_context_payload,
     )
+    if _durability_mode() != "exit":
+        await _persist_checkpoint(
+            run_id=run_id,
+            app_url=app_url,
+            all_flow_ids=flow_ids,
+            completed_cases=[],
+            profile_name=profile_name,
+            run_mode=run_mode,
+            status="waiting_auth" if waiting_auth else "queued",
+            reason="created",
+            flush=True,
+        )
     startup_timing_ms["db_persist"] = int((time.perf_counter() - db_persist_started) * 1000)
     startup_timing_ms["total_launch"] = int((time.perf_counter() - launch_started) * 1000)
     final_startup_timing_ms = dict(startup_timing_ms)
@@ -440,9 +752,13 @@ async def run_regression_test(
     if waiting_auth:
         status_meta = explain_run_status("waiting_auth", run_id=run_id)
         if auth_context_payload["session_validation_status"] == "expired_session":
-            message = f"Auth profile '{profile_name}' has an expired session for {app_url}. Refresh auth before replaying."
+            message = (
+                f"Auth profile '{profile_name}' has an expired session for {app_url}. Refresh auth before replaying."
+            )
         else:
-            message = f"Auth profile '{profile_name}' could not be validated against {app_url}. Re-check auth and retry."
+            message = (
+                f"Auth profile '{profile_name}' could not be validated against {app_url}. Re-check auth and retry."
+            )
         return {
             "run_id": run_id,
             "status": "waiting_auth",
@@ -457,7 +773,17 @@ async def run_regression_test(
 
     # Fire-and-forget; caller polls get_test_results
     task = _spawn_background_task(
-        _run_and_persist(run_id, flows, app_url, storage_state, headless, run_mode, auto_rerecord, profile_name)
+        _run_and_persist(
+            run_id,
+            flows,
+            app_url,
+            storage_state,
+            headless,
+            run_mode,
+            auto_rerecord,
+            profile_name,
+            mobile_only=mobile_only,
+        )
     )
     _log.info(
         "run_transition run_id=%s from_status=%s to_status=%s flow_count=%s",
@@ -475,24 +801,7 @@ async def run_regression_test(
             "profile_name": profile_name,
         },
     )
-    _RUN_TASKS[run_id] = task
-
-    def _on_task_done(t: asyncio.Task) -> None:
-        _RUN_TASKS.pop(run_id, None)
-        # If the task died before its own try/except could update the DB, mark it failed
-        if not t.cancelled() and t.exception() is not None:
-            async def _safe_mark_failed():
-                try:
-                    await sqlite.update_run(run_id, "failed", [], None, [])
-                except Exception as exc:
-                    _log.error(
-                        "task_done_db_failed run_id=%s error=%s", run_id, exc, exc_info=True
-                    )
-            pending = asyncio.create_task(_safe_mark_failed())
-            _PENDING_DB_FINALIZERS.add(pending)
-            pending.add_done_callback(lambda _: _PENDING_DB_FINALIZERS.discard(pending))
-
-    task.add_done_callback(_on_task_done)
+    _register_run_task(run_id, task)
 
     started = RunStartedResult(
         run_id=run_id,
@@ -518,11 +827,32 @@ async def _run_and_persist(
     run_mode: str = "hybrid",
     auto_rerecord: bool = False,
     profile_name: Optional[str] = None,
+    *,
+    mobile_only: bool = False,
 ) -> None:
     from datetime import datetime, timezone
 
+    durability_mode = _durability_mode()
+    all_flow_ids = [flow.flow_id for flow in flows]
+    flow_lookup = {flow.flow_id: flow for flow in flows}
+    existing_cases = await sqlite.list_cases_for_runs([run_id]) if durability_mode != "exit" else []
+    classified_by_flow = {case.flow_id: case for case in existing_cases if getattr(case, "flow_id", None)}
+    remaining_flows = [flow for flow in flows if flow.flow_id not in classified_by_flow]
+
     # Transition: queued → running
     await sqlite.update_run_status(run_id, "running")
+    if durability_mode != "exit":
+        await _persist_checkpoint(
+            run_id=run_id,
+            app_url=app_url,
+            all_flow_ids=all_flow_ids,
+            completed_cases=list(classified_by_flow.values()),
+            profile_name=profile_name,
+            run_mode=run_mode,
+            status="running",
+            reason="started",
+            flush=True,
+        )
     _log.info(
         "run_transition run_id=%s from_status=%s to_status=%s",
         run_id,
@@ -542,64 +872,114 @@ async def _run_and_persist(
         run_id,
         "run_started",
         {
-            "flow_count": len(flows),
+            "flow_count": len(all_flow_ids),
+            "remaining_flow_count": len(remaining_flows),
+            "resumed_flow_count": len(classified_by_flow),
             "run_mode": run_mode,
             "headless": headless,
+            "mobile_only": mobile_only,
         },
     )
+
+    execution_metadata: dict[str, dict] = {}
+    checkpoint_lock = asyncio.Lock()
+
+    async def _persist_case_progress(case, _flow=None) -> None:
+        case.business_criticality = getattr(flow_lookup.get(case.flow_id), "business_criticality", "other")
+        classified_case = await classifier.classify_case(case, app_url)
+        case_meta = execution_metadata.get(case.flow_id, {})
+        event = {
+            "run_id": run_id,
+            "event_type": "case_completed",
+            "payload": {
+                "case_id": classified_case.case_id,
+                "flow_id": classified_case.flow_id,
+                "flow_name": classified_case.flow_name,
+                "status": classified_case.status,
+                "severity": classified_case.severity,
+                "replay_mode": classified_case.replay_mode,
+                "step_failure_index": classified_case.step_failure_index,
+                "business_criticality": classified_case.business_criticality,
+                "repair_confidence": classified_case.repair_confidence,
+                "healing_decision": classified_case.healing_decision,
+                "worker_slot": case_meta.get("worker_slot"),
+                "entry_area_key": case_meta.get("entry_area_key"),
+            },
+        }
+        async with checkpoint_lock:
+            classified_by_flow[classified_case.flow_id] = classified_case
+            await sqlite.save_cases([classified_case])
+            await sqlite.save_run_health_events([event])
+            if durability_mode != "exit":
+                await _persist_checkpoint(
+                    run_id=run_id,
+                    app_url=app_url,
+                    all_flow_ids=all_flow_ids,
+                    completed_cases=list(classified_by_flow.values()),
+                    profile_name=profile_name,
+                    run_mode=run_mode,
+                    status="running",
+                    reason="case_completed",
+                    flush=False,
+                )
 
     try:
         from blop.config import BLOP_RUN_TIMEOUT_SECS
 
-        execution_metadata: dict[str, dict] = {}
-        run_coro = regression_engine.run_flows(
-            flows=flows,
-            app_url=app_url,
-            run_id=run_id,
-            storage_state=storage_state,
-            headless=headless,
-            run_mode=run_mode,
-            auto_rerecord=auto_rerecord,
-            profile_name=profile_name,
-            execution_metadata=execution_metadata,
-        )
-        if BLOP_RUN_TIMEOUT_SECS > 0:
-            cases = await asyncio.wait_for(run_coro, timeout=float(BLOP_RUN_TIMEOUT_SECS))
-        else:
-            cases = await run_coro
+        if mobile_only:
+            from blop.engine.mobile.regression import run_mobile_flows
 
-        # Attach business_criticality from source flow to each case, then classify
-        classified = []
-        flow_criticality = {f.flow_id: f.business_criticality for f in flows}
-        for case in cases:
-            case.business_criticality = flow_criticality.get(case.flow_id, "other")
-            classified.append(await classifier.classify_case(case, app_url))
-            await sqlite.save_case(case)
-            case_meta = execution_metadata.get(case.flow_id, {})
-            await sqlite.save_run_health_event(
-                run_id,
-                "case_completed",
-                {
-                    "case_id": case.case_id,
-                    "flow_id": case.flow_id,
-                    "flow_name": case.flow_name,
-                    "status": case.status,
-                    "severity": case.severity,
-                    "replay_mode": case.replay_mode,
-                    "step_failure_index": case.step_failure_index,
-                    "business_criticality": case.business_criticality,
-                    "repair_confidence": case.repair_confidence,
-                    "healing_decision": case.healing_decision,
-                    "worker_slot": case_meta.get("worker_slot"),
-                    "entry_area_key": case_meta.get("entry_area_key"),
-                },
+            run_coro = run_mobile_flows(remaining_flows, run_id=run_id, headless=headless)
+            if BLOP_RUN_TIMEOUT_SECS > 0:
+                cases = await asyncio.wait_for(run_coro, timeout=float(BLOP_RUN_TIMEOUT_SECS))
+            else:
+                cases = await run_coro
+        else:
+            run_coro = regression_engine.run_flows(
+                flows=remaining_flows,
+                app_url=app_url,
+                run_id=run_id,
+                storage_state=storage_state,
+                headless=headless,
+                run_mode=run_mode,
+                auto_rerecord=auto_rerecord,
+                profile_name=profile_name,
+                execution_metadata=execution_metadata,
+                on_case_completed=_persist_case_progress,
             )
+            if BLOP_RUN_TIMEOUT_SECS > 0:
+                cases = await asyncio.wait_for(run_coro, timeout=float(BLOP_RUN_TIMEOUT_SECS))
+            else:
+                cases = await run_coro
+
+        if mobile_only:
+            for case in cases:
+                if case.flow_id not in classified_by_flow:
+                    await _persist_case_progress(case)
+        else:
+            for case in cases:
+                if case.flow_id not in classified_by_flow:
+                    await _persist_case_progress(case)
+
+        classified = [classified_by_flow[flow_id] for flow_id in all_flow_ids if flow_id in classified_by_flow]
 
         run_summary = await classifier.classify_run(classified, app_url)
         next_actions = run_summary.get("next_actions", [])
 
         completed_at = datetime.now(timezone.utc).isoformat()
         await sqlite.update_run(run_id, "completed", classified, completed_at, next_actions)
+        if durability_mode != "exit":
+            await _persist_checkpoint(
+                run_id=run_id,
+                app_url=app_url,
+                all_flow_ids=all_flow_ids,
+                completed_cases=classified,
+                profile_name=profile_name,
+                run_mode=run_mode,
+                status="completed",
+                reason="completed",
+                flush=True,
+            )
         _log.info(
             "run_transition run_id=%s from_status=%s to_status=%s",
             run_id,
@@ -623,10 +1003,12 @@ async def _run_and_persist(
                 "failed": sum(1 for c in classified if c.status in ("fail", "error", "blocked")),
             },
         )
+        await _refresh_linked_release_brief(run_id)
 
         # Record the release recommendation prediction for calibration tracking
         try:
             from blop.reporting.results import _compute_release_recommendation
+
             rec = _compute_release_recommendation(classified, "completed")
             await sqlite.save_risk_calibration_record(
                 run_id=run_id,
@@ -634,7 +1016,7 @@ async def _run_and_persist(
                 predicted_decision=rec["decision"],
                 blocker_count=rec["blocker_count"],
                 critical_journey_failures=rec["critical_journey_failures"],
-                flow_ids=[f.flow_id for f in flows],
+                flow_ids=all_flow_ids,
             )
         except Exception:
             pass  # Calibration recording is best-effort; never block run completion
@@ -642,10 +1024,22 @@ async def _run_and_persist(
         await sqlite.update_run(
             run_id=run_id,
             status="failed",
-            cases=[],
+            cases=list(classified_by_flow.values()),
             completed_at=None,
             next_actions=[],
         )
+        if durability_mode != "exit":
+            await _persist_checkpoint(
+                run_id=run_id,
+                app_url=app_url,
+                all_flow_ids=all_flow_ids,
+                completed_cases=list(classified_by_flow.values()),
+                profile_name=profile_name,
+                run_mode=run_mode,
+                status="failed",
+                reason="run_timeout",
+                flush=True,
+            )
         _log.warning(
             "run_transition run_id=%s from_status=%s to_status=%s reason=%s",
             run_id,
@@ -670,42 +1064,80 @@ async def _run_and_persist(
                 "error_message": "Run exceeded BLOP_RUN_TIMEOUT_SECS",
             },
         )
+        await _refresh_linked_release_brief(run_id)
     except asyncio.CancelledError:
-        await sqlite.update_run(
-            run_id=run_id,
-            status="cancelled",
-            cases=[],
-            completed_at=None,
-            next_actions=[],
-        )
-        _log.info(
-            "run_transition run_id=%s from_status=%s to_status=%s reason=%s",
-            run_id,
-            "running",
-            "cancelled",
-            "task_cancelled",
-            extra={
-                "event": "run_transition",
-                "run_id": run_id,
-                "from_status": "running",
-                "to_status": "cancelled",
-                "reason": "task_cancelled",
-            },
-        )
-        await sqlite.save_run_health_event(
-            run_id,
-            "run_cancelled",
-            {"event": "run_cancelled", "reason": "task_cancelled"},
-        )
+        if durability_mode == "exit":
+            await sqlite.update_run(
+                run_id=run_id,
+                status="cancelled",
+                cases=list(classified_by_flow.values()),
+                completed_at=None,
+                next_actions=[],
+            )
+            _log.info(
+                "run_transition run_id=%s from_status=%s to_status=%s reason=%s",
+                run_id,
+                "running",
+                "cancelled",
+                "task_cancelled",
+                extra={
+                    "event": "run_transition",
+                    "run_id": run_id,
+                    "from_status": "running",
+                    "to_status": "cancelled",
+                    "reason": "task_cancelled",
+                },
+            )
+            await sqlite.save_run_health_event(
+                run_id,
+                "run_cancelled",
+                {"event": "run_cancelled", "reason": "task_cancelled"},
+            )
+        else:
+            await sqlite.update_run_status(run_id, "queued")
+            await _persist_checkpoint(
+                run_id=run_id,
+                app_url=app_url,
+                all_flow_ids=all_flow_ids,
+                completed_cases=list(classified_by_flow.values()),
+                profile_name=profile_name,
+                run_mode=run_mode,
+                status="queued",
+                reason="task_cancelled",
+                flush=True,
+            )
+            await sqlite.save_run_health_event(
+                run_id,
+                "run_checkpointed",
+                {
+                    "reason": "task_cancelled",
+                    "resume_supported": True,
+                    "completed_flow_count": len(classified_by_flow),
+                    "remaining_flow_count": max(0, len(all_flow_ids) - len(classified_by_flow)),
+                },
+            )
+        await _refresh_linked_release_brief(run_id)
         raise
     except Exception as e:
         await sqlite.update_run(
             run_id=run_id,
             status="failed",
-            cases=[],
+            cases=list(classified_by_flow.values()),
             completed_at=None,
             next_actions=[],
         )
+        if durability_mode != "exit":
+            await _persist_checkpoint(
+                run_id=run_id,
+                app_url=app_url,
+                all_flow_ids=all_flow_ids,
+                completed_cases=list(classified_by_flow.values()),
+                profile_name=profile_name,
+                run_mode=run_mode,
+                status="failed",
+                reason="unhandled_exception",
+                flush=True,
+            )
         _log.warning(
             "run_transition run_id=%s from_status=%s to_status=%s reason=%s",
             run_id,
@@ -735,3 +1167,4 @@ async def _run_and_persist(
             "run_failed",
             event_payload,
         )
+        await _refresh_linked_release_brief(run_id)

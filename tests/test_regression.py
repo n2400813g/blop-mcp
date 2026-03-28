@@ -1,4 +1,5 @@
 """Tests for engine/regression.py."""
+
 from __future__ import annotations
 
 import asyncio
@@ -76,7 +77,10 @@ async def test_execute_flow_pass():
     mock_bu.BrowserSession.return_value = mock_session
 
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
-        with patch.dict(sys.modules, {"browser_use": mock_bu, "browser_use.llm": mock_bu.llm, "browser_use.llm.messages": mock_bu.llm.messages}):
+        with patch.dict(
+            sys.modules,
+            {"browser_use": mock_bu, "browser_use.llm": mock_bu.llm, "browser_use.llm.messages": mock_bu.llm.messages},
+        ):
             with patch("blop.engine.browser.make_browser_profile"):
                 with patch("blop.storage.files.screenshot_path", return_value="/tmp/shot.png"):
                     flow = make_flow()
@@ -118,7 +122,10 @@ async def test_execute_flow_fail_on_error_keyword():
     mock_bu.BrowserSession.return_value = mock_session
 
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
-        with patch.dict(sys.modules, {"browser_use": mock_bu, "browser_use.llm": mock_bu.llm, "browser_use.llm.messages": mock_bu.llm.messages}):
+        with patch.dict(
+            sys.modules,
+            {"browser_use": mock_bu, "browser_use.llm": mock_bu.llm, "browser_use.llm.messages": mock_bu.llm.messages},
+        ):
             with patch("blop.engine.browser.make_browser_profile"):
                 with patch("blop.storage.files.screenshot_path", return_value="/tmp/shot.png"):
                     flow = make_flow()
@@ -223,7 +230,10 @@ async def test_run_flows_parallel():
     flows = [make_flow(f"flow{i}", f"Goal {i}") for i in range(3)]
 
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
-        with patch.dict(sys.modules, {"browser_use": mock_bu, "browser_use.llm": mock_bu.llm, "browser_use.llm.messages": mock_bu.llm.messages}):
+        with patch.dict(
+            sys.modules,
+            {"browser_use": mock_bu, "browser_use.llm": mock_bu.llm, "browser_use.llm.messages": mock_bu.llm.messages},
+        ):
             with patch("blop.engine.browser.make_browser_profile"):
                 with patch("blop.storage.files.screenshot_path", return_value="/tmp/shot.png"):
                     cases = await run_flows(
@@ -271,7 +281,10 @@ async def test_run_flows_propagates_business_criticality():
     mock_bu.BrowserSession.return_value = mock_session
 
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
-        with patch.dict(sys.modules, {"browser_use": mock_bu, "browser_use.llm": mock_bu.llm, "browser_use.llm.messages": mock_bu.llm.messages}):
+        with patch.dict(
+            sys.modules,
+            {"browser_use": mock_bu, "browser_use.llm": mock_bu.llm, "browser_use.llm.messages": mock_bu.llm.messages},
+        ):
             with patch("blop.engine.browser.make_browser_profile"):
                 with patch("blop.storage.files.screenshot_path", return_value="/tmp/shot.png"):
                     cases = await run_flows(
@@ -303,6 +316,7 @@ async def test_run_flows_semaphore():
         concurrent_count -= 1
 
         from blop.schemas import FailureCase
+
         return FailureCase(
             run_id=kwargs.get("run_id", "run1"),
             flow_id=kwargs.get("flow", make_flow()).flow_id,
@@ -340,6 +354,7 @@ async def test_run_flows_respects_replay_concurrency_override(monkeypatch):
         concurrent_count -= 1
 
         from blop.schemas import FailureCase
+
         return FailureCase(
             run_id=kwargs.get("run_id", "run1"),
             flow_id=kwargs.get("flow", make_flow()).flow_id,

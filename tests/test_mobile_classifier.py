@@ -2,9 +2,8 @@
 
 No device or Appium server required.
 """
-from __future__ import annotations
 
-import pytest
+from __future__ import annotations
 
 from blop.engine.mobile.classifier import classify_mobile_failure
 

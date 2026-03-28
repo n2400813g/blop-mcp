@@ -1,4 +1,5 @@
 """triage_release_blocker — root-cause evidence + next actions for a blocker."""
+
 from __future__ import annotations
 
 from typing import Optional
@@ -26,16 +27,12 @@ async def triage_release_blocker(
     user_business_impact, recommended_action, and linked_artifacts.
     """
     if flow_id and journey_id and flow_id != journey_id:
-        return {
-            "error": "Pass only one of flow_id or journey_id. journey_id is a deprecated alias for flow_id."
-        }
+        return {"error": "Pass only one of flow_id or journey_id. journey_id is a deprecated alias for flow_id."}
 
     effective_flow_id = flow_id or journey_id
 
     if not any([run_id, release_id, effective_flow_id, incident_cluster_id]):
-        return {
-            "error": "At least one of run_id, release_id, flow_id, journey_id, or incident_cluster_id is required."
-        }
+        return {"error": "At least one of run_id, release_id, flow_id, journey_id, or incident_cluster_id is required."}
 
     # Resolve run_id from release_id if not provided
     if release_id and not run_id:
@@ -85,7 +82,8 @@ async def triage_release_blocker(
         if not remediation and generate_remediation and cluster:
             try:
                 from blop.tools.v2_surface import generate_remediation as gen_rem
-                rem_result = await gen_rem(
+
+                await gen_rem(
                     cluster_id=incident_cluster_id,
                     app_url=cluster.app_url,
                 )
@@ -97,10 +95,7 @@ async def triage_release_blocker(
         graph = await sqlite.get_latest_context_graph(graph_app_url, profile_name=graph_profile_name)
 
     # --- Build evidence summary ---
-    failed_cases = [
-        c for c in cases
-        if getattr(c, "status", "") in ("fail", "error", "blocked")
-    ]
+    failed_cases = [c for c in cases if getattr(c, "status", "") in ("fail", "error", "blocked")]
     blocker_cases = [c for c in failed_cases if getattr(c, "severity", "") == "blocker"]
 
     neighborhood = {}
@@ -213,15 +208,21 @@ async def triage_release_blocker(
         suggested_owner = f"Team owning area '{neighborhood['areas'][0]}'"
 
     subject_type = (
-        "run" if run_id else
-        "flow" if effective_flow_id else
-        "incident_cluster" if incident_cluster_id else
-        "release" if release_id else
-        "unknown"
+        "run"
+        if run_id
+        else "flow"
+        if effective_flow_id
+        else "incident_cluster"
+        if incident_cluster_id
+        else "release"
+        if release_id
+        else "unknown"
     )
     business_priority = (
-        "release_blocker" if "revenue" in criticalities or "activation" in criticalities or blocker_cases
-        else "important" if failed_cases
+        "release_blocker"
+        if "revenue" in criticalities or "activation" in criticalities or blocker_cases
+        else "important"
+        if failed_cases
         else "unknown"
     )
     confidence_note = (

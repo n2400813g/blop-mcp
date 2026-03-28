@@ -4,10 +4,10 @@ Reads secret values from .blop/secrets.env (or BLOP_SECRETS_FILE env var).
 Before sending any page content, assertion text, or screenshots to the LLM,
 secret values are replaced with [REDACTED].
 """
+
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 
 _secrets_cache: list[str] | None = None
@@ -65,6 +65,7 @@ def mask_text(text: str) -> str:
 
 def mask_dict(data: dict) -> dict:
     """Recursively mask secret values in a dictionary."""
+
     def _mask_any(value):
         if isinstance(value, str):
             return mask_text(value)

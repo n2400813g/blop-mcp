@@ -1,11 +1,11 @@
 """Security scanning engine — Semgrep SAST subprocess + HTTP header analysis."""
+
 from __future__ import annotations
 
 import asyncio
 import json
 import os
 import shutil
-from typing import Literal
 
 
 async def run_semgrep_scan(
@@ -124,9 +124,9 @@ async def scan_http_headers(app_url: str) -> dict:
 
     Uses Python's built-in urllib to avoid adding a requests dependency.
     """
-    import urllib.request
     import urllib.error
     import urllib.parse
+    import urllib.request
 
     parsed = urllib.parse.urlparse(app_url)
     if parsed.scheme.lower() not in {"http", "https"}:

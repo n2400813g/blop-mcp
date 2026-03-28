@@ -1,9 +1,20 @@
 """Mobile evidence capture utilities for blop mobile engine."""
+
 from __future__ import annotations
 
 import asyncio
 import base64
 import os
+
+
+async def save_page_source(driver, *, path: str) -> str:
+    """Persist Appium page_source (accessibility / UI XML) to *path*. Returns *path*."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    loop = asyncio.get_running_loop()
+    src = await loop.run_in_executor(None, lambda: driver.page_source)
+    with open(path, "w", encoding="utf-8", errors="replace") as f:
+        f.write(src or "")
+    return path
 
 
 async def take_device_screenshot(driver, *, path: str) -> str:

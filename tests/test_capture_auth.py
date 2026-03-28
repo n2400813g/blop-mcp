@@ -1,4 +1,5 @@
 """Tests for tools/capture_auth.py."""
+
 from __future__ import annotations
 
 import json
@@ -27,6 +28,7 @@ async def test_capture_auth_session_happy_path(tmp_path):
 
     async def fake_storage_state(path=None):
         import os
+
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             json.dump({"origins": [{"localStorage": []}]}, f)
@@ -90,9 +92,7 @@ async def test_capture_auth_session_timeout(tmp_path):
     with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
         with patch("blop.tools.capture_auth.asyncio.sleep", mock_sleep):
             with patch("blop.tools.capture_auth._BLOP_DIR", blop_dir):
-                with patch(
-                    "blop.tools.capture_auth.asyncio.get_event_loop"
-                ) as mock_loop:
+                with patch("blop.tools.capture_auth.asyncio.get_event_loop") as mock_loop:
                     loop = MagicMock()
                     loop.time.side_effect = [0, 0, 10]
                     mock_loop.return_value = loop
@@ -154,6 +154,7 @@ async def test_capture_auth_session_returns_requested_profile_name_when_sanitize
 
     async def fake_storage_state(path=None):
         import os
+
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             json.dump({"origins": [{"localStorage": []}]}, f)

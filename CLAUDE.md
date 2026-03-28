@@ -49,7 +49,9 @@ blop
 python -m blop.server
 ```
 
-The MCP server config for Cursor is in `.cursor/mcp.json`.
+Cursor MCP config: copy `.cursor/mcp.json.example` to `.cursor/mcp.json`, set absolute paths and env (the real file is gitignored — never commit secrets).
+
+Core workflow and tool tiers: `docs/MCP_CORE_WORKFLOW.md`. `BLOP_ENABLE_COMPAT_TOOLS=true` adds legacy `browser_*` / `blop_v2_*` tools; default keeps the smaller surface with context + atomic browser tools.
 
 ## Production baseline
 

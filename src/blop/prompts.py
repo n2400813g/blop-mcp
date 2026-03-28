@@ -3,6 +3,7 @@
 Prompts can be overridden by placing files in .blop/prompts/ (or BLOP_PROMPTS_DIR).
 File names map to variable names: e.g. .blop/prompts/discover.txt overrides DISCOVER_PROMPT.
 """
+
 from __future__ import annotations
 
 import os
@@ -51,6 +52,7 @@ def list_available_prompts() -> dict[str, str]:
         "next_actions": NEXT_ACTIONS_PROMPT[:100],
     }
     from blop.config import BLOP_PROMPTS_DIR
+
     prompts_dir = BLOP_PROMPTS_DIR
     if not prompts_dir:
         repo_root = Path(__file__).parent.parent.parent
@@ -61,6 +63,7 @@ def list_available_prompts() -> dict[str, str]:
             name = f.stem
             prompts[name] = f.read_text(encoding="utf-8")[:100]
     return prompts
+
 
 DISCOVER_PROMPT = """You are a senior QA engineer generating browser test flows for a web application.
 

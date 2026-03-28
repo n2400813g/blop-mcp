@@ -1,4 +1,5 @@
 """Shared Playwright page-session lifecycle helpers for tool modules."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

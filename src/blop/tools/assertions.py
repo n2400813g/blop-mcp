@@ -1,4 +1,5 @@
 """Structured assertion tools — lightweight standalone verifications."""
+
 from __future__ import annotations
 
 from typing import Optional

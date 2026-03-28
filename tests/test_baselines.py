@@ -5,8 +5,8 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_package_authenticated_saas_baseline_builds_strict_step_flows(tmp_db):
-    from blop.tools.baselines import package_authenticated_saas_baseline
     from blop.storage import sqlite
+    from blop.tools.baselines import package_authenticated_saas_baseline
 
     result = await package_authenticated_saas_baseline(
         app_url="https://example.com",
@@ -55,8 +55,8 @@ async def test_package_authenticated_saas_baseline_builds_strict_step_flows(tmp_
 
 @pytest.mark.asyncio
 async def test_package_authenticated_saas_baseline_supports_curated_selector_recipe(tmp_db):
-    from blop.tools.baselines import package_authenticated_saas_baseline
     from blop.storage import sqlite
+    from blop.tools.baselines import package_authenticated_saas_baseline
 
     result = await package_authenticated_saas_baseline(
         app_url="https://example.com",
@@ -86,8 +86,8 @@ async def test_package_authenticated_saas_baseline_supports_curated_selector_rec
 
 @pytest.mark.asyncio
 async def test_package_authenticated_saas_baseline_supports_text_driven_editor_recipe(tmp_db):
-    from blop.tools.baselines import package_authenticated_saas_baseline
     from blop.storage import sqlite
+    from blop.tools.baselines import package_authenticated_saas_baseline
 
     result = await package_authenticated_saas_baseline(
         app_url="https://example.com",
@@ -116,8 +116,8 @@ async def test_package_authenticated_saas_baseline_supports_text_driven_editor_r
 
 @pytest.mark.asyncio
 async def test_package_authenticated_saas_baseline_supports_text_then_selector_recipe(tmp_db):
-    from blop.tools.baselines import package_authenticated_saas_baseline
     from blop.storage import sqlite
+    from blop.tools.baselines import package_authenticated_saas_baseline
 
     result = await package_authenticated_saas_baseline(
         app_url="https://example.com",

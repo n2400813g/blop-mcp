@@ -1,4 +1,5 @@
 """Deprecated compatibility wrappers for the pre-MVP public surface."""
+
 from __future__ import annotations
 
 from typing import Optional

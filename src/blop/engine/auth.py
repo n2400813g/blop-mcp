@@ -1,4 +1,5 @@
 """Auth engine for AuthProfile."""
+
 from __future__ import annotations
 
 import asyncio
@@ -143,6 +144,7 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
         username = os.getenv(username_env)
         password = os.getenv(password_env)
         from blop.config import LOGIN_URL, TEST_AUTH_URL
+
         login_url = profile.login_url or LOGIN_URL or TEST_AUTH_URL
 
         # No credentials — fall back to existing state file if available
@@ -157,12 +159,17 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
         password_selector = os.getenv("TEST_PASSWORD_SELECTOR", "")
 
         _user_selectors = [s for s in [username_selector] if s] + [
-            "input[name='username']", "input[name='email']",
-            "input[type='email']", "#email", "input[placeholder*='email' i]",
+            "input[name='username']",
+            "input[name='email']",
+            "input[type='email']",
+            "#email",
+            "input[placeholder*='email' i]",
             "input[placeholder*='username' i]",
         ]
         _pass_selectors = [s for s in [password_selector] if s] + [
-            "input[name='password']", "input[type='password']", "#password",
+            "input[name='password']",
+            "input[type='password']",
+            "#password",
         ]
 
         async def _inspect_login_surface(page) -> dict:
@@ -230,7 +237,8 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
                         raise RuntimeError("user_data_dir must resolve within the repository root")
                     os.makedirs(user_data_dir, exist_ok=True)
                     context = await p.chromium.launch_persistent_context(
-                        str(user_data_dir), headless=True,
+                        str(user_data_dir),
+                        headless=True,
                     )
                     browser = None
                 else:
@@ -296,8 +304,13 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
                     except Exception:
                         pass
                     _login_error_kws = (
-                        "invalid", "incorrect", "failed", "wrong password",
-                        "no account", "not found", "error signing in",
+                        "invalid",
+                        "incorrect",
+                        "failed",
+                        "wrong password",
+                        "no account",
+                        "not found",
+                        "error signing in",
                     )
                     page_has_error = any(kw in page_text for kw in _login_error_kws)
 
@@ -425,8 +438,7 @@ def invalidate_validated_session_cache(
     keys_to_remove = [
         key
         for key in list(_validated_session_cache.keys())
-        if (storage_state_path is None or key[0] == storage_state_path)
-        and (app_url is None or key[1] == app_url)
+        if (storage_state_path is None or key[0] == storage_state_path) and (app_url is None or key[1] == app_url)
     ]
     for key in keys_to_remove:
         _validated_session_cache.pop(key, None)
@@ -435,8 +447,7 @@ def invalidate_validated_session_cache(
 def _prune_validated_session_cache(*, now: float | None = None) -> None:
     current_time = time.time() if now is None else now
     keys_to_remove = [
-        key for key, entry in list(_validated_session_cache.items())
-        if current_time >= float(entry["expires"])
+        key for key, entry in list(_validated_session_cache.items()) if current_time >= float(entry["expires"])
     ]
     for key in keys_to_remove:
         _validated_session_cache.pop(key, None)
@@ -463,7 +474,8 @@ async def auto_storage_state_from_env() -> Optional[str]:
     Creates an ephemeral AuthProfile with profile_name '_auto_env' so the result lands
     in the shared 1-hour in-memory cache. Returns None if any required credential is absent.
     """
-    from blop.config import LOGIN_URL, TEST_AUTH_URL, TEST_USERNAME, TEST_PASSWORD
+    from blop.config import LOGIN_URL, TEST_AUTH_URL, TEST_PASSWORD, TEST_USERNAME
+
     if not (TEST_USERNAME and TEST_PASSWORD and (LOGIN_URL or TEST_AUTH_URL)):
         return None
     profile = AuthProfile(

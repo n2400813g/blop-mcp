@@ -9,6 +9,7 @@ Priority order:
   6. text              (visible text match, cross-platform)
   7. xpath             (last resort — brittle)
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
 
 def _appium_by():
     from appium.webdriver.common.appiumby import AppiumBy
+
     return AppiumBy
 
 
@@ -63,9 +65,8 @@ async def find_element(driver, selector: "MobileSelector", platform: str):
             errors.append(f"{strategy}={value!r}: {exc}")
 
     from selenium.common.exceptions import NoSuchElementException
-    raise NoSuchElementException(
-        f"No element found after trying {len(strategies)} strategies: " + "; ".join(errors)
-    )
+
+    raise NoSuchElementException(f"No element found after trying {len(strategies)} strategies: " + "; ".join(errors))
 
 
 def describe_selector(selector: "MobileSelector") -> str:

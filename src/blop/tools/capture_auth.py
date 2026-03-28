@@ -1,4 +1,5 @@
 """capture_auth_session tool — interactive OAuth capture via headed browser."""
+
 from __future__ import annotations
 
 import asyncio
@@ -48,11 +49,12 @@ async def capture_auth_session(
             "note": url_err,
         }
 
+    from urllib.parse import urlparse
+
     from playwright.async_api import async_playwright
+
     from blop.schemas import AuthProfile
     from blop.storage import sqlite
-
-    from urllib.parse import urlparse
 
     os.makedirs(_BLOP_DIR, exist_ok=True)
     state_path = os.path.join(_BLOP_DIR, f"auth_state_{safe_profile_name}.json")
@@ -99,10 +101,7 @@ async def capture_auth_session(
                     current_domain = urlparse(current_url).netloc
                     # Only consider URLs back on the original app domain — ignore
                     # external OAuth provider pages (accounts.google.com, github.com, etc.)
-                    on_app_domain = (
-                        current_domain == login_domain
-                        or current_domain.endswith("." + login_domain)
-                    )
+                    on_app_domain = current_domain == login_domain or current_domain.endswith("." + login_domain)
                     if success_url_pattern:
                         if success_url_pattern in current_url and on_app_domain:
                             captured = True
@@ -127,6 +126,7 @@ async def capture_auth_session(
                 # for origins that use it; Playwright's restore path requires an array.
                 try:
                     import json as _json
+
                     with open(state_path) as _f:
                         _state = _json.load(_f)
                     for _origin in _state.get("origins", []):
@@ -154,8 +154,7 @@ async def capture_auth_session(
             "error": "No successful login detected within timeout.",
             "error_type": "auth_capture_timeout",
             "note": (
-                "No successful login detected within timeout. "
-                "Check success_url_pattern or increase timeout_secs."
+                "No successful login detected within timeout. Check success_url_pattern or increase timeout_secs."
             ),
         }
 

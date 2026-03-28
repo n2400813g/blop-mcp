@@ -25,7 +25,10 @@ async def discover_test_flows(
     url_err = validate_app_url(app_url)
     if url_err:
         return {"error": url_err}
-    for param_name, pattern in [("include_url_pattern", include_url_pattern), ("exclude_url_pattern", exclude_url_pattern)]:
+    for param_name, pattern in [
+        ("include_url_pattern", include_url_pattern),
+        ("exclude_url_pattern", exclude_url_pattern),
+    ]:
         if pattern:
             try:
                 re.compile(pattern)
@@ -34,6 +37,7 @@ async def discover_test_flows(
     # If command is provided, parse it for intent/priorities
     if command:
         from blop.engine.planner import parse_command
+
         intent = await parse_command(command, app_url, repo_path=repo_path, profile_name=profile_name)
         if intent.business_goal and not business_goal:
             business_goal = intent.business_goal
@@ -78,9 +82,7 @@ async def discover_test_flows(
             "prioritize business_criticality='revenue' and 'activation' flows first."
         )
     else:
-        result["workflow_hint"] = (
-            "No flows planned. Try passing business_goal='...' or increasing max_pages."
-        )
+        result["workflow_hint"] = "No flows planned. Try passing business_goal='...' or increasing max_pages."
     return result
 
 
@@ -126,8 +128,8 @@ async def get_inventory_resource(app_url: str) -> dict:
 
 
 async def get_context_graph_resource(app_url: str, profile_name: Optional[str] = None) -> dict:
-    from blop.storage.sqlite import get_latest_context_graph
     from blop.engine.context_graph import get_context_graph_summary
+    from blop.storage.sqlite import get_latest_context_graph
 
     graph = await get_latest_context_graph(app_url, profile_name=profile_name)
     if not graph:

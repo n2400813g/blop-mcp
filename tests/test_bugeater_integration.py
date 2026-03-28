@@ -15,6 +15,7 @@ Environment knobs:
                        flow_name, goal, business_criticality
   BUGEATER_REPLAY_TIMEOUT_SECS default: 180
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -130,9 +131,7 @@ def _load_smoke_tasks() -> list[dict[str, str]]:
         goal = str(item.get("goal", "")).strip()
         business_criticality = str(item.get("business_criticality", "other")).strip() or "other"
         if not flow_name or not goal:
-            raise ValueError(
-                f"BUGEATER_SMOKE_TASKS item #{idx} must include non-empty flow_name and goal"
-            )
+            raise ValueError(f"BUGEATER_SMOKE_TASKS item #{idx} must include non-empty flow_name and goal")
         tasks.append(
             {
                 "flow_name": flow_name,
@@ -246,9 +245,7 @@ class TestBugEaterIntegration:
         from blop.tools.validate import validate_release_setup
 
         result = await validate_release_setup(app_url=BUGEATER_APP_URL)
-        assert result["status"] in ("ready", "warnings"), (
-            f"validate_release_setup returned unexpected status: {result}"
-        )
+        assert result["status"] in ("ready", "warnings"), f"validate_release_setup returned unexpected status: {result}"
         assert result["blockers"] == [], f"Unexpected blockers: {result['blockers']}"
 
     @pytest.mark.asyncio
@@ -289,9 +286,7 @@ class TestBugEaterIntegration:
         )
 
         assert "journeys" in result, f"Missing journeys key: {result}"
-        assert result["journey_count"] >= 3, (
-            f"Expected at least 3 journeys, got {result['journey_count']}"
-        )
+        assert result["journey_count"] >= 3, f"Expected at least 3 journeys, got {result['journey_count']}"
         journey_texts = [
             " ".join(
                 [
@@ -303,17 +298,14 @@ class TestBugEaterIntegration:
             for journey in result["journeys"]
         ]
         challenge_journeys = [
-            text for text in journey_texts
-            if any(keyword in text for keyword in _DISCOVERY_EXECUTION_KEYWORDS)
+            text for text in journey_texts if any(keyword in text for keyword in _DISCOVERY_EXECUTION_KEYWORDS)
         ]
         assert challenge_journeys, (
-            "Expected at least one challenge or form-execution-oriented journey, "
-            f"got: {result['journeys']}"
+            f"Expected at least one challenge or form-execution-oriented journey, got: {result['journeys']}"
         )
-        assert any(
-            "form" in text or "validation" in text
-            for text in challenge_journeys
-        ), f"Expected at least one execution-focused journey, got: {result['journeys']}"
+        assert any("form" in text or "validation" in text for text in challenge_journeys), (
+            f"Expected at least one execution-focused journey, got: {result['journeys']}"
+        )
 
     @pytest.mark.asyncio
     async def test_04_run_release_check_targeted_mode_returns_evidence(self, live_db):
@@ -326,9 +318,7 @@ class TestBugEaterIntegration:
         )
 
         assert "decision" in result, f"Missing decision: {result}"
-        assert result["decision"] in ("SHIP", "INVESTIGATE", "BLOCK"), (
-            f"Unexpected decision: {result['decision']}"
-        )
+        assert result["decision"] in ("SHIP", "INVESTIGATE", "BLOCK"), f"Unexpected decision: {result['decision']}"
         assert result.get("run_id"), f"Targeted run did not return run_id: {result}"
         assert result.get("status") in ("completed", "failed"), (
             f"Expected targeted run to complete synchronously, got: {result.get('status')}"
@@ -420,10 +410,7 @@ class TestBugEaterIntegration:
             pytest.skip("No replay run available for debug")
 
         results = await get_test_results(run_id=self._replay_run_id)
-        failed_cases = [
-            case for case in results.get("cases", [])
-            if case.get("status") in ("fail", "error", "blocked")
-        ]
+        failed_cases = [case for case in results.get("cases", []) if case.get("status") in ("fail", "error", "blocked")]
         if not failed_cases:
             pytest.skip("Replay smoke flows did not produce a failing case to debug")
 
