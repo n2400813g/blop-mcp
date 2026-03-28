@@ -8,8 +8,12 @@ from pathlib import Path
 from typing import Optional
 
 from blop.config import (
+    BLOP_API_TOKEN,
     BLOP_DB_PATH,
     BLOP_DEBUG_LOG,
+    BLOP_HOSTED_URL,
+    BLOP_PROJECT_ID,
+    hosted_sync_config_snapshot,
     runtime_config_issues,
     runtime_posture_snapshot,
     validate_app_url,
@@ -385,7 +389,70 @@ async def validate_setup(
             checks.append({"name": "auth_profile", "passed": False, "message": f"Auth profile check failed: {exc}"})
             warnings.append(f"Auth profile validation error: {exc}")
 
-    # 6. Appium server reachability (mobile, optional)
+    # 6. Hosted sync connectivity (optional, non-blocking)
+    hosted_sync = hosted_sync_config_snapshot()
+    if hosted_sync["partial"]:
+        missing = ", ".join(hosted_sync["missing_fields"])
+        checks.append(
+            {
+                "name": "hosted_sync_config",
+                "passed": False,
+                "message": f"Hosted sync partially configured; missing {missing}",
+            }
+        )
+        warnings.append(
+            "Hosted sync is partially configured. Set BLOP_HOSTED_URL, BLOP_API_TOKEN, "
+            "and BLOP_PROJECT_ID together, or leave them all unset for local-only mode."
+        )
+    elif hosted_sync["enabled"]:
+        try:
+            from blop.sync.client import SyncClient
+
+            probe = await SyncClient(BLOP_HOSTED_URL, BLOP_API_TOKEN).probe_connection(
+                BLOP_PROJECT_ID
+            )
+            if probe:
+                detail = (
+                    f"Connected to workspace {probe.get('workspace_id')} "
+                    f"(scope={probe.get('token_scope')}, project={probe.get('requested_project_id') or probe.get('token_project_id')})"
+                )
+                checks.append(
+                    {
+                        "name": "hosted_sync_connection",
+                        "passed": True,
+                        "message": detail,
+                    }
+                )
+            else:
+                checks.append(
+                    {
+                        "name": "hosted_sync_connection",
+                        "passed": False,
+                        "message": "Configured, but the hosted sync connection could not be verified",
+                    }
+                )
+                warnings.append(
+                    "Hosted sync is configured, but Blop Cloud connectivity or token validation failed."
+                )
+        except Exception as exc:
+            checks.append(
+                {
+                    "name": "hosted_sync_connection",
+                    "passed": False,
+                    "message": f"Hosted sync verification failed: {exc}",
+                }
+            )
+            warnings.append(f"Hosted sync verification error: {exc}")
+    else:
+        checks.append(
+            {
+                "name": "hosted_sync_config",
+                "passed": True,
+                "message": "Local-only mode (Blop Cloud sync not configured)",
+            }
+        )
+
+    # 7. Appium server reachability (mobile, optional)
     if check_mobile:
         try:
             from blop.engine.mobile.driver import check_appium_reachable
@@ -459,6 +526,11 @@ async def validate_setup(
         if auth_warning:
             suggested_next_steps.append(
                 "Fix auth: capture_auth_session(login_url='https://your-app.com/login', profile_name='your_profile')"
+            )
+        if any("hosted sync" in w.lower() or "blop cloud" in w.lower() for w in warnings):
+            suggested_next_steps.append(
+                "Repair optional cloud sync: set BLOP_HOSTED_URL, BLOP_API_TOKEN, and BLOP_PROJECT_ID together, "
+                "then run blop-wizard doctor --verbose."
             )
         for w in warnings:
             if "not reachable" in w:

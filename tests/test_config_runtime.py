@@ -53,6 +53,9 @@ def test_runtime_posture_snapshot_surfaces_key_runtime_state(monkeypatch):
     monkeypatch.setattr(config, "BLOP_ALLOWED_HOSTS", ("app.example.com",))
     monkeypatch.setattr(config, "BLOP_ENABLE_COMPAT_TOOLS", False)
     monkeypatch.setattr(config, "BLOP_ENABLE_LEGACY_MCP_TOOLS", False)
+    monkeypatch.setattr(config, "BLOP_HOSTED_URL", "https://cloud.blop.dev")
+    monkeypatch.setattr(config, "BLOP_API_TOKEN", "blop_sk_test")
+    monkeypatch.setattr(config, "BLOP_PROJECT_ID", "proj_123")
     monkeypatch.setattr(config, "BLOP_RUN_TIMEOUT_SECS", 1800)
     monkeypatch.setattr(config, "BLOP_STEP_TIMEOUT_SECS", 45)
     monkeypatch.setenv("BLOP_CAPABILITIES_PROFILE", "production_minimal")
@@ -69,3 +72,17 @@ def test_runtime_posture_snapshot_surfaces_key_runtime_state(monkeypatch):
     assert posture["paths"]["db_path_absolute"] is True
     assert posture["paths"]["runs_dir_absolute"] is True
     assert posture["paths"]["debug_log_absolute"] is True
+    assert posture["hosted_sync"]["enabled"] is True
+    assert posture["hosted_sync"]["project_id"] == "proj_123"
+
+
+def test_hosted_sync_snapshot_marks_partial_configuration(monkeypatch):
+    monkeypatch.setattr(config, "BLOP_HOSTED_URL", "https://cloud.blop.dev")
+    monkeypatch.setattr(config, "BLOP_API_TOKEN", None)
+    monkeypatch.setattr(config, "BLOP_PROJECT_ID", "proj_123")
+
+    snapshot = config.hosted_sync_config_snapshot()
+
+    assert snapshot["enabled"] is False
+    assert snapshot["partial"] is True
+    assert "BLOP_API_TOKEN" in snapshot["missing_fields"]

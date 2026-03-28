@@ -214,6 +214,75 @@ async def test_validate_profile_not_found_warning():
 
 
 @pytest.mark.asyncio
+async def test_validate_warns_on_partial_hosted_sync_config():
+    from blop.tools.validate import validate_setup
+
+    mock_browser = AsyncMock()
+    mock_playwright = AsyncMock()
+    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
+    mock_playwright.__aexit__ = AsyncMock(return_value=False)
+    mock_playwright.chromium.launch.return_value = mock_browser
+
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+        with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+            with patch("blop.storage.sqlite.init_db", new_callable=AsyncMock):
+                with patch("blop.tools.validate.hosted_sync_config_snapshot", return_value={
+                    "enabled": False,
+                    "partial": True,
+                    "configured_fields": ["BLOP_HOSTED_URL"],
+                    "missing_fields": ["BLOP_API_TOKEN", "BLOP_PROJECT_ID"],
+                    "hosted_url": "https://cloud.blop.dev",
+                    "project_id": None,
+                    "token_present": False,
+                }):
+                    result = await validate_setup()
+
+    assert result["status"] == "warnings"
+    hosted_check = next(c for c in result["checks"] if c["name"] == "hosted_sync_config")
+    assert hosted_check["passed"] is False
+    assert any("Hosted sync is partially configured" in warning for warning in result["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_validate_reports_hosted_sync_connection_when_configured():
+    from blop.tools.validate import validate_setup
+
+    mock_browser = AsyncMock()
+    mock_playwright = AsyncMock()
+    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
+    mock_playwright.__aexit__ = AsyncMock(return_value=False)
+    mock_playwright.chromium.launch.return_value = mock_browser
+
+    mock_sync_client = MagicMock()
+    mock_sync_client.probe_connection = AsyncMock(return_value={
+        "status": "ok",
+        "workspace_id": "ws_123",
+        "token_scope": "project",
+        "requested_project_id": "proj_123",
+        "token_project_id": "proj_123",
+    })
+
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+        with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+            with patch("blop.storage.sqlite.init_db", new_callable=AsyncMock):
+                with patch("blop.tools.validate.hosted_sync_config_snapshot", return_value={
+                    "enabled": True,
+                    "partial": False,
+                    "configured_fields": ["BLOP_HOSTED_URL", "BLOP_API_TOKEN", "BLOP_PROJECT_ID"],
+                    "missing_fields": [],
+                    "hosted_url": "https://cloud.blop.dev",
+                    "project_id": "proj_123",
+                    "token_present": True,
+                }):
+                    with patch("blop.sync.client.SyncClient", return_value=mock_sync_client):
+                        result = await validate_setup()
+
+    hosted_check = next(c for c in result["checks"] if c["name"] == "hosted_sync_connection")
+    assert hosted_check["passed"] is True
+    assert "workspace" in hosted_check["message"]
+
+
+@pytest.mark.asyncio
 async def test_validate_setup_records_bucketed_validation_observations():
     from blop.tools.validate import validate_setup
 

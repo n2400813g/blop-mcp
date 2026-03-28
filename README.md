@@ -57,6 +57,8 @@ It plugs into **Cursor** or **Claude Code** as an MCP tool — meaning you just 
 - **Read-only context:** resources (`blop://...`) are for low-token retrieval and planning.
 - **Action tools:** tools execute browser actions, replays, recording, and risk analysis.
 - **Artifact storage:** runs, screenshots, traces, and logs are persisted locally (`.blop/` and `runs/`).
+- **Local-first posture:** the runtime works fully offline by default; Blop Cloud sync is optional and only used
+  when `BLOP_HOSTED_URL`, `BLOP_API_TOKEN`, and `BLOP_PROJECT_ID` are configured together.
 - **Auth behavior:** auth sessions are cached and validated; expired sessions are surfaced before critical runs.
 
 ---
@@ -166,6 +168,18 @@ TEST_PASSWORD=your_password
 ```
 
 Everything else can stay as-is.
+
+Optional Blop Cloud sync:
+
+```bash
+# Leave these unset for local-only mode.
+BLOP_HOSTED_URL=https://app.blop.dev
+BLOP_API_TOKEN=blop_sk_...
+BLOP_PROJECT_ID=00000000-0000-0000-0000-000000000000
+```
+
+`validate_setup` treats Blop Cloud sync as non-blocking: it warns on partial config and probes
+`/api/v1/sync/connection` when all three values are present.
 
 ### 2) Connect to your IDE
 

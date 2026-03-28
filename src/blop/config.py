@@ -255,6 +255,39 @@ BLOP_HTTP_API_KEY: str | None = os.getenv("BLOP_HTTP_API_KEY") or None
 BLOP_HTTP_PUBLIC_BASE_URL: str = os.getenv("BLOP_HTTP_PUBLIC_BASE_URL", "").rstrip("/")
 
 
+def hosted_sync_config_snapshot() -> dict:
+    """Describe optional hosted sync posture without forcing cloud usage."""
+    configured_fields = [
+        key
+        for key, value in {
+            "BLOP_HOSTED_URL": BLOP_HOSTED_URL,
+            "BLOP_API_TOKEN": BLOP_API_TOKEN,
+            "BLOP_PROJECT_ID": BLOP_PROJECT_ID,
+        }.items()
+        if value
+    ]
+    missing_fields = [
+        key
+        for key, value in {
+            "BLOP_HOSTED_URL": BLOP_HOSTED_URL,
+            "BLOP_API_TOKEN": BLOP_API_TOKEN,
+            "BLOP_PROJECT_ID": BLOP_PROJECT_ID,
+        }.items()
+        if not value
+    ]
+    fully_configured = len(configured_fields) == 3
+    partially_configured = bool(configured_fields) and not fully_configured
+    return {
+        "enabled": fully_configured,
+        "partial": partially_configured,
+        "configured_fields": configured_fields,
+        "missing_fields": missing_fields,
+        "hosted_url": BLOP_HOSTED_URL,
+        "project_id": BLOP_PROJECT_ID,
+        "token_present": bool(BLOP_API_TOKEN),
+    }
+
+
 def check_llm_api_key() -> tuple[bool, str]:
     """Return (has_key, key_name) based on the configured LLM provider."""
     provider = BLOP_LLM_PROVIDER.lower()
@@ -369,6 +402,12 @@ def runtime_config_issues() -> tuple[list[str], list[str]]:
     raw_durability_mode = os.getenv("BLOP_DURABILITY_MODE", "exit").strip().lower()
     if raw_durability_mode and raw_durability_mode not in {"exit", "async", "sync"}:
         warnings.append("BLOP_DURABILITY_MODE is unknown; expected one of exit, async, sync")
+    hosted_sync = hosted_sync_config_snapshot()
+    if hosted_sync["partial"]:
+        warnings.append(
+            "Hosted sync is partially configured. Set BLOP_HOSTED_URL, BLOP_API_TOKEN, "
+            "and BLOP_PROJECT_ID together, or leave all three unset for local-only mode."
+        )
     return errors, warnings
 
 
@@ -415,6 +454,7 @@ def runtime_posture_snapshot() -> dict:
             "debug_log": BLOP_DEBUG_LOG,
             "debug_log_absolute": bool(BLOP_DEBUG_LOG) and os.path.isabs(BLOP_DEBUG_LOG),
         },
+        "hosted_sync": hosted_sync_config_snapshot(),
         "issues": {
             "errors": errors,
             "warnings": warnings,

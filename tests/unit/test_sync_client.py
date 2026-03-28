@@ -72,3 +72,34 @@ async def test_sync_does_not_raise_on_http_error():
         )
 
     assert result is None
+
+
+async def test_probe_connection_hits_connection_endpoint():
+    """Configured client probes the hosted sync connection endpoint."""
+    client = SyncClient(hosted_url="https://app.blop.dev", api_token="blop_sk_test")
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json = MagicMock(
+        return_value={
+            "status": "ok",
+            "workspace_id": "ws_123",
+            "token_scope": "project",
+        }
+    )
+
+    with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=mock_response)):
+        result = await client.probe_connection("proj_123")
+
+    assert result is not None
+    assert result["status"] == "ok"
+
+
+async def test_probe_connection_returns_none_on_failure():
+    """Probe failures remain non-fatal for local-first runtime posture."""
+    client = SyncClient(hosted_url="https://app.blop.dev", api_token="blop_sk_test")
+
+    with patch("httpx.AsyncClient.get", new=AsyncMock(side_effect=Exception("401"))):
+        result = await client.probe_connection("proj_123")
+
+    assert result is None
