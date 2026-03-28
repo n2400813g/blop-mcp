@@ -107,7 +107,7 @@ async def record_mobile_flow(
         app_url=app_id,
         goal=goal,
         steps=steps,
-        created_at=datetime.datetime.utcnow().isoformat(),
+        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         business_criticality=business_criticality,  # type: ignore[arg-type]
         platform=platform,  # type: ignore[arg-type]
         mobile_target=mobile_target,
@@ -254,4 +254,4 @@ async def _execute_action(driver, action_dict: dict, platform: str) -> bool:
     except Exception:
         return False
 
-    return False
+    return False  # unrecognized action type
