@@ -13,6 +13,9 @@ eggs/
 .vibetest/
 runs/
 
+# Claude Code local worktrees / agent state (not part of the project)
+.claude/
+
 # Ralph autonomous agent (local tooling, not part of the project)
 .ralph/
 .ralphrc
