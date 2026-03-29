@@ -132,10 +132,10 @@ The setup script downloads these automatically:
 
 ### Your own app
 
-For real flows against your app, provide either:
+For real flows against your app, provide one of:
 
 - **`app_path`** — absolute path to your `.apk` / `.ipa` / `.app` file. blop will install it each session.
-- **`app_id`** — bundle ID (iOS) or package name (Android) of an already-installed app.
+- **`app_id`** — bundle ID (iOS) or package name (Android) of an already-installed app. Required if `app_path` is not set.
 
 ```python
 MobileDeviceTarget(
@@ -177,10 +177,10 @@ export BLOP_APPIUM_URL=http://127.0.0.1:4723
 
 ## Validation
 
-Run the blop doctor check to confirm your mobile setup is ready:
+Run the canonical preflight check to confirm your mobile setup is ready:
 
 ```python
-validate_setup(check_mobile=True)
+validate_release_setup(check_mobile=True)
 ```
 
 Or from the CLI:
@@ -188,8 +188,8 @@ Or from the CLI:
 ```bash
 python -c "
 import asyncio
-from blop.tools.validate import validate_setup
-result = asyncio.run(validate_setup(check_mobile=True))
+from blop.tools.validate import validate_release_setup
+result = asyncio.run(validate_release_setup(check_mobile=True))
 for c in result['checks']:
     status = '✓' if c['passed'] else '✗'
     print(f'{status} {c[\"name\"]}: {c[\"message\"]}')
@@ -202,7 +202,7 @@ for c in result['checks']:
 
 ### Appium not reachable
 
-**Symptom:** `RuntimeError: Failed to create Appium session` or `validate_setup` reports `appium_server` failed.
+**Symptom:** `RuntimeError: Failed to create Appium session` or `validate_release_setup` reports `appium_server` failed.
 
 **Fix:** Start the Appium server before running any mobile tool.
 

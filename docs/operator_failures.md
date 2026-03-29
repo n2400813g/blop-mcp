@@ -16,9 +16,9 @@
 ## Per-bucket quick reference
 
 ### `auth_session_failure`
-**Tool to run:** `validate_setup(app_url=..., profile_name=...)`
+**Tool to run:** `validate_release_setup(app_url=..., profile_name=...)`
 **Look at:** `auth_provenance.session_validation_status` in run results; health events of type `auth_context_resolved`
-**Fix:** `capture_auth_session(app_url=..., profile_name=...)` → `validate_setup(...)` → retry replay
+**Fix:** `capture_auth_session(app_url=..., profile_name=...)` → `validate_release_setup(...)` → retry replay
 **Escalate when:** release-gating journeys still cannot authenticate after re-capture
 
 ### `stale_flow_drift`
@@ -34,19 +34,19 @@
 **Escalate when:** re-recorded flow still requires risky healing or repair is rejected repeatedly
 
 ### `environment_runtime_misconfig`
-**Tool to run:** `validate_setup(app_url=...)` — look for `blocked` or `warnings` status
+**Tool to run:** `validate_release_setup(app_url=...)` — look for `blocked` or `warnings` status
 **Look at:** `bucketed_blockers` in setup output; `BLOP_DB_PATH`, `BLOP_RUNS_DIR`, `BLOP_DEBUG_LOG` env vars
-**Fix:** Correct the misconfigured path or env var; re-run `validate_setup(...)` until status is `ready`
+**Fix:** Correct the misconfigured path or env var; re-run `validate_release_setup(...)` until status is `ready`
 **Escalate when:** runtime remains degraded after fixing the reported precondition
 
 ### `install_or_upgrade_failure`
-**Tool to run:** `validate_setup(app_url=...)` → check `chromium_installed` check result
+**Tool to run:** `validate_release_setup(app_url=...)` → check `chromium_installed` check result
 **Look at:** `install_or_upgrade_failure` bucket in `validate_release_setup(...)` output; clean-environment smoke logs
 **Fix:** `playwright install chromium` or repair the package install; repeat smoke path
 **Escalate when:** clean install or upgrade still fails after running the installer
 
 ### `network_transient_infra`
-**Tool to run:** `validate_setup(app_url=...)` → `app_url_reachable` check; network logs at `runs/network/{run_id}/`
+**Tool to run:** `validate_release_setup(app_url=...)` → `app_url_reachable` check; network logs at `runs/network/{run_id}/`
 **Look at:** `network_errors` in run cases; 502/503/504 in console/network logs
 **Fix:** Restore app or network health; retry after upstream recovery
 **Escalate when:** repeated failures continue after infra recovery — may be a persistent regression

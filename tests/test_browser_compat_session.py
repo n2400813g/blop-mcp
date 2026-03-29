@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -8,10 +9,11 @@ from blop.engine.browser_session_manager import BrowserSessionManager
 
 
 class FakePage:
-    def __init__(self, url: str = "about:blank", title: str = "Blank") -> None:
+    def __init__(self, url: str = "about:blank", title: str = "Blank", evaluate_result=None) -> None:
         self.url = url
         self._title = title
         self._listeners: dict[str, object] = {}
+        self._evaluate_result = evaluate_result if evaluate_result is not None else []
 
     def on(self, event: str, handler) -> None:
         self._listeners[event] = handler
@@ -29,6 +31,9 @@ class FakePage:
 
     async def close(self) -> None:
         return None
+
+    async def evaluate(self, script: str):
+        return self._evaluate_result
 
 
 class FakeContext:
@@ -132,7 +137,9 @@ async def test_browser_session_manager_tabs_list_and_select():
 async def test_browser_compat_wrapper_delegates_to_session_manager():
     from blop.tools import browser_compat
 
-    with patch.object(browser_compat.SESSION_MANAGER, "navigate", new=AsyncMock(return_value={"url": "https://example.com"})) as nav:
+    with patch.object(
+        browser_compat.SESSION_MANAGER, "navigate", new=AsyncMock(return_value={"url": "https://example.com"})
+    ) as nav:
         result = await browser_compat.browser_navigate("https://example.com", profile_name="staging")
 
     nav.assert_awaited_once_with("https://example.com", profile_name="staging")
@@ -151,7 +158,8 @@ async def test_server_browser_network_requests_maps_include_static():
             result = await server.browser_network_requests(includeStatic=True)
 
     handler.assert_awaited_once_with(include_static=True)
-    assert result == {"ok": True}
+    assert result.get("ok") is True
+    assert isinstance(result.get("request_id"), str) and len(result["request_id"]) == 12
 
 
 @pytest.mark.asyncio
@@ -178,7 +186,8 @@ async def test_server_browser_take_screenshot_maps_fullpage_and_type():
         selector=None,
         img_type="jpeg",
     )
-    assert result == {"ok": True}
+    assert result.get("ok") is True
+    assert isinstance(result.get("request_id"), str) and len(result["request_id"]) == 12
 
 
 @pytest.mark.asyncio
@@ -238,6 +247,67 @@ async def test_server_safe_compat_call_returns_error_envelope_on_handler_excepti
     assert result["tool"] == "browser_hover"
 
 
+@pytest.mark.asyncio
+async def test_browser_session_manager_snapshot_returns_contract_metadata_and_nodes():
+    page = FakePage(
+        url="https://example.com/pricing",
+        title="Pricing",
+        evaluate_result={
+            "requested_root_selector": "#pricing",
+            "effective_root_selector": "#pricing",
+            "root_found": True,
+            "nodes": [
+                {
+                    "role": "button",
+                    "name": "Upgrade",
+                    "selector": 'button[data-testid="upgrade"]',
+                    "disabled": False,
+                }
+            ],
+        },
+    )
+    manager = BrowserSessionManager()
+    manager._context = FakeContext()
+    manager._context.pages = [page]
+
+    snapshot = await manager.snapshot(selector="#pricing")
+
+    assert snapshot["snapshot_format"] == "playwright_mcp_markdown_v1"
+    assert snapshot["requested_root_selector"] == "#pricing"
+    assert snapshot["effective_root_selector"] == "#pricing"
+    assert snapshot["root_found"] is True
+    assert snapshot["test_id_attribute"]
+    assert snapshot["node_count"] == 1
+    assert snapshot["nodes"][0]["ref"] == "e1"
+    assert snapshot["nodes"][0]["stable_key"]
+    assert snapshot["nodes"][0]["selector"] == 'button[data-testid="upgrade"]'
+    assert "[ref=e1]" in (snapshot["snapshot"] or "")
+
+
+@pytest.mark.asyncio
+async def test_browser_session_manager_snapshot_falls_back_to_body_when_root_missing():
+    page = FakePage(
+        url="https://example.com",
+        title="Example",
+        evaluate_result={
+            "requested_root_selector": "#missing",
+            "effective_root_selector": "body",
+            "root_found": False,
+            "nodes": [],
+        },
+    )
+    manager = BrowserSessionManager()
+    manager._context = FakeContext()
+    manager._context.pages = [page]
+
+    snapshot = await manager.snapshot(selector="#missing")
+
+    assert snapshot["requested_root_selector"] == "#missing"
+    assert snapshot["effective_root_selector"] == "body"
+    assert snapshot["root_found"] is False
+    assert snapshot["node_count"] == 0
+
+
 def test_browser_session_manager_resolve_output_path_blocks_traversal():
     manager = BrowserSessionManager()
     with pytest.raises(ValueError):
@@ -248,3 +318,59 @@ def test_browser_session_manager_resolve_output_path_blocks_absolute_path():
     manager = BrowserSessionManager()
     with pytest.raises(ValueError):
         manager._resolve_output_path("/tmp/escape.png", default_ext=".png")
+
+
+@pytest.mark.asyncio
+async def test_browser_session_manager_clicks_id_anchored_ref_with_real_playwright():
+    manager = BrowserSessionManager()
+
+    with patch(
+        "blop.engine.browser_session_manager.auth_engine.auto_storage_state_from_env",
+        new=AsyncMock(return_value=None),
+    ):
+        try:
+            await manager.ensure_started()
+        except Exception as exc:
+            message = str(exc)
+            if (
+                "Executable doesn't exist" in message
+                or "download new browsers" in message
+                or "bootstrap_check_in" in message
+                or "MachPortRendezvousServer" in message
+                or "Permission denied (1100)" in message
+            ):
+                pytest.skip("Playwright Chromium is not installed for real-browser compat tests")
+            raise
+
+        try:
+            page = manager._current_page()
+            await page.set_content(
+                """
+                <html>
+                  <body>
+                    <nav id="narvbarx">
+                      <div id="navbarExample">
+                        <ul>
+                          <li><a href="#" onclick="window.__clicked = (window.__clicked || 0) + 100; return false;">Home</a></li>
+                          <li><a href="#" onclick="window.__clicked = (window.__clicked || 0) + 1; return false;">Contact</a></li>
+                        </ul>
+                      </div>
+                    </nav>
+                  </body>
+                </html>
+                """
+            )
+
+            snapshot = await manager.snapshot()
+            markdown = snapshot.get("snapshot") or ""
+            match = re.search(r'Contact" \[ref=(e\d+)\]', markdown)
+            assert match, markdown
+
+            result = await manager.click(ref=match.group(1), selector=None)
+            clicked = await page.evaluate("() => window.__clicked || 0")
+
+            assert clicked == 1
+            assert result["selector"].startswith("div#navbarExample >")
+            assert "body > div#navbarExample" not in result["selector"]
+        finally:
+            await manager.close()

@@ -2,6 +2,8 @@
 
 This is the canonical Claude Code setup for `blop` using the supported local managed `stdio` baseline.
 
+For the product framing behind this setup, see [`docs/DOC_CONTRACT.md`](DOC_CONTRACT.md) and [`docs/AGENT_CONTEXT_PACK.md`](AGENT_CONTEXT_PACK.md).
+
 ## Add the MCP server
 
 ```bash

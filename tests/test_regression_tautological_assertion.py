@@ -3,10 +3,12 @@
 These tests verify that the cookie_json path in resolve_storage_state actually
 invokes Playwright correctly and handles error cases properly.
 """
+
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from blop.schemas import AuthProfile
 
@@ -54,6 +56,7 @@ async def test_cookie_json_path_calls_playwright_context(tmp_path):
 async def test_cookie_json_path_attempts_add_cookies(tmp_path):
     """cookie_json auth must call context.add_cookies() with the parsed cookie list."""
     import json
+
     import blop.engine.auth as auth_engine
     from blop.engine.auth import resolve_storage_state
 

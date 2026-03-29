@@ -10,7 +10,13 @@ Compatible MCP clients: **Cursor**, **Claude Code**, and other clients that supp
 
 ## Quick Navigation
 
+- [Changelog](CHANGELOG.md) · [Security](SECURITY.md) · [Versioning](docs/VERSIONING.md)
+- [Customer onboarding](docs/CUSTOMER_ONBOARDING.md) · [Data handling](docs/DATA_HANDLING.md) · [Support runbook](docs/SUPPORT_RUNBOOK.md)
+- [Contributing](CONTRIBUTING.md)
 - [Product thesis](#product-thesis)
+- [Documentation contract](#documentation-contract)
+- [OSS competitive analysis](docs/oss_core_competitive_analysis.md)
+- [Open-core capability placement](docs/capability_placement_open_core.md)
 - [What it actually does](#what-does-it-actually-do)
 - [Why blop vs generic AI testing agents](#why-blop-vs-generic-ai-testing-agents)
 - [Before you start](#before-you-start--what-youll-need)
@@ -32,7 +38,15 @@ Compatible MCP clients: **Cursor**, **Claude Code**, and other clients that supp
 
 - **Core belief:** teams do not have a "generate more tests" problem; they have a **release confidence** problem.
 - **What competitors miss:** bug detection without business weighting creates noisy output and weak ship/no-ship decisions.
-- **What blop uniquely does:** connect context graphs, regression evidence, incident patterns, and telemetry into a single risk narrative that leaders can act on.
+- **What blop uniquely does:** connect journeys, evidence, release history, and governance into a single risk narrative that leaders can act on.
+
+## Documentation contract
+
+- Repo-level source of truth for documentation scope: [`docs/DOC_CONTRACT.md`](docs/DOC_CONTRACT.md)
+- Contributor and agent orientation pack: [`docs/AGENT_CONTEXT_PACK.md`](docs/AGENT_CONTEXT_PACK.md)
+- OSS-core competitive module memo: [`docs/oss_core_competitive_analysis.md`](docs/oss_core_competitive_analysis.md)
+- Open-core placement memo for upcoming capability layers: [`docs/capability_placement_open_core.md`](docs/capability_placement_open_core.md)
+- Canonical product thesis in Linear: [Product thesis: analyst vision (P1–P4 map)](https://linear.app/blopaidk/document/product-thesis-analyst-vision-p1-p4-map-b747d50a40ae)
 
 ---
 
@@ -46,6 +60,13 @@ Compatible MCP clients: **Cursor**, **Claude Code**, and other clients that supp
 
 It plugs into **Cursor** or **Claude Code** as an MCP tool — meaning you just ask it to run tests in a chat window, the same way you'd ask a colleague.
 
+### Product map
+
+- **P1 OSS Core:** this repo's main focus — local MCP runtime, journey discovery/recording/replay, and evidence capture.
+- **P2 Hosted Workflow:** sync, release dashboard, history, sharing, and the system of record where release confidence lives for teams.
+- **P3 Governance Engine:** policy, ship/hold/block reasoning, ownership, and signoff.
+- **P4 Intelligence Layer:** impact taxonomy, recurring insight, and telemetry correlation once aggregate signals are trustworthy.
+
 ### Who this helps
 
 - **QA + developers:** quickly discover, record, and replay business-critical flows with deterministic evidence.
@@ -56,7 +77,12 @@ It plugs into **Cursor** or **Claude Code** as an MCP tool — meaning you just 
 - **Read-only context:** resources (`blop://...`) are for low-token retrieval and planning.
 - **Action tools:** tools execute browser actions, replays, recording, and risk analysis.
 - **Artifact storage:** runs, screenshots, traces, and logs are persisted locally (`.blop/` and `runs/`).
+- **Local-first runtime, broader product:** the OSS runtime works fully offline by default, while the broader product thesis also includes hosted sync, release history, dashboarding, and sharing workflows.
 - **Auth behavior:** auth sessions are cached and validated; expired sessions are surfaced before critical runs.
+
+### Roadmap-aware release confidence
+
+blop is not just a browser runner. The broader product thesis is that release decisions should reflect product context such as customer goals, acceptance criteria, and release scope. This OSS repo mainly implements the local execution and evidence plane today, but the docs and interfaces should still frame those runs as inputs into a roadmap-aware release-confidence workflow.
 
 ---
 
@@ -166,13 +192,25 @@ TEST_PASSWORD=your_password
 
 Everything else can stay as-is.
 
+Optional Blop Cloud sync:
+
+```bash
+# Leave these unset for local-only mode.
+BLOP_HOSTED_URL=https://app.blop.dev
+BLOP_API_TOKEN=blop_sk_...
+BLOP_PROJECT_ID=00000000-0000-0000-0000-000000000000
+```
+
+`validate_release_setup` treats Blop Cloud sync as non-blocking: it warns on partial config and probes
+`/api/v1/sync/connection` when all three values are present.
+
 ### 2) Connect to your IDE
 
 ### Cursor
 
 1. Open Cursor
 2. Go to **Settings → MCP**
-3. Click **Add MCP Server** and paste this (update the path to where you cloned blop):
+3. Click **Add MCP Server** and paste this (update the path to where you cloned blop). You can start from [`.cursor/mcp.json.example`](.cursor/mcp.json.example) and copy it to `.cursor/mcp.json` locally if you prefer a file-based setup (the real `mcp.json` is gitignored).
 
 ```json
 {
@@ -348,9 +386,9 @@ Tool confusion matrix (use this / not that):
 | Save URL/profile storage state to disk | `save_browser_state(app_url, ...)` | `browser_storage_state(...)` | `save_browser_state` captures URL-scoped state; `browser_storage_state` exports the current shared compat session. |
 | Mock APIs during regression replay runs | `mock_network_route(...)` | `browser_route(...)` | `mock_network_route` applies during regression execution; `browser_route` only affects the shared compat browser session. |
 | Capture one-off exploratory QA output | `evaluate_web_task(...)` | `record_test_flow(...)` | `evaluate_web_task` returns immediate report output for one-off checks (see [full reference](#evaluate-web-task)); `record_test_flow` creates reusable flow artifacts for regression. |
-| Create reusable regression flow IDs | `record_test_flow(...)` | `evaluate_web_task(...)` | `record_test_flow` is the source of reusable `flow_id` values consumed by `run_regression_test`. |
+| Create reusable regression flow IDs | `record_test_flow(...)` | `evaluate_web_task(...)` | `record_test_flow` is the source of reusable `flow_id` values consumed by `run_release_check(..., mode="replay")`. |
 | Inspect page interaction structure from crawling context | `get_page_structure(app_url, url?)` | `browser_snapshot(...)` | `get_page_structure` is crawl/discovery-oriented; `browser_snapshot` is for current shared compat session state. |
-| Start/stop the long-lived compat browser interaction loop | `browser_navigate(...)`, `browser_snapshot(...)`, `browser_click(...)` | `discover_test_flows(...)` | `browser_*` tools are imperative session controls; `discover_test_flows` is planning/crawl output, not interactive control. |
+| Start/stop the long-lived compat browser interaction loop | `browser_navigate(...)`, `browser_snapshot(...)`, `browser_click(...)` | `discover_critical_journeys(...)` | `browser_*` tools are imperative session controls; journey discovery is planning/crawl output, not interactive control. |
 
 ---
 
@@ -361,10 +399,10 @@ Tool confusion matrix (use this / not that):
 ```
 Use blop to discover and test https://new-saas-app.com from scratch.
 
-1. Call discover_test_flows with business_goal="Find all revenue-critical flows including signup, checkout, and onboarding"
-2. Record the top 5 suggested flows by calling `record_test_flow` for each one
-3. Run regression on all of them
-4. Show me anything with severity "high" or "blocker"
+1. Call validate_release_setup(app_url="https://new-saas-app.com")
+2. Call discover_critical_journeys with business_goal="Find all revenue-critical journeys including signup, checkout, and onboarding"
+3. Record the top suggested gated journeys with `record_test_flow`
+4. Call run_release_check in replay mode and summarize anything that blocks shipping
 ```
 
 ### Scenario 2 — Before a release
@@ -373,9 +411,9 @@ Use blop to discover and test https://new-saas-app.com from scratch.
 We're about to ship a new version. Use blop to run a pre-release check on https://staging.myapp.com:
 
 1. list_recorded_tests — show what flows we have
-2. run_regression_test on all flows against staging
+2. run_release_check on all release-gating flows against staging
 3. get_test_results — compare pass/fail to last run
-4. debug_test_case on anything that changed from pass to fail
+4. triage_release_blocker or debug_test_case on anything that changed from pass to fail
 ```
 
 ### Scenario 3 — Test the full authenticated product
@@ -384,8 +422,8 @@ We're about to ship a new version. Use blop to run a pre-release check on https:
 Test the authenticated product experience on https://app.myapp.com:
 
 1. save_auth_profile("prod-user", "env_login", login_url="https://app.myapp.com/login")
-2. record_test_flow for: dashboard load, core feature (e.g. "create new project"), settings page, and billing/upgrade flow
-3. run_regression_test with profile_name="prod-user"
+2. record_test_flow for: dashboard load, core feature (e.g. "create new project"), settings page, and billing/upgrade journey
+3. run_release_check with profile_name="prod-user"
 4. get_test_results — show me the full breakdown
 ```
 
@@ -395,7 +433,7 @@ Test the authenticated product experience on https://app.myapp.com:
 A user reported the checkout button isn't working. Use blop to investigate:
 
 1. record_test_flow("https://myapp.com", "checkout_bug", "Navigate to pricing, click the Pro plan CTA, and verify checkout loads")
-2. run_regression_test on that flow
+2. run_release_check on that flow
 3. get_test_results — check step_failure_index and assertion_failures
 4. debug_test_case on the failure to get screenshots and a plain-English explanation
 ```
@@ -438,6 +476,13 @@ save_auth_profile(
 
 ## MCP resources + v2 surface summary
 
+Canonical release-confidence resources:
+
+- `blop://health`
+- `blop://journeys`
+- `blop://release/{release_id}/brief`
+- `blop://release/{release_id}/artifacts`
+
 Use resources for cheap context retrieval before action:
 
 - `blop://inventory/{app}`
@@ -459,34 +504,43 @@ Detailed resources and v2 references are provided below in the full reference se
 
 ## Full tool reference
 
+The canonical release-confidence workflow uses:
+- `validate_release_setup`
+- `discover_critical_journeys`
+- `record_test_flow`
+- `run_release_check`
+- `triage_release_blocker`
+
+Legacy names such as `validate_setup`, `discover_test_flows`, and `run_regression_test` still appear below for compatibility context, but they should not be treated as the default path in new docs or prompts.
+
 Recommended order for reliable MCP workflows:
 
 1. **Preflight and contract**
-   - `validate_setup`
+   - `validate_release_setup`
    - `blop_v2_get_surface_contract`
 2. **Context before action**
    - `explore_site_inventory`, `get_page_structure`
    - read `blop://inventory/...`, `blop://context-graph/...`
 3. **Execution**
-   - `discover_test_flows`, `record_test_flow`, `run_regression_test`
+   - `discover_critical_journeys`, `record_test_flow`, `run_release_check`
 4. **Observability and governance**
-   - `get_run_health_stream`, `get_test_results`, `get_risk_analytics`
+   - `triage_release_blocker`, `get_run_health_stream`, `get_test_results`, `get_risk_analytics`
    - v2: release risk, journey health, incident clustering, remediation, correlation
 
 Detailed tool behavior is below.
 
-### 1. `discover_test_flows` — *"What should I test?"*
+### 1. `discover_critical_journeys` — *"What should gate this release?"*
 
 Crawls your app and asks AI to figure out what the important user journeys are. Returns a list of suggested flows with descriptions of what to verify.
 
 **Basic usage:**
 ```
-discover_test_flows("https://your-app.com")
+discover_critical_journeys("https://your-app.com")
 ```
 
 **With more context (gets better results):**
 ```
-discover_test_flows(
+discover_critical_journeys(
   app_url="https://your-app.com",
   business_goal="Find all revenue-critical flows like checkout and upgrade",
   max_depth=2
@@ -497,17 +551,15 @@ discover_test_flows(
 | Parameter | What it does | Example |
 |-----------|-------------|---------|
 | `app_url` | The website to scan | `"https://app.example.com"` |
-| `business_goal` | Tell it what matters most to your business | `"Focus on checkout and onboarding"` |
+| `business_goal` | Tell it what matters most to your business or release scope | `"Focus on checkout and onboarding"` |
 | `profile_name` | Use a logged-in account to scan private pages | `"my-auth-profile"` |
 | `max_depth` | How deep to crawl (1 = homepage only, 2 = homepage + linked pages) | `2` |
 | `max_pages` | Max pages to crawl before planning flows | `20` |
 | `seed_urls` | Start crawl from specific same-origin URLs | `["https://app.example.com/pricing"]` |
 | `include_url_pattern` | Regex: only crawl URLs that match | `"/(pricing|signup)"` |
 | `exclude_url_pattern` | Regex: skip noisy URLs | `"/(blog|legal)"` |
-| `return_inventory` | Include raw crawl inventory in response | `true` |
-| `command` | Free-text instruction — blop figures out the rest | `"Discover auth flows for the dashboard"` |
 
-**What you get back:** Flows include a `business_criticality` hint (`revenue`, `activation`, `retention`, `support`, `other`) so you can prioritize recording and triage results.
+**What you get back:** Journeys include business context and release-gating hints so you can decide what must be recorded and replayed before ship/no-ship decisions.
 
 ```json
 {
@@ -553,7 +605,7 @@ explore_site_inventory(
 )
 ```
 
-Use this when you want deterministic topology mapping before `discover_test_flows`.
+Use this when you want deterministic topology mapping before `discover_critical_journeys`.
 
 ---
 
@@ -624,7 +676,7 @@ capture_auth_session(
 | `timeout_secs` | Max seconds to wait for you to complete login (default 120) | `180` |
 | `user_data_dir` | Path to a persistent Chromium profile dir (optional) | `.blop/chrome_profile_myapp` — use when OAuth providers treat a fresh browser as a bot |
 
-**Returns:** `status` is `"captured"` (session saved, profile ready for `record_test_flow` and `run_regression_test`) or `"timeout"` (no success detected in time). On success you get `storage_state_path`; the profile is already stored — just pass `profile_name` to other tools.
+**Returns:** `status` is `"captured"` (session saved, profile ready for `record_test_flow` and `run_release_check`) or `"timeout"` (no success detected in time). On success you get `storage_state_path`; the profile is already stored — just pass `profile_name` to other tools.
 
 ---
 
@@ -738,15 +790,15 @@ record_test_flow(
 
 ---
 
-### 7. `run_regression_test` — *"Check if everything still works"*
+### 7. `run_release_check` — *"Can we ship this safely?"*
 
-Replays recorded flows against your app. Returns immediately with a `run_id` — poll for results with `get_test_results`. Run status moves: `queued` → `running` → (`completed` | `failed` | `cancelled`). If the auth profile cannot be resolved, status is `waiting_auth` and no flows run until you fix the profile and retry.
+Replays recorded flows against your app and returns a release-confidence decision path. In replay mode it returns immediately with a `run_id` — poll for results with `get_test_results`. Run status moves: `queued` → `running` → (`completed` | `failed` | `cancelled`). If the auth profile cannot be resolved, status is `waiting_auth` and no flows run until you fix the profile and retry.
 
 `flow_ids` must come from `record_test_flow` (or `list_recorded_tests`) and all IDs must be valid for the run to start.
 
 **Basic usage:**
 ```
-run_regression_test(
+run_release_check(
   app_url="https://your-app.com",
   flow_ids=["abc123", "def456"]
 )
@@ -754,10 +806,11 @@ run_regression_test(
 
 **With auth and hybrid mode:**
 ```
-run_regression_test(
+run_release_check(
   app_url="https://your-app.com",
   flow_ids=["abc123", "def456"],
   profile_name="my-app-login",
+  mode="replay",
   run_mode="hybrid"
 )
 ```
@@ -872,13 +925,15 @@ Use this to prioritize stabilization work across many runs instead of triaging o
 
 ### 12. `list_recorded_tests` — *"What tests do I have?"*
 
+Compatibility-oriented listing of every recorded flow. For canonical planning context in the release workflow, prefer `blop://journeys`.
+
 Lists every flow you've ever recorded.
 
 ```
 list_recorded_tests()
 ```
 
-Returns a list with `flow_id`, `flow_name`, `app_url`, `goal`, and `created_at`. Use the `flow_id` values in `run_regression_test`.
+Returns a list with `flow_id`, `flow_name`, `app_url`, `goal`, and `created_at`. Use the `flow_id` values in `run_release_check`.
 
 ---
 
@@ -908,12 +963,12 @@ debug_test_case(
 
 ---
 
-### 14. `validate_setup` — *"Is everything ready to run tests?"*
+### 14. `validate_release_setup` — *"Is everything ready to gate a release?"*
 
 Checks preconditions before you run flows: `GOOGLE_API_KEY`, Chromium installed, SQLite DB, optional `app_url` reachability, and optional auth profile (including whether a `storage_state` session is still valid). Use it after changing env vars or before a big run.
 
 ```
-validate_setup(app_url="https://your-app.com", profile_name="my-app-login")
+validate_release_setup(app_url="https://your-app.com", profile_name="my-app-login")
 ```
 
 **Returns:** `status` is `"ready"` (all checks passed), `"warnings"` (e.g. app URL unreachable but you can still run), or `"blocked"` (e.g. missing API key or Chromium). The `checks` array lists each condition and whether it passed; `blockers` and `warnings` give short messages. If an auth profile's session has expired, the message will suggest re-running `capture_auth_session`.
@@ -956,8 +1011,8 @@ Flow-level stability profile derived from historical cases (pass/failure rates, 
 ### Recommended context-first workflow
 
 1. Read `inventory` + `context-graph` resources.
-2. Run `discover_test_flows`/`record_test_flow` using that context.
-3. Run `run_regression_test`.
+2. Run `discover_critical_journeys`/`record_test_flow` using that context.
+3. Run `run_release_check`.
 4. Read `artifact-index` + `stability-profile`.
 5. Use `get_risk_analytics` for cross-run prioritization.
 
@@ -994,7 +1049,7 @@ blop v2 expands beyond regression execution into **change intelligence**, **jour
 
 ### Compatibility strategy (v1 + v2)
 
-- v1 tools remain supported (`discover_test_flows`, `run_regression_test`, `get_test_results`, etc.).
+- Compatibility aliases remain available for migration (`discover_test_flows`, `run_regression_test`, `validate_setup`), but new workflows should prefer the canonical release-confidence surface.
 - v1 responses now include `related_v2_resources` links so agents can progressively adopt v2 context.
 - v2 resources use a stable envelope:
 
@@ -1070,7 +1125,7 @@ Check your `.env` file exists in the blop-mcp folder and has your key on the `GO
 2. Try visiting your `LOGIN_URL` manually to confirm the credentials work
 3. If your login uses unusual field names, add `TEST_USERNAME_SELECTOR=input[name="your-field"]` to `.env`
 4. For SSO/MFA, use `capture_auth_session` (opens a browser so you log in once; session is saved automatically) or `auth_type="storage_state"` with an exported session file
-5. Run `validate_setup(profile_name="your-profile")` to verify the profile; if the session expired, re-run `capture_auth_session` or refresh your storage state file
+5. Run `validate_release_setup(profile_name="your-profile")` to verify the profile; if the session expired, re-run `capture_auth_session` or refresh your storage state file
 
 **Tests are all passing but you know something is broken**
 The regression engine uses AI vision to evaluate assertions — it shouldn't produce false positives. If something is marked pass that looks wrong, use `debug_test_case` to re-run it with full screenshot capture and see what the browser actually showed.

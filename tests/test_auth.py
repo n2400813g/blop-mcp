@@ -1,9 +1,10 @@
 """Tests for engine/auth.py."""
+
 from __future__ import annotations
 
 import os
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -194,7 +195,9 @@ async def test_validate_auth_session_false_result_invalidates_cache(tmp_path):
     with patch.object(auth_engine, "_validate_auth_session_uncached", uncached):
         assert await auth_engine.validate_auth_session(str(state_file), "https://example.com") is True
         assert await auth_engine.validate_auth_session(str(state_file), "https://example.com") is True
-        auth_engine.invalidate_validated_session_cache(storage_state_path=str(state_file), app_url="https://example.com")
+        auth_engine.invalidate_validated_session_cache(
+            storage_state_path=str(state_file), app_url="https://example.com"
+        )
         assert await auth_engine.validate_auth_session(str(state_file), "https://example.com") is False
         assert await auth_engine.validate_auth_session(str(state_file), "https://example.com") is True
 
@@ -207,11 +210,13 @@ async def test_env_login_social_only_page_returns_none_without_selector_retries(
 
     mock_page = AsyncMock()
     mock_page.goto = AsyncMock()
-    mock_page.evaluate = AsyncMock(return_value={
-        "user_input_count": 0,
-        "password_input_count": 0,
-        "social_buttons": ["Continue with Google", "Continue with Microsoft"],
-    })
+    mock_page.evaluate = AsyncMock(
+        return_value={
+            "user_input_count": 0,
+            "password_input_count": 0,
+            "social_buttons": ["Continue with Google", "Continue with Microsoft"],
+        }
+    )
     mock_context = AsyncMock()
     mock_context.new_page = AsyncMock(return_value=mock_page)
     mock_browser = AsyncMock()
@@ -237,20 +242,22 @@ async def test_env_login_rechecks_blank_login_surface_before_selector_retries(en
     mock_page = AsyncMock()
     mock_page.goto = AsyncMock()
     mock_page.wait_for_timeout = AsyncMock()
-    mock_page.evaluate = AsyncMock(side_effect=[
-        {
-            "user_input_count": 0,
-            "password_input_count": 0,
-            "social_buttons": [],
-            "body_text_length": 0,
-        },
-        {
-            "user_input_count": 0,
-            "password_input_count": 0,
-            "social_buttons": ["Continue with Google"],
-            "body_text_length": 120,
-        },
-    ])
+    mock_page.evaluate = AsyncMock(
+        side_effect=[
+            {
+                "user_input_count": 0,
+                "password_input_count": 0,
+                "social_buttons": [],
+                "body_text_length": 0,
+            },
+            {
+                "user_input_count": 0,
+                "password_input_count": 0,
+                "social_buttons": ["Continue with Google"],
+                "body_text_length": 120,
+            },
+        ]
+    )
     mock_context = AsyncMock()
     mock_context.new_page = AsyncMock(return_value=mock_page)
     mock_browser = AsyncMock()
@@ -287,7 +294,7 @@ async def test_cookie_json_path(cookie_json_profile, tmp_path):
     with patch.object(auth_engine, "_ALLOW_ABSOLUTE_AUTH_PATHS", True):
         with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
             with patch("os.makedirs"):
-                result = await resolve_storage_state(cookie_json_profile)
+                await resolve_storage_state(cookie_json_profile)
 
     # Should have tried to create a browser context
     mock_browser.new_context.assert_called_once()

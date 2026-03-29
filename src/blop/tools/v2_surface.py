@@ -12,6 +12,7 @@ The engine logic in blop/engine/ is shared between both the compat and canonical
 This module contains the MCP tool handler wrappers for the v2 change-intelligence and
 reliability control-plane tools (context graphs, incident clustering, correlation, etc.).
 """
+
 from __future__ import annotations
 
 import json
@@ -23,10 +24,9 @@ from statistics import quantiles
 from urllib.parse import quote
 
 from blop.engine.context_graph import (
-    build_impact_summary,
     build_failure_neighborhood,
+    build_impact_summary,
     diff_context_graph,
-    find_journey_summary,
     get_context_graph_summary,
     get_impacted_journeys,
     get_next_checks_for_release_scope,
@@ -34,6 +34,7 @@ from blop.engine.context_graph import (
     list_journey_summaries,
     summarize_release_scope,
 )
+from blop.engine.errors import BLOP_CLUSTER_NOT_FOUND, BLOP_RESOURCE_NOT_FOUND, BLOP_VALIDATION_FAILED, tool_error
 from blop.engine.secrets import mask_text
 from blop.schemas import (
     CorrelationMatch,
@@ -46,7 +47,6 @@ from blop.schemas import (
     TelemetrySignalInput,
 )
 from blop.storage import sqlite
-
 
 CRITICALITY_VALUES = ["revenue", "activation", "retention", "support", "other"]
 SEVERITY_ORDER = {"blocker": 4, "high": 3, "medium": 2, "low": 1}
@@ -78,6 +78,7 @@ def _default_criticality_weights() -> dict[str, float]:
 
 def _severity_from_score(score: float) -> str:
     from blop.config import BLOP_RISK_THRESHOLD_BLOCKER, BLOP_RISK_THRESHOLD_HIGH, BLOP_RISK_THRESHOLD_MEDIUM
+
     if score >= BLOP_RISK_THRESHOLD_BLOCKER:
         return "blocker"
     if score >= BLOP_RISK_THRESHOLD_HIGH:
@@ -120,7 +121,7 @@ def _merge_similar_buckets(buckets: dict[str, list]) -> dict[str, list]:
             continue
         merged_members = list(buckets[key_a])
         assigned.add(key_a)
-        for key_b in keys[i + 1:]:
+        for key_b in keys[i + 1 :]:
             if key_b in assigned:
                 continue
             if _jaccard_similarity(key_a, key_b) >= SIMILARITY_THRESHOLD:
@@ -182,7 +183,10 @@ TOOL_CONTRACTS = {
                 "created_at": {"type": "string", "format": "date-time"},
                 "node_count": {"type": "integer"},
                 "edge_count": {"type": "integer"},
-                "archetype": {"type": "string", "enum": ["marketing_site", "saas_app", "editor_heavy", "checkout_heavy"]},
+                "archetype": {
+                    "type": "string",
+                    "enum": ["marketing_site", "saas_app", "editor_heavy", "checkout_heavy"],
+                },
                 "diff_summary": {
                     "type": "object",
                     "properties": {
@@ -278,7 +282,10 @@ TOOL_CONTRACTS = {
                 "criticality_filter": {"type": "array", "items": {"type": "string", "enum": CRITICALITY_VALUES}},
             },
         },
-        "response_schema": {"type": "object", "properties": {"app_url": {"type": "string"}, "window": {"type": "string"}, "journeys": {"type": "array"}}},
+        "response_schema": {
+            "type": "object",
+            "properties": {"app_url": {"type": "string"}, "window": {"type": "string"}, "journeys": {"type": "array"}},
+        },
         "example": {"app_url": "https://app.example.com", "window": "7d"},
     },
     "blop_v2_cluster_incidents": {
@@ -330,7 +337,10 @@ TOOL_CONTRACTS = {
                 "include_fix_hypotheses": {"type": "boolean", "default": True},
             },
         },
-        "response_schema": {"type": "object", "properties": {"cluster_id": {"type": "string"}, "issue_draft": {"type": "string"}}},
+        "response_schema": {
+            "type": "object",
+            "properties": {"cluster_id": {"type": "string"}, "issue_draft": {"type": "string"}},
+        },
         "example": {"cluster_id": "cluster_checkout_cta_step_3", "format": "markdown"},
     },
     "blop_v2_ingest_telemetry_signals": {
@@ -385,7 +395,10 @@ TOOL_CONTRACTS = {
                 "min_confidence": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.6},
             },
         },
-        "response_schema": {"type": "object", "properties": {"window": {"type": "string"}, "matches": {"type": "array"}}},
+        "response_schema": {
+            "type": "object",
+            "properties": {"window": {"type": "string"}, "matches": {"type": "array"}},
+        },
         "example": {"app_url": "https://app.example.com", "window": "7d", "min_confidence": 0.6},
     },
     "blop_v2_suggest_flows_for_diff": {
@@ -470,9 +483,9 @@ async def capture_context(
 
     Only triggers a lightweight plan_flows_from_inventory call when intent_focus is set.
     """
-    from blop.engine.discovery import inventory_site, plan_flows_from_inventory
     from blop.engine.context_graph import build_context_graph, get_context_graph_summary
-    from blop.storage.sqlite import get_flow, get_latest_context_graph, list_flows, save_context_graph
+    from blop.engine.discovery import inventory_site, plan_flows_from_inventory
+    from blop.storage.sqlite import get_latest_context_graph, list_flows_full, save_context_graph
 
     inventory = await inventory_site(
         app_url=app_url,
@@ -487,6 +500,7 @@ async def capture_context(
     # Persist inventory
     try:
         from blop.storage.sqlite import save_site_inventory
+
         await save_site_inventory(app_url, inventory.to_dict())
     except Exception:
         pass
@@ -503,14 +517,7 @@ async def capture_context(
                 flows = []
 
     previous_graph = await get_latest_context_graph(app_url, profile_name=profile_name)
-    flow_refs = await list_flows()
-    recorded_flows = []
-    for flow_ref in flow_refs:
-        if flow_ref.get("app_url") != app_url:
-            continue
-        flow_obj = await get_flow(flow_ref["flow_id"])
-        if flow_obj is not None:
-            recorded_flows.append(flow_obj)
+    recorded_flows = await list_flows_full(app_url=app_url)
     current_graph = build_context_graph(
         app_url=app_url,
         inventory=inventory,
@@ -558,9 +565,17 @@ async def compare_context(
     baseline = await sqlite.get_context_graph(baseline_graph_id)
     candidate = await sqlite.get_context_graph(candidate_graph_id)
     if not baseline or not candidate:
-        return {"error": "One or both graph IDs were not found"}
+        return tool_error(
+            "One or both graph IDs were not found",
+            BLOP_RESOURCE_NOT_FOUND,
+            details={"baseline_graph_id": baseline_graph_id, "candidate_graph_id": candidate_graph_id},
+        )
     if baseline.app_url != app_url or candidate.app_url != app_url:
-        return {"error": "Graph IDs do not match app_url"}
+        return tool_error(
+            "Graph IDs do not match app_url",
+            BLOP_VALIDATION_FAILED,
+            details={"app_url": app_url},
+        )
 
     diff = diff_context_graph(baseline, candidate)
     release_scope = summarize_release_scope(baseline, candidate)
@@ -595,8 +610,16 @@ async def assess_release_risk(
             if key in weights and isinstance(value, (int, float)):
                 weights[key] = float(value)
 
-    baseline = baseline_ref if isinstance(baseline_ref, ReleaseReference) else ReleaseReference.model_validate(baseline_ref or {})
-    candidate = candidate_ref if isinstance(candidate_ref, ReleaseReference) else ReleaseReference.model_validate(candidate_ref or {})
+    baseline = (
+        baseline_ref
+        if isinstance(baseline_ref, ReleaseReference)
+        else ReleaseReference.model_validate(baseline_ref or {})
+    )
+    candidate = (
+        candidate_ref
+        if isinstance(candidate_ref, ReleaseReference)
+        else ReleaseReference.model_validate(candidate_ref or {})
+    )
     if not candidate.graph_id:
         latest = await sqlite.get_latest_context_graph(app_url)
         if latest:
@@ -620,7 +643,9 @@ async def assess_release_risk(
             impacted_count = len(release_scope.get("changed_journeys", []))
             uncovered_count = len(release_scope.get("newly_uncovered_journeys", []))
             auth_boundary_changed = bool(release_scope.get("auth_boundary_changed"))
-            context_risk = min(40.0, (impacted_count * 8.0) + (uncovered_count * 12.0) + (8.0 if auth_boundary_changed else 0.0))
+            context_risk = min(
+                40.0, (impacted_count * 8.0) + (uncovered_count * 12.0) + (8.0 if auth_boundary_changed else 0.0)
+            )
             for item in compare["impact_summary"][:5]:
                 top_risks.append(
                     {
@@ -691,6 +716,7 @@ async def assess_release_risk(
     await sqlite.save_release_snapshot(snapshot)
     result = snapshot.model_dump()
     from blop.config import BLOP_RISK_THRESHOLD_BLOCKER, BLOP_RISK_THRESHOLD_HIGH, BLOP_RISK_THRESHOLD_MEDIUM
+
     result["score_explanation"] = (
         f"Risk score {risk_score}/100 ({risk_level.upper()}). "
         f"Context change contribution: +{round(context_risk, 1)} pts (max 40). "
@@ -701,6 +727,48 @@ async def assess_release_risk(
         f">={BLOP_RISK_THRESHOLD_MEDIUM}=MEDIUM (review), "
         f"<{BLOP_RISK_THRESHOLD_MEDIUM}=LOW (safe)."
     )
+
+    from blop.engine.qa_context import build_qa_context
+
+    flows_full = await sqlite.list_flows_full(app_url=app_url)
+    flow_dicts = [
+        {
+            "flow_name": f.flow_name,
+            "business_criticality": f.business_criticality,
+            "assertion_count": len(f.assertions_json) + len(f.structured_assertions),
+            "steps": [s.model_dump() for s in f.steps],
+        }
+        for f in flows_full
+    ]
+    recent_runs = [r for r in await sqlite.list_runs(limit=30) if r.get("app_url") == app_url][:10]
+    rids = [r["run_id"] for r in recent_runs]
+    started = {r["run_id"]: r.get("started_at") or "" for r in recent_runs}
+    grouped_cases = await sqlite.list_cases_for_runs(rids)
+    run_case_rows: list[dict] = []
+    for rid, cases in grouped_cases.items():
+        for c in cases:
+            fr = c.raw_result or (c.assertion_failures[0] if c.assertion_failures else None)
+            run_case_rows.append(
+                {
+                    "flow_name": c.flow_name,
+                    "status": "pass" if c.status == "pass" else "fail",
+                    "failure_reason": fr,
+                    "created_at": started.get(rid, ""),
+                    "run_id": rid,
+                }
+            )
+    qa_ctx = await build_qa_context(app_url, flow_dicts, run_case_rows)
+    critical_flows = [f for f in flows_full if f.business_criticality in ("revenue", "activation")]
+    no_test_names = {g.flow_name for g in qa_ctx.coverage_gaps if g.gap_type == "no_test"}
+    covered = sum(1 for f in critical_flows if f.flow_name not in no_test_names)
+    crit_pct = round(100.0 * covered / len(critical_flows), 1) if critical_flows else None
+    result["coverage_summary"] = {
+        "critical_flow_coverage_pct": crit_pct,
+        "test_pyramid_bottom_heavy": qa_ctx.test_pyramid.is_bottom_heavy,
+        "coverage_efficiency": qa_ctx.test_pyramid.coverage_efficiency,
+    }
+    result["top_coverage_gaps"] = [g.model_dump() for g in qa_ctx.coverage_gaps[:3]]
+
     return result
 
 
@@ -711,20 +779,21 @@ async def get_journey_health(
     criticality_filter: list[str] | None = None,
 ) -> dict:
     since_iso = _window_to_since_iso(window)
-    flows = await sqlite.list_flows()
-    selected = [f for f in flows if f.get("app_url") == app_url]
+    full_flows = await sqlite.list_flows_full(app_url=app_url, criticality_filter=criticality_filter)
+    selected = [
+        {
+            "flow_id": flow.flow_id,
+            "flow_name": flow.flow_name,
+            "business_criticality": flow.business_criticality,
+        }
+        for flow in full_flows
+    ]
     if journey_filter:
         allowed = set(journey_filter)
         selected = [f for f in selected if f.get("flow_name") in allowed or f.get("flow_id") in allowed]
 
     out: list[JourneyHealth] = []
     for flow in selected:
-        flow_full = await sqlite.get_flow(flow["flow_id"])
-        if not flow_full:
-            continue
-        if criticality_filter and flow_full.business_criticality not in criticality_filter:
-            continue
-
         # Use real time-window filtering instead of run-count proxy
         cases = await sqlite.list_cases_for_flow_since(flow["flow_id"], since_iso, limit=500)
         if not cases:
@@ -732,7 +801,7 @@ async def get_journey_health(
                 JourneyHealth(
                     journey_id=flow["flow_id"],
                     journey_name=flow["flow_name"],
-                    criticality=flow_full.business_criticality,
+                    criticality=flow["business_criticality"],
                     run_count=0,
                 )
             )
@@ -770,7 +839,7 @@ async def get_journey_health(
             JourneyHealth(
                 journey_id=flow["flow_id"],
                 journey_name=flow["flow_name"],
-                criticality=flow_full.business_criticality,
+                criticality=flow["business_criticality"],
                 pass_rate=pass_rate,
                 p95_duration_ms=p95,
                 stability_score=stability_score,
@@ -799,9 +868,7 @@ async def cluster_incidents(
         # Filter runs by actual timestamp
         all_runs = await sqlite.list_runs(limit=500)
         selected_run_ids = [
-            r["run_id"]
-            for r in all_runs
-            if r["app_url"] == app_url and (r.get("started_at") or "") >= since_iso
+            r["run_id"] for r in all_runs if r["app_url"] == app_url and (r.get("started_at") or "") >= since_iso
         ]
 
     # Build raw failure buckets
@@ -811,7 +878,9 @@ async def cluster_incidents(
         for case in cases:
             if case.status not in ("fail", "error", "blocked"):
                 continue
-            key = f"{case.flow_name}#step_{case.step_failure_index if case.step_failure_index is not None else 'unknown'}"
+            key = (
+                f"{case.flow_name}#step_{case.step_failure_index if case.step_failure_index is not None else 'unknown'}"
+            )
             raw_buckets.setdefault(key, []).append(case)
 
     # Merge semantically similar buckets via Jaccard similarity
@@ -876,7 +945,11 @@ async def generate_remediation(
 ) -> dict:
     cluster = await sqlite.get_incident_cluster(cluster_id)
     if not cluster:
-        return {"error": f"Cluster {cluster_id} not found"}
+        return tool_error(
+            f"Cluster {cluster_id} not found",
+            BLOP_CLUSTER_NOT_FOUND,
+            details={"cluster_id": cluster_id},
+        )
     samples = []
     for case_id in cluster.member_case_ids[:3]:
         case = await sqlite.get_case(case_id)
@@ -900,7 +973,8 @@ async def generate_remediation(
     owner_hints: list[str] = []
     if include_owner_hints:
         owner_hints = [
-            f"Likely owner: team responsible for area '{areas[0]}'." if areas
+            f"Likely owner: team responsible for area '{areas[0]}'."
+            if areas
             else f"Likely owner: team responsible for flow domain '{cluster.title.split('#')[0]}'."
         ]
     fix_hypotheses: list[str] = []
@@ -911,24 +985,22 @@ async def generate_remediation(
             "Auth/session precondition missing in the flow setup.",
         ]
         if neighborhood.get("auth_required"):
-            fix_hypotheses.insert(0, "Auth boundary likely changed; verify session bootstrap and protected-route landing.")
+            fix_hypotheses.insert(
+                0, "Auth boundary likely changed; verify session bootstrap and protected-route landing."
+            )
         if neighborhood.get("coverage_status") != "recorded" and journey_label:
             fix_hypotheses.append(f"Add or refresh recorded release-gating coverage for {journey_label}.")
 
     # Try Gemini for richer fix hypotheses and owner hints
     if (include_owner_hints or include_fix_hypotheses) and os.getenv("GOOGLE_API_KEY"):
         try:
+            from blop.engine.llm_factory import make_message, make_planning_llm
             from blop.prompts import REMEDIATION_PROMPT
-            from blop.engine.llm_factory import make_planning_llm, make_message
 
-            llm = make_planning_llm(temperature=0.3, max_output_tokens=800)
+            llm = make_planning_llm(temperature=0.3, max_output_tokens=800, role="summary")
             evidence_text = "\n".join(evidence[:5]) or "none"
-            console_errors = "\n".join(
-                [e for s in samples[:2] for e in (s.console_errors or [])[:2]]
-            ) or "none"
-            network_errors = "\n".join(
-                [e for s in samples[:2] for e in (s.network_errors or [])[:2]]
-            ) or "none"
+            console_errors = "\n".join([e for s in samples[:2] for e in (s.console_errors or [])[:2]]) or "none"
+            network_errors = "\n".join([e for s in samples[:2] for e in (s.network_errors or [])[:2]]) or "none"
 
             prompt = REMEDIATION_PROMPT.format(
                 title=cluster.title,
@@ -954,7 +1026,9 @@ async def generate_remediation(
 
     journey_line = f"- Journey neighborhood: {journey_label}\n" if journey_label else ""
     routes_line = f"- Entry routes: {', '.join(entry_routes[:3])}\n" if entry_routes else ""
-    next_checks_block = "### Next checks\n" + "\n".join([f"- {item}" for item in next_checks[:5]]) + "\n" if next_checks else ""
+    next_checks_block = (
+        "### Next checks\n" + "\n".join([f"- {item}" for item in next_checks[:5]]) + "\n" if next_checks else ""
+    )
     issue_draft = (
         f"## {cluster.title}\n\n"
         f"- Severity: **{cluster.severity}**\n"
@@ -1000,7 +1074,11 @@ async def ingest_telemetry_signals(
     rejected = 0
     for signal_raw in signals:
         try:
-            signal = signal_raw if isinstance(signal_raw, TelemetrySignalInput) else TelemetrySignalInput.model_validate(signal_raw)
+            signal = (
+                signal_raw
+                if isinstance(signal_raw, TelemetrySignalInput)
+                else TelemetrySignalInput.model_validate(signal_raw)
+            )
             normalized.append(
                 TelemetrySignal(
                     app_url=app_url,
@@ -1221,6 +1299,7 @@ async def autogenerate_flows(
         if auto_record:
             try:
                 from blop.tools.record import record_test_flow
+
                 result = await record_test_flow(
                     app_url=app_url,
                     flow_name=journey.label,

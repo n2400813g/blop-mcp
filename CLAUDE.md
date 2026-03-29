@@ -49,7 +49,9 @@ blop
 python -m blop.server
 ```
 
-The MCP server config for Cursor is in `.cursor/mcp.json`.
+Cursor MCP config: copy `.cursor/mcp.json.example` to `.cursor/mcp.json`, set absolute paths and env (the real file is gitignored — never commit secrets).
+
+Core workflow and tool tiers: `docs/MCP_CORE_WORKFLOW.md`. `BLOP_ENABLE_COMPAT_TOOLS=true` adds legacy `browser_*` / `blop_v2_*` tools; default keeps the smaller surface with context + atomic browser tools.
 
 ## Production baseline
 
@@ -146,3 +148,4 @@ Screenshots, traces, and console logs are in `runs/<type>/<run_id>/`. SQLite DB 
 - `run_regression_test` fires an `asyncio.create_task` and returns immediately — caller must poll `get_test_results`. Run status: `queued` → `running` → `completed`/`failed`/`cancelled`; `waiting_auth` if auth profile cannot be resolved.
 - `business_criticality` (revenue, activation, retention, support, other) is stored on flows and cases; classifier and reporting use it for severity labels (e.g. "BLOCKER in revenue flow").
 - Exploration profile defaults are configurable via `BLOP_EXPLORATION_PROFILE` (`default`/`saas_marketing`) with override knobs for network idle, SPA settle, agent retries, and crawl page limits.
+- Structured errors: many handlers return top-level `error` (string) and `blop_error` (`code`, `message`, `retryable`, `details`); see `docs/DOC_CONTRACT.md` and `src/blop/engine/errors.py`.

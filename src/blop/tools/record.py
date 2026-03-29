@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse
 from typing import Optional
+from urllib.parse import urlparse
 
 from blop.config import validate_app_url
 from blop.engine import auth as auth_engine
-from blop.engine.flow_builder import build_recorded_flow
-from blop.engine.planner import build_execution_plan, build_intent_contract
 from blop.engine import recording
+from blop.engine.errors import BLOP_URL_VALIDATION_FAILED, BLOP_VALIDATION_FAILED, tool_error
+from blop.engine.flow_builder import build_recorded_flow
 from blop.engine.logger import get_logger
+from blop.engine.planner import build_execution_plan, build_intent_contract
 from blop.reporting.results import describe_flow_staleness
 from blop.schemas import RecordedFlowResult
-from blop.storage import sqlite, files as file_store
+from blop.storage import files as file_store
+from blop.storage import sqlite
 
 _log = get_logger("tools.record")
 
@@ -50,11 +52,12 @@ def _ensure_assertion_steps(steps, goal: str):
     has_assert_step = any(getattr(step, "action", None) == "assert" for step in steps)
     if has_assert_step:
         return steps
-    from blop.schemas import FlowStep
     from blop.engine.recording import _build_public_page_assertions
+    from blop.schemas import FlowStep
 
     entry_url = _select_entry_url(
-        next((getattr(step, "value", None) for step in steps if getattr(step, "action", None) == "navigate"), None) or "",
+        next((getattr(step, "value", None) for step in steps if getattr(step, "action", None) == "navigate"), None)
+        or "",
         goal,
         steps,
     )
@@ -92,11 +95,7 @@ def _ensure_assertion_steps(steps, goal: str):
 
 
 async def _find_refresh_candidate(app_url: str, flow_name: str) -> dict | None:
-    existing = await sqlite.list_flows()
-    for flow in existing:
-        if flow.get("app_url") == app_url and flow.get("flow_name") == flow_name:
-            return flow
-    return None
+    return await sqlite.find_flow_by_url_and_name(app_url, flow_name)
 
 
 async def record_test_flow(
@@ -122,16 +121,17 @@ async def record_test_flow(
 
     url_err = validate_app_url(app_url)
     if url_err:
-        return {"error": url_err}
+        return tool_error(url_err, BLOP_URL_VALIDATION_FAILED)
     if not flow_name or not flow_name.strip():
-        return {"error": "flow_name is required"}
+        return tool_error("flow_name is required", BLOP_VALIDATION_FAILED, details={"field": "flow_name"})
     if not goal or not goal.strip():
-        return {"error": "goal is required"}
+        return tool_error("goal is required", BLOP_VALIDATION_FAILED, details={"field": "goal"})
 
     planning_source = "explicit_goal"
     # If command provided, parse for additional intent context
     if command:
         from blop.engine.planner import parse_command
+
         intent = await parse_command(command, app_url, profile_name=profile_name)
         if intent.profile_name and not profile_name:
             profile_name = intent.profile_name
@@ -152,13 +152,10 @@ async def record_test_flow(
     if profile:
         try:
             storage_state = await auth_engine.resolve_storage_state(profile)
-        except Exception as exc:
+        except Exception:
             _log.error("auth_resolve_failed profile=%s", profile_name, exc_info=True)
             return {
-                "error": (
-                    f"Auth profile '{profile_name}' could not be resolved. "
-                    "Run capture_auth_session to refresh."
-                )
+                "error": (f"Auth profile '{profile_name}' could not be resolved. Run capture_auth_session to refresh.")
             }
     if storage_state is None:
         storage_state = await auth_engine.auto_storage_state_from_env()
@@ -166,6 +163,7 @@ async def record_test_flow(
     refresh_candidate = await _find_refresh_candidate(app_url, flow_name)
 
     import uuid
+
     run_id = uuid.uuid4().hex
 
     steps = await recording.record_flow(
@@ -179,11 +177,7 @@ async def record_test_flow(
     entry_url = _select_entry_url(app_url, goal, steps)
 
     # Collect assertion texts from assert steps
-    assertions_json = [
-        s.value or s.description
-        for s in steps
-        if s.action == "assert" and (s.value or s.description)
-    ]
+    assertions_json = [s.value or s.description for s in steps if s.action == "assert" and (s.value or s.description)]
 
     valid_criticalities = {"revenue", "activation", "retention", "support", "other"}
     bc = business_criticality if business_criticality in valid_criticalities else "other"
@@ -191,7 +185,7 @@ async def record_test_flow(
     # Derive spa_hints from the context graph archetype so replay inherits
     # the right wait strategy without manual tuning.
     from blop.engine.context_graph import detect_app_archetype, editor_hints_from_archetype
-    from blop.schemas import SpaHints, SiteInventory
+    from blop.schemas import SiteInventory, SpaHints
 
     # Build a minimal inventory from recorded steps to classify the archetype.
     nav_urls = [s.value or "" for s in steps if s.action == "navigate"]
@@ -224,13 +218,17 @@ async def record_test_flow(
     intent_contract = build_intent_contract(execution_plan)
 
     recording_drift: list[str] = []
-    if execution_plan.target_surface == "editor" and not any("/editor" in (s.value or "").lower() for s in steps if s.action == "navigate"):
+    if execution_plan.target_surface == "editor" and not any(
+        "/editor" in (s.value or "").lower() for s in steps if s.action == "navigate"
+    ):
         recording_drift.append("surface_drift")
     if intent_contract.goal_type != "exploration" and not assertions_json:
         recording_drift.append("assertion_drift")
     generic_only_steps = [
-        s for s in steps
-        if s.action in {"click", "fill"} and not any([s.selector, s.aria_name, s.aria_role, s.target_text, s.testid_selector])
+        s
+        for s in steps
+        if s.action in {"click", "fill"}
+        and not any([s.selector, s.aria_name, s.aria_role, s.target_text, s.testid_selector])
     ]
     if generic_only_steps:
         recording_drift.append("legacy_unstructured")
@@ -241,6 +239,7 @@ async def record_test_flow(
         goal=goal,
         steps=steps,
         assertions_json=assertions_json,
+        api_expectations=recording.infer_api_expectations(goal),
         entry_url=entry_url,
         business_criticality=bc,
         spa_hints=spa_hints,
@@ -299,24 +298,32 @@ async def _record_mobile_flow(
 ) -> dict:
     """Route to the mobile recording engine."""
     import uuid
+
     from blop.schemas import MobileDeviceTarget
 
     if not app_id or not app_id.strip():
-        return {"error": "app_url (app_id) is required for mobile flows (use bundle ID or package name)"}
+        return tool_error(
+            "app_url (app_id) is required for mobile flows (use bundle ID or package name)",
+            BLOP_VALIDATION_FAILED,
+            details={"field": "app_id"},
+        )
     if not flow_name or not flow_name.strip():
-        return {"error": "flow_name is required"}
+        return tool_error("flow_name is required", BLOP_VALIDATION_FAILED, details={"field": "flow_name"})
     if not goal or not goal.strip():
-        return {"error": "goal is required"}
+        return tool_error("goal is required", BLOP_VALIDATION_FAILED, details={"field": "goal"})
 
     try:
         target = MobileDeviceTarget(platform=platform, app_id=app_id, **mobile_target)
     except Exception as exc:
-        return {"error": f"Invalid mobile_target: {exc}"}
+        return tool_error(
+            f"Invalid mobile_target: {exc}", BLOP_VALIDATION_FAILED, details={"cause": type(exc).__name__}
+        )
 
     run_id = uuid.uuid4().hex
 
     try:
         from blop.engine.mobile.recording import record_mobile_flow
+
         flow = await record_mobile_flow(
             app_id=app_id,
             platform=platform,
@@ -327,9 +334,13 @@ async def _record_mobile_flow(
             business_criticality=business_criticality,
         )
     except RuntimeError as exc:
-        return {"error": str(exc)}
+        return tool_error(str(exc), BLOP_VALIDATION_FAILED, details={"stage": "mobile_record"})
     except Exception as exc:
-        return {"error": f"Mobile recording failed: {exc}"}
+        return tool_error(
+            f"Mobile recording failed: {exc}",
+            BLOP_VALIDATION_FAILED,
+            details={"stage": "mobile_record", "cause": type(exc).__name__},
+        )
 
     await sqlite.save_flow(flow)
 
@@ -343,6 +354,7 @@ async def _record_mobile_flow(
         "artifacts_dir": file_store.artifacts_dir(flow.flow_id),
         "workflow_hint": (
             f"Mobile flow '{flow_name}' recorded on {platform} ({len(flow.steps)} steps). "
-            f"Next: run_regression_test(app_url='{app_id}', flow_ids=['{flow.flow_id}'], platform='{platform}')"
+            f"Next: run_regression_test(app_url='{app_id}', flow_ids=['{flow.flow_id}']) "
+            f"(install blop-mcp[mobile], Appium running, device/emulator up)."
         ),
     }

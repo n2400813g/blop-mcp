@@ -13,6 +13,9 @@ eggs/
 .vibetest/
 runs/
 
+# Claude Code local worktrees / agent state (not part of the project)
+.claude/
+
 # Ralph autonomous agent (local tooling, not part of the project)
 .ralph/
 .ralphrc
@@ -34,6 +37,23 @@ qa_artifacts/
 .idea/
 *.swp
 *.swo
+
+# Cursor — local editor state (never `git add .` secrets or scratch plans).
+# Optional: commit only the template; real config stays untracked as `.cursor/mcp.json`.
+.cursor/*
+!.cursor/mcp.json.example
+
+# Local uv cache (never commit)
+.uv-cache/
+
+# Keys and certs (accidental commit prevention)
+*.pem
+*.p12
+*.key
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
 
 # OS files
 .DS_Store

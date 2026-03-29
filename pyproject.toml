@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blop-mcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "MCP-native release confidence control plane for web apps"
 requires-python = ">=3.11"
 readme = "README.md"
 license = "MIT"
 keywords = ["mcp", "browser automation", "release confidence", "qa", "playwright"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
@@ -42,8 +42,10 @@ Documentation = "https://github.com/n2400813g/blop-mcp/blob/main/README.md"
 [project.optional-dependencies]
 dev = [
   "build>=1.2.2",
+  "pre-commit>=4.0",
   "pytest>=7.0",
   "pytest-asyncio>=0.21",
+  "ruff>=0.9",
   "twine>=5.1.1",
 ]
 anthropic = [
@@ -56,6 +58,8 @@ server = [
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.30.0",
   "sse-starlette>=2.0.0",
+  "slowapi>=0.1.9",
+  "prometheus-client>=0.20.0",
 ]
 mobile = [
   "Appium-Python-Client>=4.0.0",
@@ -64,12 +68,27 @@ mobile-proxy = [
   "Appium-Python-Client>=4.0.0",
   "mitmproxy>=10.0.0",
 ]
+insights = [
+  "pm4py>=2.7.0",
+  "pandas>=2.0.0",
+]
+otel = [
+  "opentelemetry-api>=1.20.0",
+  "opentelemetry-sdk>=1.20.0",
+]
 all = [
   "langchain_anthropic>=0.3.0",
   "langchain_openai>=0.3.0",
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.30.0",
   "sse-starlette>=2.0.0",
+  "slowapi>=0.1.9",
+  "prometheus-client>=0.20.0",
+  "Appium-Python-Client>=4.0.0",
+  "pm4py>=2.7.0",
+  "pandas>=2.0.0",
+  "opentelemetry-api>=1.20.0",
+  "opentelemetry-sdk>=1.20.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -81,11 +100,16 @@ include = ["blop*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Opt-in real Appium/device tests: pytest tests/ -m mobile …
+# (Cloud BLOP_MOBILE_PROVIDER still needs a matching vendor device pool.)
+addopts = ["-m", "not mobile and not eval_harness"]
 markers = [
   "happy_path: end-to-end release confidence workflow tests",
   "slow: slower browser or network-backed tests",
   "integration: tests that require external services or a real browser runtime",
+  "network: tests that touch the public internet",
   "mobile: tests that require Appium server + iOS simulator or Android emulator",
+  "eval_harness: offline orchestration smoke (opt-in: pytest -m eval_harness)",
 ]
 
 [project.scripts]
@@ -102,3 +126,13 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 ignore = ["E501"]
+
+# Deferred imports after env/bootstrap (logging suppression, test env).
+[tool.ruff.lint.per-file-ignores]
+"src/blop/server.py" = ["E402"]
+"src/blop/engine/regression.py" = ["E402"]
+"src/blop/engine/discovery.py" = ["E402"]
+"tests/integration/test_mobile_dvia_ios.py" = ["E402"]
+"tests/integration/test_mobile_sauce_android.py" = ["E402"]
+"tests/test_mobile_selector.py" = ["E402"]
+"tests/test_sqlite_integration.py" = ["E402"]

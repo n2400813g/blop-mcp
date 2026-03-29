@@ -1,4 +1,5 @@
 """Path safety helpers for user-provided file and directory inputs."""
+
 from __future__ import annotations
 
 import re
@@ -15,9 +16,7 @@ def sanitize_component(value: str, *, field_name: str) -> str:
     if "/" in cleaned or "\\" in cleaned:
         raise ValueError(f"{field_name} must not contain path separators")
     if not _SAFE_COMPONENT.fullmatch(cleaned):
-        raise ValueError(
-            f"{field_name} may only contain letters, numbers, '.', '_' and '-'"
-        )
+        raise ValueError(f"{field_name} may only contain letters, numbers, '.', '_' and '-'")
     return cleaned
 
 

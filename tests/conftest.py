@@ -4,7 +4,6 @@ import asyncio
 import os
 
 import pytest
-import pytest_asyncio
 
 
 @pytest.fixture(autouse=True)

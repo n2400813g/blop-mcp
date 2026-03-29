@@ -5,7 +5,9 @@ import os
 import re
 
 from blop.engine import auth as auth_engine
-from blop.engine import classifier, regression as regression_engine
+from blop.engine import classifier
+from blop.engine import regression as regression_engine
+from blop.engine.errors import BLOP_CASE_NOT_FOUND, BLOP_FLOW_NOT_FOUND, BLOP_RUN_NOT_FOUND, tool_error
 from blop.schemas import DebugResult, FailureCase
 from blop.storage import sqlite
 
@@ -13,7 +15,7 @@ from blop.storage import sqlite
 async def debug_test_case(run_id: str, case_id: str) -> dict:
     run = await sqlite.get_run(run_id)
     if not run:
-        return {"error": f"Run {run_id} not found"}
+        return tool_error(f"Run {run_id} not found", BLOP_RUN_NOT_FOUND, details={"run_id": run_id})
 
     cases = await sqlite.list_cases_for_run(run_id)
     if not cases and run.get("cases"):
@@ -21,11 +23,19 @@ async def debug_test_case(run_id: str, case_id: str) -> dict:
 
     case = next((c for c in cases if c.case_id == case_id), None)
     if not case:
-        return {"error": f"Case {case_id} not found in run {run_id}"}
+        return tool_error(
+            f"Case {case_id} not found in run {run_id}",
+            BLOP_CASE_NOT_FOUND,
+            details={"run_id": run_id, "case_id": case_id},
+        )
 
     flow = await sqlite.get_flow(case.flow_id)
     if not flow:
-        return {"error": f"Flow {case.flow_id} not found"}
+        return tool_error(
+            f"Flow {case.flow_id} not found",
+            BLOP_FLOW_NOT_FOUND,
+            details={"flow_id": case.flow_id},
+        )
 
     profile_name = run.get("profile_name")
     storage_state = None
@@ -48,6 +58,7 @@ async def debug_test_case(run_id: str, case_id: str) -> dict:
     new_case = await classifier.classify_case(new_case, run["app_url"])
 
     from blop.storage.files import console_log_path
+
     log_path = console_log_path(run_id, case_id)
     console_log = ""
     if os.path.exists(log_path):
@@ -74,6 +85,7 @@ async def debug_test_case(run_id: str, case_id: str) -> dict:
 async def _explain_failure(case: FailureCase, flow, url: str) -> str:
     """Generate a plain-English explanation of why the test failed."""
     from blop.config import check_llm_api_key
+
     has_key, _ = check_llm_api_key()
     if not has_key or case.status == "pass":
         return ""
@@ -86,9 +98,9 @@ async def _explain_failure(case: FailureCase, flow, url: str) -> str:
         step_desc = flow.steps[step_index].description
 
     try:
-        from blop.engine.llm_factory import make_planning_llm, make_message
+        from blop.engine.llm_factory import make_message, make_planning_llm
 
-        llm = make_planning_llm(temperature=0.2, max_output_tokens=600)
+        llm = make_planning_llm(temperature=0.2, max_output_tokens=600, role="summary")
         from blop.engine.secrets import mask_text
 
         prompt = NEXT_ACTIONS_PROMPT.format(
@@ -100,6 +112,15 @@ async def _explain_failure(case: FailureCase, flow, url: str) -> str:
             assertion_failures=", ".join(case.assertion_failures[:3]) or "none",
             console_errors=", ".join(case.console_errors[:3]) or "none",
         )
+        semantic_failures = [
+            result.get("assertion", "")
+            for result in (case.assertion_results or [])
+            if "semantic_query" in str(result.get("eval_type")) and not result.get("passed", True)
+        ]
+        if semantic_failures:
+            prompt += f"\nSemantic assertion failures: {', '.join(semantic_failures[:3])}"
+        if case.api_verification_failures:
+            prompt += f"\nAPI verification failures: {', '.join(case.api_verification_failures[:3])}"
         prompt = mask_text(prompt)
 
         response = await llm.ainvoke([make_message(prompt)])

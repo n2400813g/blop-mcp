@@ -1,4 +1,5 @@
 """Tests for tools/debug.py."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -118,7 +119,8 @@ async def test_debug_case_run_not_found():
             case_id="case1",
         )
 
-    assert result == {"error": "Run nonexistent_run not found"}
+    assert result.get("error") == "Run nonexistent_run not found"
+    assert result.get("blop_error", {}).get("code") == "BLOP_RUN_NOT_FOUND"
 
 
 @pytest.mark.asyncio

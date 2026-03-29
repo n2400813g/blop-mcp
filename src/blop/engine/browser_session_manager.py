@@ -1,4 +1,5 @@
 """Persistent Playwright session manager for browser_* compatibility tools."""
+
 from __future__ import annotations
 
 import asyncio
@@ -13,11 +14,12 @@ from playwright.async_api import Browser, BrowserContext, Dialog, Page, Playwrig
 from blop.config import (
     BLOP_COMPAT_HEADLESS,
     BLOP_COMPAT_OUTPUT_DIR,
-    BLOP_COMPAT_TEST_ID_ATTRIBUTE,
+    BLOP_TEST_ID_ATTRIBUTE,
     validate_app_url,
 )
 from blop.engine import auth as auth_engine
-from blop.engine.snapshot_refs import SnapshotNode, render_snapshot_markdown
+from blop.engine.errors import BLOP_BROWSER_SESSION_ERROR, BLOP_RESOURCE_NOT_FOUND, tool_error
+from blop.engine.snapshot_refs import SnapshotNode, build_stable_key, render_snapshot_markdown
 
 
 def _event_level_weight(level: str) -> int:
@@ -27,6 +29,7 @@ def _event_level_weight(level: str) -> int:
 
 class BrowserSessionManager:
     """Single-process browser session used by compatibility tools."""
+
     _MAX_EVENTS = 1000
 
     def __init__(self) -> None:
@@ -175,6 +178,12 @@ class BrowserSessionManager:
             del self._network_events[:overflow]
             self._last_nav_network_idx = max(0, self._last_nav_network_idx - overflow)
 
+    async def read_page_info(self) -> dict:
+        """Current page URL and title (no navigation)."""
+        await self.ensure_started()
+        page = self._current_page()
+        return {"url": page.url, "title": await page.title()}
+
     async def navigate(self, url: str, profile_name: Optional[str] = None) -> dict:
         err = validate_app_url(url)
         if err:
@@ -210,27 +219,38 @@ class BrowserSessionManager:
             return {"status": "created", "index": self._current_tab}
         if action == "select":
             if index is None or index < 0 or index >= len(pages):
-                return {"error": f"Invalid tab index: {index}"}
+                return tool_error(f"Invalid tab index: {index}", BLOP_BROWSER_SESSION_ERROR, details={"index": index})
             self._current_tab = index
             return {"status": "selected", "index": self._current_tab, "url": self._current_page().url}
         if action == "close":
             close_idx = self._current_tab if index is None else index
             if close_idx < 0 or close_idx >= len(pages):
-                return {"error": f"Invalid tab index: {close_idx}"}
+                return tool_error(
+                    f"Invalid tab index: {close_idx}",
+                    BLOP_BROWSER_SESSION_ERROR,
+                    details={"index": close_idx},
+                )
             await pages[close_idx].close()
             remaining = self._pages()
             self._current_tab = max(0, min(self._current_tab, len(remaining) - 1)) if remaining else 0
             return {"status": "closed", "index": close_idx, "remaining": len(remaining)}
-        return {"error": f"Unsupported action '{action}'"}
+        return tool_error(f"Unsupported action '{action}'", BLOP_BROWSER_SESSION_ERROR, details={"action": action})
 
     async def snapshot(self, selector: Optional[str] = None, filename: Optional[str] = None) -> dict:
         page = self._current_page()
-        test_id_attr = BLOP_COMPAT_TEST_ID_ATTRIBUTE.replace("'", "\\'")
+        test_id_attr = BLOP_TEST_ID_ATTRIBUTE.replace("\\", "\\\\").replace("'", "\\'")
         root_selector = (selector or "body").replace("\\", "\\\\").replace("'", "\\'")
-        data = await page.evaluate(
+        raw = await page.evaluate(
             f"""() => {{
-                const root = document.querySelector('{root_selector}') || document.body;
-                if (!root) return [];
+                const requestedSelector = '{root_selector}';
+                const requestedRoot = document.querySelector(requestedSelector);
+                const root = requestedRoot || document.body;
+                if (!root) return {{
+                    requested_root_selector: requestedSelector,
+                    root_found: false,
+                    effective_root_selector: 'body',
+                    nodes: [],
+                }};
                 const roleMap = {{a:'link',button:'button',select:'combobox',textarea:'textbox'}};
                 const inputRole = {{checkbox:'checkbox',radio:'radio',button:'button',submit:'button',reset:'button'}};
                 const selectorList = [
@@ -241,17 +261,20 @@ class BrowserSessionManager:
                     if (!(el instanceof Element)) return '';
                     const parts = [];
                     let node = el;
+                    let anchored = false;
                     while (node && node.nodeType === Node.ELEMENT_NODE && node !== document.body) {{
                         let sel = node.nodeName.toLowerCase();
                         if (node.id) {{
                             sel += '#' + CSS.escape(node.id);
                             parts.unshift(sel);
+                            anchored = true;
                             break;
                         }}
                         const testId = node.getAttribute('{test_id_attr}');
                         if (testId) {{
                             sel += '[{test_id_attr}=\"' + CSS.escape(testId) + '\"]';
                             parts.unshift(sel);
+                            anchored = true;
                             break;
                         }}
                         let nth = 1;
@@ -263,7 +286,7 @@ class BrowserSessionManager:
                         parts.unshift(sel);
                         node = node.parentElement;
                     }}
-                    parts.unshift('body');
+                    if (!anchored) parts.unshift('body');
                     return parts.join(' > ');
                 }}
                 const out = [];
@@ -295,13 +318,29 @@ class BrowserSessionManager:
                         }});
                     }}
                 }}
-                return out.slice(0, 250);
+                return {{
+                    requested_root_selector: requestedSelector,
+                    root_found: !!requestedRoot || requestedSelector === 'body',
+                    effective_root_selector: requestedRoot ? requestedSelector : 'body',
+                    nodes: out.slice(0, 250),
+                }};
             }}"""
         )
 
+        if isinstance(raw, list):
+            data = {
+                "requested_root_selector": selector or "body",
+                "root_found": True,
+                "effective_root_selector": selector or "body",
+                "nodes": raw,
+            }
+        else:
+            data = raw or {}
+        items = data.get("nodes", []) if isinstance(data, dict) else []
+
         nodes: list[SnapshotNode] = []
         refs: dict[str, str] = {}
-        for i, item in enumerate(data, 1):
+        for i, item in enumerate(items, 1):
             ref = f"e{i}"
             node = SnapshotNode(
                 ref=ref,
@@ -309,6 +348,12 @@ class BrowserSessionManager:
                 name=str(item.get("name", "")),
                 selector=str(item.get("selector", "")),
                 disabled=bool(item.get("disabled", False)),
+                stable_key=build_stable_key(
+                    role=str(item.get("role", "generic")),
+                    name=str(item.get("name", "")),
+                    selector=str(item.get("selector", "")),
+                    disabled=bool(item.get("disabled", False)),
+                ),
             )
             nodes.append(node)
             refs[ref] = node.selector
@@ -325,6 +370,22 @@ class BrowserSessionManager:
             "node_count": len(nodes),
             "snapshot": markdown if not filename else None,
             "path": str(output_file) if output_file else None,
+            "snapshot_format": "playwright_mcp_markdown_v1",
+            "requested_root_selector": str(data.get("requested_root_selector") or (selector or "body")),
+            "effective_root_selector": str(data.get("effective_root_selector") or (selector or "body")),
+            "root_found": bool(data.get("root_found", True)),
+            "test_id_attribute": BLOP_TEST_ID_ATTRIBUTE,
+            "nodes": [
+                {
+                    "ref": node.ref,
+                    "stable_key": node.stable_key,
+                    "role": node.role,
+                    "name": node.name,
+                    "selector": node.selector,
+                    "disabled": node.disabled,
+                }
+                for node in nodes
+            ],
         }
 
     def _resolve_selector(self, ref: Optional[str], selector: Optional[str]) -> str:
@@ -335,6 +396,34 @@ class BrowserSessionManager:
         if selector:
             return selector
         raise ValueError("Either ref or selector is required")
+
+    async def resolve_locator(self, ref: Optional[str], selector: Optional[str]) -> dict:
+        """Observe-only: resolve selector and report visibility/count (no click/fill)."""
+        page = self._current_page()
+        sel = self._resolve_selector(ref, selector)
+        loc = page.locator(sel)
+        try:
+            count = await loc.count()
+        except Exception as exc:
+            return tool_error(
+                str(exc)[:300],
+                BLOP_BROWSER_SESSION_ERROR,
+                details={"selector": sel, "cause": type(exc).__name__},
+                status="error",
+                selector=sel,
+            )
+        visible = False
+        if count > 0:
+            try:
+                visible = await loc.first.is_visible()
+            except Exception:
+                visible = False
+        return {
+            "status": "ok",
+            "selector": sel,
+            "count": count,
+            "first_visible": bool(visible),
+        }
 
     async def click(self, ref: Optional[str], selector: Optional[str], double_click: bool = False) -> dict:
         page = self._current_page()
@@ -457,9 +546,7 @@ class BrowserSessionManager:
         cutoff = 0 if all_messages else self._last_nav_console_idx
         min_weight = _event_level_weight(level)
         data = [
-            m
-            for m in self._console_events[cutoff:]
-            if _event_level_weight(str(m.get("level", "info"))) <= min_weight
+            m for m in self._console_events[cutoff:] if _event_level_weight(str(m.get("level", "info"))) <= min_weight
         ]
         return {"count": len(data), "messages": data}
 
@@ -541,7 +628,9 @@ class BrowserSessionManager:
         if self._context is None:
             raise RuntimeError("No active browser context")
         if state not in {"offline", "online"}:
-            return {"error": "state must be 'offline' or 'online'"}
+            return tool_error(
+                "state must be 'offline' or 'online'", BLOP_BROWSER_SESSION_ERROR, details={"state": state}
+            )
         self._offline = state == "offline"
         await self._context.set_offline(self._offline)
         return {"status": "ok", "state": state}
@@ -619,7 +708,11 @@ class BrowserSessionManager:
         if not fp.is_absolute():
             fp = self._output_dir / fp
         if not fp.exists():
-            return {"error": f"Storage state file not found: {fp}"}
+            return tool_error(
+                f"Storage state file not found: {fp}",
+                BLOP_RESOURCE_NOT_FOUND,
+                details={"path": str(fp)},
+            )
         payload = json.loads(fp.read_text())
         await self._context.clear_cookies()  # type: ignore[union-attr]
         cookies = payload.get("cookies", [])
@@ -696,4 +789,3 @@ class BrowserSessionManager:
 
 
 SESSION_MANAGER = BrowserSessionManager()
-

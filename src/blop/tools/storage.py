@@ -1,4 +1,5 @@
 """Canonical storage tools with scope-aware compatibility wrappers."""
+
 from __future__ import annotations
 
 import json
@@ -10,6 +11,7 @@ from urllib.parse import urlparse
 
 from blop.engine.browser_runtime import acquire_page_session
 from blop.engine.browser_session_manager import SESSION_MANAGER
+from blop.engine.errors import BLOP_STORAGE_OPERATION_FAILED, tool_error
 from blop.engine.path_safety import resolve_within_base
 
 # Safe directory for storage_import — must resolve within .blop/
@@ -99,7 +101,12 @@ async def _profile_url_get(
         cookie_payload = [_normalize_cookie(c, include_values=include_values) for c in cookies]
 
         if resource == "cookies":
-            return {"scope": "profile_url", "resource": "cookies", "count": len(cookie_payload), "cookies": cookie_payload}
+            return {
+                "scope": "profile_url",
+                "resource": "cookies",
+                "count": len(cookie_payload),
+                "cookies": cookie_payload,
+            }
 
         local_items = await page.evaluate("() => Object.entries(localStorage)")
         session_items = await page.evaluate("() => Object.entries(sessionStorage)")
@@ -110,9 +117,19 @@ async def _profile_url_get(
             session_payload = [item for item in session_payload if item["key"] == key]
 
         if resource == "local_storage":
-            return {"scope": "profile_url", "resource": "local_storage", "count": len(local_payload), "items": local_payload}
+            return {
+                "scope": "profile_url",
+                "resource": "local_storage",
+                "count": len(local_payload),
+                "items": local_payload,
+            }
         if resource == "session_storage":
-            return {"scope": "profile_url", "resource": "session_storage", "count": len(session_payload), "items": session_payload}
+            return {
+                "scope": "profile_url",
+                "resource": "session_storage",
+                "count": len(session_payload),
+                "items": session_payload,
+            }
         return {
             "scope": "profile_url",
             "resource": "all",
@@ -121,7 +138,7 @@ async def _profile_url_get(
             "session_storage": {"count": len(session_payload), "items": session_payload},
         }
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_STORAGE_OPERATION_FAILED)
     finally:
         if session:
             await session.close()
@@ -184,7 +201,13 @@ async def _profile_url_set(
                 if "sameSite" in cookie_input:
                     cookie_payload["sameSite"] = cookie_input["sameSite"]
                 await context.add_cookies([cookie_payload])
-                result = {"status": "set", "resource": "cookies", "name": cookie_name, "domain": cookie_domain, "path": cookie_path}
+                result = {
+                    "status": "set",
+                    "resource": "cookies",
+                    "name": cookie_name,
+                    "domain": cookie_domain,
+                    "path": cookie_path,
+                }
             elif operation == "delete":
                 target_name = name or (cookie or {}).get("name")
                 if not target_name:
@@ -236,7 +259,7 @@ async def _profile_url_set(
             result["persisted"] = False
         return result
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_STORAGE_OPERATION_FAILED)
     finally:
         if session:
             await session.close()
@@ -299,7 +322,7 @@ async def storage_get(
                 }
             return _storage_error(f"Unsupported resource '{resource}'")
         except Exception as e:
-            return {"error": str(e)}
+            return tool_error(str(e), BLOP_STORAGE_OPERATION_FAILED)
     if scope == "regression_replay":
         return _storage_error(
             "scope='regression_replay' does not expose runtime storage introspection yet",
@@ -400,7 +423,7 @@ async def storage_set(
                 return {"status": "ok", "resource": "all", "operation": "clear"}
             return _storage_error(f"Unsupported resource '{resource}'")
         except Exception as e:
-            return {"error": str(e)}
+            return tool_error(str(e), BLOP_STORAGE_OPERATION_FAILED)
     if scope == "regression_replay":
         return _storage_error(
             "scope='regression_replay' does not expose runtime storage mutation yet",
@@ -449,11 +472,13 @@ async def storage_export(
             Path(output_path).write_text(json.dumps(state, indent=2))
             return {"status": "saved", "scope": scope, "path": output_path, "app_url": app_url}
         except Exception as e:
-            return {"error": str(e)}
+            return tool_error(str(e), BLOP_STORAGE_OPERATION_FAILED)
         finally:
             if session:
                 await session.close()
-    return _storage_error("storage export is currently supported only for profile_url and compat_session", scope=scope, run_id=run_id)
+    return _storage_error(
+        "storage export is currently supported only for profile_url and compat_session", scope=scope, run_id=run_id
+    )
 
 
 async def storage_import(
@@ -474,9 +499,7 @@ async def storage_import(
             return _storage_error("app_url is required for scope='profile_url'")
         fp = resolve_within_base(filename, base_dir=_BLOP_SAFE_DIR, must_exist=True, allow_absolute_outside_base=False)
         if fp is None:
-            return _storage_error(
-                f"Path must resolve within .blop directory. Got: {filename!r}"
-            )
+            return _storage_error(f"Path must resolve within .blop directory. Got: {filename!r}")
         session = None
         try:
             payload = json.loads(fp.read_text())
@@ -512,11 +535,13 @@ async def storage_import(
                     continue
             return {"status": "imported", "scope": scope, "path": str(fp), "merge": merge}
         except Exception as e:
-            return {"error": str(e)}
+            return tool_error(str(e), BLOP_STORAGE_OPERATION_FAILED)
         finally:
             if session:
                 await session.close()
-    return _storage_error("storage import is currently supported only for profile_url and compat_session", scope=scope, run_id=run_id)
+    return _storage_error(
+        "storage import is currently supported only for profile_url and compat_session", scope=scope, run_id=run_id
+    )
 
 
 async def get_browser_cookies(app_url: str, profile_name: Optional[str] = None) -> dict:

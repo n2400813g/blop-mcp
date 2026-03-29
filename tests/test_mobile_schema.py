@@ -2,22 +2,22 @@
 
 No device or Appium server required — pure schema + storage tests.
 """
+
 from __future__ import annotations
 
-import json
 import pytest
 
 from blop.schemas import (
+    FailureCase,
     FlowStep,
     MobileDeviceTarget,
     MobileEvidenceBundle,
     MobileSelector,
     RecordedFlow,
-    FailureCase,
 )
 
-
 # ── MobileSelector ────────────────────────────────────────────────────────────
+
 
 def test_mobile_selector_accessibility_id():
     sel = MobileSelector(accessibility_id="loginButton")
@@ -31,7 +31,7 @@ def test_mobile_selector_all_fields():
         predicate_string="label == 'OK'",
         class_chain="**/XCUIElementTypeButton",
         xpath="//XCUIElementTypeButton[@name='OK']",
-        android_uiautomator="new UiSelector().text(\"OK\")",
+        android_uiautomator='new UiSelector().text("OK")',
         text="OK",
         content_desc="ok_button",
     )
@@ -47,6 +47,7 @@ def test_mobile_selector_empty():
 
 
 # ── MobileDeviceTarget ────────────────────────────────────────────────────────
+
 
 def test_mobile_device_target_ios_defaults():
     target = MobileDeviceTarget(platform="ios", app_id="com.example.App")
@@ -79,6 +80,7 @@ def test_mobile_device_target_roundtrip():
 
 # ── MobileEvidenceBundle ──────────────────────────────────────────────────────
 
+
 def test_mobile_evidence_bundle_defaults():
     bundle = MobileEvidenceBundle(run_id="r1", case_id="c1", platform="ios")
     assert bundle.screenshots == []
@@ -88,10 +90,21 @@ def test_mobile_evidence_bundle_defaults():
 
 # ── FlowStep mobile actions ───────────────────────────────────────────────────
 
-@pytest.mark.parametrize("action", [
-    "tap", "swipe", "long_press", "pinch", "scroll", "back",
-    "app_launch", "app_foreground", "app_background",
-])
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "tap",
+        "swipe",
+        "long_press",
+        "pinch",
+        "scroll",
+        "back",
+        "app_launch",
+        "app_foreground",
+        "app_background",
+    ],
+)
 def test_flow_step_mobile_actions_valid(action):
     step = FlowStep(step_id=0, action=action)
     assert step.action == action
@@ -139,14 +152,16 @@ def test_flow_step_mobile_roundtrip():
 
 # ── RecordedFlow platform fields ──────────────────────────────────────────────
 
+
 def test_recorded_flow_web_default():
     import datetime
+
     flow = RecordedFlow(
         flow_name="web flow",
         app_url="https://example.com",
         goal="test",
         steps=[],
-        created_at=datetime.datetime.utcnow().isoformat(),
+        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
     assert flow.platform == "web"
     assert flow.mobile_target is None
@@ -154,13 +169,14 @@ def test_recorded_flow_web_default():
 
 def test_recorded_flow_ios():
     import datetime
+
     target = MobileDeviceTarget(platform="ios", app_id="com.example.App")
     flow = RecordedFlow(
         flow_name="ios login",
         app_url="com.example.App",
         goal="login",
         steps=[FlowStep(step_id=0, action="tap")],
-        created_at=datetime.datetime.utcnow().isoformat(),
+        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         platform="ios",
         mobile_target=target,
     )
@@ -170,10 +186,19 @@ def test_recorded_flow_ios():
 
 # ── FailureCase mobile failure classes ────────────────────────────────────────
 
-@pytest.mark.parametrize("fc", [
-    "startup_failure", "install_failure", "navigation_crash",
-    "product_bug", "test_fragility", "auth_failure", "env_issue",
-])
+
+@pytest.mark.parametrize(
+    "fc",
+    [
+        "startup_failure",
+        "install_failure",
+        "navigation_crash",
+        "product_bug",
+        "test_fragility",
+        "auth_failure",
+        "env_issue",
+    ],
+)
 def test_failure_case_mobile_failure_class(fc):
     case = FailureCase(
         run_id="r1",
@@ -212,17 +237,19 @@ def test_failure_case_web_defaults():
 
 # ── SQLite migration (in-memory) ──────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_migration_adds_platform_column(tmp_path, monkeypatch):
     """Migrations 22-27 should apply cleanly to a fresh in-memory-like DB."""
-    import os
     db_path = str(tmp_path / "test.db")
     monkeypatch.setenv("BLOP_DB_PATH", db_path)
 
     from blop.storage.sqlite import init_db
+
     await init_db()
 
     import aiosqlite
+
     async with aiosqlite.connect(db_path) as db:
         async with db.execute("PRAGMA table_info(recorded_flows)") as cur:
             cols = {row[1] for row in await cur.fetchall()}
@@ -247,10 +274,11 @@ async def test_migration_adds_platform_column(tmp_path, monkeypatch):
 async def test_save_and_load_mobile_flow(tmp_path, monkeypatch):
     """save_flow + get_flow round-trips a mobile RecordedFlow correctly."""
     import datetime
+
     db_path = str(tmp_path / "test.db")
     monkeypatch.setenv("BLOP_DB_PATH", db_path)
 
-    from blop.storage.sqlite import init_db, save_flow, get_flow
+    from blop.storage.sqlite import get_flow, init_db, save_flow
 
     await init_db()
 
@@ -260,7 +288,7 @@ async def test_save_and_load_mobile_flow(tmp_path, monkeypatch):
         app_url="com.example.App",
         goal="login flow",
         steps=[FlowStep(step_id=0, action="tap", mobile_selector=MobileSelector(accessibility_id="loginBtn"))],
-        created_at=datetime.datetime.utcnow().isoformat(),
+        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         platform="ios",
         mobile_target=target,
     )

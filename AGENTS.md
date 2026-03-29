@@ -49,7 +49,9 @@ blop
 python -m blop.server
 ```
 
-The MCP server config for Cursor is in `.cursor/mcp.json`.
+Cursor MCP config: copy `.cursor/mcp.json.example` to `.cursor/mcp.json`, set absolute paths and env (the real file is gitignored — never commit secrets).
+
+Documentation contract and agent-facing product context live in `docs/DOC_CONTRACT.md` and `docs/AGENT_CONTEXT_PACK.md`. Set `BLOP_ENABLE_COMPAT_TOOLS=true` only when you need `browser_*` / `blop_v2_*` parity tools.
 
 ## Production baseline
 
@@ -95,27 +97,43 @@ The system follows a **validate → contextualize → execute → decide** contr
 
 16. **`engine/context_graph.py`** — App archetype detection, site context graph builder, and graph diff for v2 surface tools.
 
-## Core MCP Tools (17)
+## Canonical Release Workflow
+
+Use the release-confidence surface by default:
+
+1. `validate_release_setup`
+2. `discover_critical_journeys`
+3. `record_test_flow`
+4. `run_release_check`
+5. `triage_release_blocker`
+
+Treat legacy aliases like `validate_setup`, `discover_test_flows`, and `run_regression_test` as compatibility affordances, not the primary path.
+
+## Core MCP Tools (Canonical + Compatibility)
 
 | Tool | Purpose |
 |------|---------|
+| `validate_release_setup` | Canonical preflight for release gating: runtime, Chromium, DB, app reachability, and auth validity |
+| `discover_critical_journeys` | Canonical discovery tool: plan business-ranked journeys and flag what should gate releases |
+| `record_test_flow` | Run agent for a goal and capture steps (optional business_criticality) |
+| `run_release_check` | Canonical release-confidence execution path: replay journeys and return ship/investigate/block output |
+| `triage_release_blocker` | Summarize likely cause, evidence, impact, and next actions for a blocked release |
 | `evaluate_web_task` | One-shot evaluator: URL + task → rich report with screenshots/console/network evidence |
 | `setup_browser_state` | Interactive login capture (alias for capture_auth_session, web-eval-agent compatible) |
 | `cancel_run` | Cancel a running/queued test and mark as cancelled |
-| `discover_test_flows` | Scan URL/repo → 3-8 candidate flows (with business_criticality) |
 | `explore_site_inventory` | Crawl-only inventory map (routes/forms/buttons/signals) without flow planning |
 | `get_page_structure` | Snapshot one page's compact ARIA interactive layout (role/name pairs) |
 | `save_auth_profile` | Persist auth config (env_login/storage_state/cookie_json, optional user_data_dir) |
 | `capture_auth_session` | Headed browser: user logs in interactively; session saved and profile created |
-| `record_test_flow` | Run agent for a goal and capture steps (optional business_criticality) |
-| `run_regression_test` | Replay recorded flows in parallel (async, poll for status) |
 | `get_test_results` | Retrieve run results and severity report |
 | `get_run_health_stream` | Run health events (per-step progress, assertions, errors) |
 | `get_risk_analytics` | Flaky step leaderboard and business risk breakdown |
 | `list_runs` | List recent runs by status (running/completed/failed/etc.) |
-| `list_recorded_tests` | List all recorded flows |
+| `list_recorded_tests` | Compatibility-oriented listing of saved flows; prefer `blop://journeys` for canonical planning context |
 | `debug_test_case` | Re-run a case headed+verbose for evidence |
-| `validate_setup` | Preflight: API key, Chromium, DB, app_url, auth profile validity |
+| `discover_test_flows` | Deprecated compatibility alias for journey discovery |
+| `run_regression_test` | Deprecated compatibility alias for replay execution |
+| `validate_setup` | Deprecated compatibility alias for preflight |
 
 ## V2 Surface Tools (12)
 
@@ -143,6 +161,7 @@ Screenshots, traces, and console logs are in `runs/<type>/<run_id>/`. SQLite DB 
 - All logging is suppressed on `config.py` import to prevent JSON-RPC interference.
 - `make_browser_profile()` supports optional `user_data_dir` for persistent context; otherwise disables user data dir and browser security features.
 - Default LLM: `gemini-2.5-flash` for agents and planning. Configurable via `BLOP_LLM_PROVIDER` (google/anthropic/openai) and `BLOP_LLM_MODEL`.
-- `run_regression_test` fires an `asyncio.create_task` and returns immediately — caller must poll `get_test_results`. Run status: `queued` → `running` → `completed`/`failed`/`cancelled`; `waiting_auth` if auth profile cannot be resolved.
+- `run_release_check` is the flagship release-confidence entry point. In replay mode it returns immediately with a `run_id`; callers then poll `get_test_results`. Compatibility alias `run_regression_test` maps onto the same underlying replay path.
 - `business_criticality` (revenue, activation, retention, support, other) is stored on flows and cases; classifier and reporting use it for severity labels (e.g. "BLOCKER in revenue flow").
 - Exploration profile defaults are configurable via `BLOP_EXPLORATION_PROFILE` (`default`/`saas_marketing`) with override knobs for network idle, SPA settle, agent retries, and crawl page limits.
+- Tool/resource failures commonly return a string `error` plus structured `blop_error` (`code`, `message`, `retryable`, `details`); see `docs/DOC_CONTRACT.md` and `src/blop/engine/errors.py` (`tool_error`, `BlopError`).

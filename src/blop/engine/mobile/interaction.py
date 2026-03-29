@@ -1,4 +1,5 @@
 """Mobile interaction helpers for blop mobile engine (Appium 3 / W3C Actions)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -72,11 +73,11 @@ async def press_back(driver) -> None:
 
 
 async def app_launch(driver, app_id: str, platform: str) -> None:
-    """Activate (bring to foreground) or launch the app."""
-    if platform == "ios":
-        await _run_sync(driver.activate_app, app_id)
-    else:
-        await _run_sync(driver.activate_app, app_id)
+    """Activate (bring to foreground) or launch the app.
+
+    Appium 3's activate_app works uniformly on both iOS and Android.
+    """
+    await _run_sync(driver.activate_app, app_id)
 
 
 async def app_background(driver) -> None:
@@ -90,11 +91,7 @@ async def app_foreground(driver, app_id: str) -> None:
 
 
 def _get_action_chains(driver):
-    try:
-        from appium.webdriver.common.touch_action import TouchAction
-        return TouchAction(driver)
-    except ImportError:
-        # Appium 3+ uses W3C actions — fall back gracefully
-        raise RuntimeError(
-            "TouchAction not available. Use W3C ActionChains for Appium 3."
-        )
+    """Return a W3C ActionChains instance (Selenium 4 / Appium 3)."""
+    from selenium.webdriver.common.action_chains import ActionChains
+
+    return ActionChains(driver)

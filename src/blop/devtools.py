@@ -1,4 +1,5 @@
 """Developer tooling helpers for blop."""
+
 from __future__ import annotations
 
 import argparse
@@ -14,7 +15,7 @@ _BLOP_ENV_VARS = [
     "BLOP_LLM_PROVIDER",
     "BLOP_LLM_MODEL",
     "BLOP_APP_URL",
-    "APP_BASE_URL",       # legacy name read by config.py
+    "APP_BASE_URL",  # legacy name read by config.py
     "LOGIN_URL",
     "TEST_USERNAME",
     "TEST_PASSWORD",
@@ -43,6 +44,7 @@ def launch_inspector() -> int:
     # Load .env so env vars are available for forwarding even if not shell-exported
     try:
         from dotenv import load_dotenv
+
         _env_path = _repo_root / ".env"
         if _env_path.exists():
             load_dotenv(_env_path, override=False)  # shell env takes precedence
@@ -65,7 +67,7 @@ def launch_inspector() -> int:
 
     # Inspector process environment: controls timeouts, ports, auto-open
     inspector_env = os.environ.copy()
-    inspector_env["MCP_SERVER_REQUEST_TIMEOUT"] = "600000"     # 10 min per request
+    inspector_env["MCP_SERVER_REQUEST_TIMEOUT"] = "600000"  # 10 min per request
     inspector_env["MCP_REQUEST_MAX_TOTAL_TIMEOUT"] = "600000"  # 10 min cumulative
     if args.port is not None:
         inspector_env["CLIENT_PORT"] = str(args.port)

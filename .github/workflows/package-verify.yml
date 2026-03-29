@@ -21,6 +21,22 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Sync dev dependencies
+        run: uv sync --extra dev
+
+      - name: Ruff lint and format
+        run: |
+          uv run ruff check src tests
+          uv run ruff format --check src tests
+
+      - name: Run unit tests
+        run: |
+          uv run pytest tests/ \
+            --ignore=tests/integration \
+            --ignore=tests/performance \
+            -m "not slow" \
+            -q
+
       - name: Build distributions
         run: uv run --with build python -m build
 
@@ -29,5 +45,13 @@ jobs:
           python -m venv /tmp/blop-dist-smoke
           . /tmp/blop-dist-smoke/bin/activate
           pip install dist/*.whl
+          blop --help
+          blop-mcp --help
+
+      - name: Smoke install built sdist
+        run: |
+          python -m venv /tmp/blop-sdist-smoke
+          . /tmp/blop-sdist-smoke/bin/activate
+          pip install dist/*.tar.gz
           blop --help
           blop-mcp --help

@@ -2,24 +2,25 @@
 
 These tests do not require a running app, browser, or Appium server.
 """
+
 from __future__ import annotations
 
-import json
 import uuid
+
 import pytest
 
+from blop.reporting.results import _compute_release_recommendation
 from blop.schemas import (
-    CriticalityGate,
     DEFAULT_RELEASE_POLICY,
+    CriticalityGate,
     FailureCase,
     PolicyEvaluation,
     PolicyGateResult,
     ReleasePolicy,
 )
-from blop.reporting.results import _compute_release_recommendation
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _make_case(
     status="pass",
@@ -39,6 +40,7 @@ def _make_case(
 
 
 # ── Schema tests (BLO-74) ─────────────────────────────────────────────────────
+
 
 class TestReleasePolicySchema:
     def test_default_policy_is_valid(self):
@@ -104,6 +106,7 @@ class TestReleasePolicySchema:
 
 # ── Gate evaluation tests (BLO-75) ───────────────────────────────────────────
 
+
 class TestComputeReleaseRecommendation:
     def test_ship_when_all_pass(self):
         cases = [_make_case("pass") for _ in range(3)]
@@ -131,8 +134,10 @@ class TestComputeReleaseRecommendation:
         # "other" gate is disabled in DEFAULT_RELEASE_POLICY
         cases = [_make_case("fail", criticality="other")]
         rec = _compute_release_recommendation(cases, "completed")
-        # Ungated failure escalates SHIP → INVESTIGATE
+        # Ungated failure escalates SHIP → INVESTIGATE (no gate should have fired)
         assert rec["decision"] == "INVESTIGATE"
+        fired_gates = [g for g in rec.get("gate_results", []) if g.get("fired")]
+        assert not fired_gates, f"No gate should fire for ungated 'other' failures, got: {fired_gates}"
 
     def test_blocker_severity_always_blocks_regardless_of_criticality(self):
         cases = [_make_case("fail", severity="blocker", criticality="other")]
@@ -190,6 +195,7 @@ class TestComputeReleaseRecommendation:
 
 # ── BLO-76: Structured gate output ───────────────────────────────────────────
 
+
 class TestStructuredGateOutput:
     def test_gate_results_present_in_output(self):
         cases = [_make_case("fail", criticality="revenue")]
@@ -230,11 +236,13 @@ class TestStructuredGateOutput:
 
 # ── BLO-77: Stability bucket integration ─────────────────────────────────────
 
+
 class TestStabilityBucketIntegration:
     def test_install_failure_blocks_when_policy_enabled(self):
         cases = [_make_case("fail", criticality="other")]  # would normally be INVESTIGATE
         rec = _compute_release_recommendation(
-            cases, "completed",
+            cases,
+            "completed",
             stability_bucket="install_or_upgrade_failure",
         )
         assert rec["decision"] == "BLOCK"
@@ -248,7 +256,8 @@ class TestStabilityBucketIntegration:
         )
         cases = [_make_case("fail", criticality="other")]
         rec = _compute_release_recommendation(
-            cases, "completed",
+            cases,
+            "completed",
             policy=policy,
             stability_bucket="install_or_upgrade_failure",
         )
@@ -262,7 +271,8 @@ class TestStabilityBucketIntegration:
         )
         cases = [_make_case("fail", criticality="other")]
         rec = _compute_release_recommendation(
-            cases, "completed",
+            cases,
+            "completed",
             policy=policy,
             stability_bucket="unknown_unclassified",
         )
@@ -271,7 +281,8 @@ class TestStabilityBucketIntegration:
     def test_unknown_stability_does_not_block_when_policy_disabled(self):
         cases = [_make_case("fail", criticality="other")]
         rec = _compute_release_recommendation(
-            cases, "completed",
+            cases,
+            "completed",
             stability_bucket="unknown_unclassified",
         )
         # block_on_unknown_stability=False in DEFAULT_RELEASE_POLICY
@@ -281,7 +292,8 @@ class TestStabilityBucketIntegration:
         # No actual failures, but auth bucket indicates something is wrong
         cases = [_make_case("fail", criticality="other")]
         rec = _compute_release_recommendation(
-            cases, "completed",
+            cases,
+            "completed",
             stability_bucket="auth_session_failure",
         )
         assert rec["decision"] in ("INVESTIGATE", "BLOCK")
@@ -296,13 +308,14 @@ class TestStabilityBucketIntegration:
 
 # ── SQLite round-trip (BLO-74 storage) ───────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_policy_sqlite_round_trip(tmp_path, monkeypatch):
     """save_policy / get_policy / get_default_policy persists and retrieves correctly."""
     db_path = str(tmp_path / "test_policy.db")
     monkeypatch.setenv("BLOP_DB_PATH", db_path)
 
-    from blop.storage.sqlite import init_db, save_policy, get_policy, get_default_policy
+    from blop.storage.sqlite import get_default_policy, get_policy, init_db, save_policy
 
     await init_db()
 
@@ -354,7 +367,7 @@ async def test_get_default_policy_returns_none_when_empty(tmp_path, monkeypatch)
     db_path = str(tmp_path / "empty.db")
     monkeypatch.setenv("BLOP_DB_PATH", db_path)
 
-    from blop.storage.sqlite import init_db, get_default_policy
+    from blop.storage.sqlite import get_default_policy, init_db
 
     await init_db()
     result = await get_default_policy()

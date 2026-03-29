@@ -13,7 +13,8 @@ Prerequisites:
     # Install IPA on simulator:
     #   xcrun simctl install booted tests/apps/DVIA-v2.ipa
 
-Run:
+Default ``pytest tests/`` skips these (``-m "not mobile"`` in pyproject). Run explicitly:
+
     pytest tests/integration/test_mobile_dvia_ios.py -m mobile -v
 
 Scenarios covered (per TestEvolve + dev.to critical test scenario articles):
@@ -26,9 +27,11 @@ Scenarios covered (per TestEvolve + dev.to critical test scenario articles):
     7. Orientation change resilience (UI consistency)
     8. Interrupt recovery (back button / home)
 """
+
 from __future__ import annotations
 
 import os
+
 import pytest
 
 # Skip entire module if Appium client not installed
@@ -61,6 +64,7 @@ def ios_target() -> MobileDeviceTarget:
 async def driver(ios_target):
     """Create an Appium session for each test, quit on teardown."""
     from blop.engine.mobile.driver import make_appium_driver
+
     d = await make_appium_driver(ios_target)
     yield d
     try:
@@ -71,36 +75,40 @@ async def driver(ios_target):
 
 # ── Scenario 1: App launch and initial screen ─────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_app_launches_and_shows_main_menu(driver):
     """App should launch and display the DVIA main screen with menu items."""
-    from blop.engine.mobile.evidence import take_device_screenshot
     import uuid
+
+    from blop.engine.mobile.evidence import take_device_screenshot
 
     screenshot_path = f"/tmp/dvia_launch_{uuid.uuid4().hex[:8]}.png"
     await take_device_screenshot(driver, path=screenshot_path)
 
     page_source = driver.page_source
     # DVIA main screen should show key vulnerability categories
-    assert any(keyword in page_source for keyword in [
-        "DVIA", "Local Data Storage", "Jailbreak", "Network"
-    ]), f"Main menu not found. Page source snippet: {page_source[:500]}"
+    assert any(keyword in page_source for keyword in ["DVIA", "Local Data Storage", "Jailbreak", "Network"]), (
+        f"Main menu not found. Page source snippet: {page_source[:500]}"
+    )
 
 
 # ── Scenario 2: Navigation to Local Data Storage ─────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_navigate_to_local_data_storage(driver):
     """Tap 'Local Data Storage' and confirm the sub-screen appears."""
+
     from blop.engine.mobile.appium_selector import find_element
     from blop.engine.mobile.interaction import tap
-    from appium.webdriver.common.appiumby import AppiumBy
 
     sel = MobileSelector(text="Local Data Storage", accessibility_id="Local Data Storage")
     element = await find_element(driver, sel, "ios")
     await tap(driver, element)
 
     import asyncio
+
     await asyncio.sleep(1.5)
 
     page_source = driver.page_source
@@ -110,6 +118,7 @@ async def test_navigate_to_local_data_storage(driver):
 
 
 # ── Scenario 3: Jailbreak Detection screen ───────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_navigate_to_jailbreak_detection(driver):
@@ -124,11 +133,13 @@ async def test_navigate_to_jailbreak_detection(driver):
     except Exception:
         # Scroll down if not visible
         from blop.engine.mobile.interaction import scroll
+
         await scroll(driver, direction="down")
         element = await find_element(driver, sel, "ios")
         await tap(driver, element)
 
     import asyncio
+
     await asyncio.sleep(1.0)
 
     page_source = driver.page_source
@@ -137,11 +148,12 @@ async def test_navigate_to_jailbreak_detection(driver):
 
 # ── Scenario 4: Network Security screen ──────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_navigate_to_network_security(driver):
     """Navigate to Network Security section and confirm it loads."""
     from blop.engine.mobile.appium_selector import find_element
-    from blop.engine.mobile.interaction import tap, scroll
+    from blop.engine.mobile.interaction import scroll, tap
 
     await scroll(driver, direction="down")
 
@@ -155,6 +167,7 @@ async def test_navigate_to_network_security(driver):
         await tap(driver, element)
 
     import asyncio
+
     await asyncio.sleep(1.0)
 
     page_source = driver.page_source
@@ -162,6 +175,7 @@ async def test_navigate_to_network_security(driver):
 
 
 # ── Scenario 5: Screenshot evidence capture ───────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_screenshot_evidence_captured(driver, tmp_path):
@@ -178,6 +192,7 @@ async def test_screenshot_evidence_captured(driver, tmp_path):
 
 # ── Scenario 6: Device log capture (syslog) ──────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_device_log_captured(driver, tmp_path):
     """iOS syslog should be capturable from the Appium session."""
@@ -192,6 +207,7 @@ async def test_device_log_captured(driver, tmp_path):
 
 # ── Scenario 7: Full blop record → replay flow ───────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_blop_record_and_replay_ios_flow(ios_target, tmp_path, monkeypatch):
     """End-to-end: record a 3-step DVIA flow via blop, persist, reload, replay.
@@ -200,14 +216,16 @@ async def test_blop_record_and_replay_ios_flow(ios_target, tmp_path, monkeypatch
     record_mobile_flow → save_flow → get_flow → execute_mobile_flow pipeline
     works against a real iOS app.
     """
-    import uuid
     import datetime
-    from blop.schemas import RecordedFlow, FlowStep, MobileSelector
+    import uuid
+
+    from blop.schemas import MobileSelector
 
     db_path = str(tmp_path / "test.db")
     monkeypatch.setenv("BLOP_DB_PATH", db_path)
 
     from blop.storage.sqlite import init_db
+
     await init_db()
 
     # Manually build a simple recorded flow (3 steps: launch, scroll, back)
@@ -238,13 +256,14 @@ async def test_blop_record_and_replay_ios_flow(ios_target, tmp_path, monkeypatch
                 description="Navigate back to main menu",
             ),
         ],
-        created_at=datetime.datetime.utcnow().isoformat(),
+        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         business_criticality="other",
         platform="ios",
         mobile_target=ios_target,
     )
 
-    from blop.storage.sqlite import save_flow, get_flow
+    from blop.storage.sqlite import get_flow, save_flow
+
     await save_flow(flow)
 
     loaded = await get_flow(flow.flow_id)
@@ -255,6 +274,7 @@ async def test_blop_record_and_replay_ios_flow(ios_target, tmp_path, monkeypatch
 
     # Replay the flow
     from blop.engine.mobile.regression import execute_mobile_flow
+
     case = await execute_mobile_flow(loaded, run_id=run_id)
 
     assert case.status in ("pass", "fail"), f"Unexpected status: {case.status}"
@@ -266,11 +286,13 @@ async def test_blop_record_and_replay_ios_flow(ios_target, tmp_path, monkeypatch
 
 # ── Scenario 8: Selector chain fallback ──────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_selector_fallback_chain(driver):
     """If accessibility_id fails, selector chain should try text match."""
-    from blop.engine.mobile.appium_selector import find_element
     from selenium.common.exceptions import NoSuchElementException
+
+    from blop.engine.mobile.appium_selector import find_element
 
     # Use a deliberately wrong accessibility_id but correct text
     sel = MobileSelector(

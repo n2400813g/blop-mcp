@@ -2,9 +2,9 @@
 
 These tests exercise the actual SQL queries and migrations — no mocking.
 """
+
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 import uuid
@@ -17,15 +17,15 @@ _TMP_DIR = tempfile.mkdtemp()
 os.environ["BLOP_DB_PATH"] = os.path.join(_TMP_DIR, "test_runs.db")
 
 from blop.schemas import (
+    ApiExpectation,
     AuthProfile,
     FailureCase,
     FlowStep,
     IncidentCluster,
     RecordedFlow,
-    ReleaseSnapshot,
-    RemediationDraft,
+    SemanticQuerySpec,
     SiteContextGraph,
-    SpaHints,
+    StructuredAssertion,
     TelemetrySignal,
 )
 from blop.storage import sqlite
@@ -58,10 +58,8 @@ async def test_save_and_get_auth_profile():
 
 @pytest.mark.asyncio
 async def test_list_auth_profiles():
-    p1 = AuthProfile(profile_name="profile-a", auth_type="env_login",
-                     login_url="https://example.com/login")
-    p2 = AuthProfile(profile_name="profile-b", auth_type="storage_state",
-                     storage_state_path="/tmp/state.json")
+    p1 = AuthProfile(profile_name="profile-a", auth_type="env_login", login_url="https://example.com/login")
+    p2 = AuthProfile(profile_name="profile-b", auth_type="storage_state", storage_state_path="/tmp/state.json")
     await sqlite.save_auth_profile(p1)
     await sqlite.save_auth_profile(p2)
 
@@ -92,17 +90,36 @@ async def test_save_and_get_flow():
             FlowStep(step_id=0, action="navigate", selector=None, value="https://example.com/login"),
             FlowStep(step_id=1, action="fill", selector="#email", value="user@test.com"),
             FlowStep(step_id=2, action="click", selector="#submit", value=None),
+            FlowStep(
+                step_id=3,
+                action="assert",
+                description="Dashboard is visible",
+                value="Dashboard is visible",
+                structured_assertion=StructuredAssertion(
+                    assertion_type="semantic_query",
+                    description="Dashboard is visible",
+                    semantic_query=SemanticQuerySpec(
+                        query="Dashboard is visible",
+                        expected="Dashboard",
+                        target_selector="main",
+                    ),
+                ),
+            ),
         ],
         created_at=datetime.now(timezone.utc).isoformat(),
         business_criticality="activation",
+        api_expectations=[ApiExpectation(name="auth_api", url_contains="/api/", methods=["POST"])],
     )
     await sqlite.save_flow(flow)
 
     loaded = await sqlite.get_flow(flow.flow_id)
     assert loaded is not None
     assert loaded.flow_name == "login-flow"
-    assert len(loaded.steps) == 3
+    assert len(loaded.steps) == 4
     assert loaded.business_criticality == "activation"
+    assert loaded.steps[-1].structured_assertion is not None
+    assert loaded.steps[-1].structured_assertion.assertion_type == "semantic_query"
+    assert loaded.api_expectations[0].name == "auth_api"
 
 
 @pytest.mark.asyncio
@@ -172,7 +189,13 @@ async def test_create_run_with_initial_events_persists_transactional_startup():
         "flow_count": 2,
         "run_mode": "hybrid",
         "profile_name": "prod",
-        "startup_timing_ms": {"flow_lookup": 10, "auth_resolve": 5, "auth_validate": 3, "db_persist": 0, "total_launch": 0},
+        "startup_timing_ms": {
+            "flow_lookup": 10,
+            "auth_resolve": 5,
+            "auth_validate": 3,
+            "db_persist": 0,
+            "total_launch": 0,
+        },
     }
     auth_payload = {
         "profile_name": "prod",
@@ -181,7 +204,13 @@ async def test_create_run_with_initial_events_persists_transactional_startup():
         "storage_state_path": "/tmp/auth.json",
         "user_data_dir": None,
         "session_validation_status": "valid",
-        "startup_timing_ms": {"flow_lookup": 10, "auth_resolve": 5, "auth_validate": 3, "db_persist": 0, "total_launch": 0},
+        "startup_timing_ms": {
+            "flow_lookup": 10,
+            "auth_resolve": 5,
+            "auth_validate": 3,
+            "db_persist": 0,
+            "total_launch": 0,
+        },
     }
 
     await sqlite.create_run_with_initial_events(

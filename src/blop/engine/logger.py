@@ -4,8 +4,10 @@ JSON-RPC (MCP transport) requires clean stdout. All output goes to
 ``.blop/blop.log`` by default (or the path in ``BLOP_DEBUG_LOG``).
 Logging is always active — file stays quiet; stderr remains clean for MCP.
 """
+
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import logging.handlers
@@ -18,6 +20,8 @@ from pathlib import Path
 _LOG_CONFIGURED = False
 _LOG_CONFIG_LOCK = threading.Lock()
 _logger = logging.getLogger("blop")
+
+request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("blop_request_id", default=None)
 _SECRET_VALUE_RE = re.compile(r"(?i)\b(api[_-]?key|token|secret|password)\s*[:=]\s*([^\s,;]+)")
 
 
@@ -35,11 +39,17 @@ class _JsonFormatter(logging.Formatter):
             "logger": record.name,
             "msg": _redact_sensitive(record.getMessage()),
         }
+        rid = request_id_var.get()
+        if rid:
+            entry["request_id"] = rid
         if record.exc_info:
             entry["exc"] = _redact_sensitive(self.formatException(record.exc_info))
         # Merge any extra keys passed via extra={...}
         skip = set(logging.LogRecord.__dict__.keys()) | {
-            "message", "asctime", "exc_text", "stack_info",
+            "message",
+            "asctime",
+            "exc_text",
+            "stack_info",
         }
         for key, val in record.__dict__.items():
             if key not in skip and not key.startswith("_"):

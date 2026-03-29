@@ -1,7 +1,6 @@
 """Tests for blop.engine.context_graph."""
-from __future__ import annotations
 
-import pytest
+from __future__ import annotations
 
 from blop.schemas import FlowStep, RecordedFlow, SiteInventory
 
@@ -87,7 +86,12 @@ def test_build_context_graph_has_nodes_and_edges():
         {"href": "/settings", "text": "Settings", "source_route": "/dashboard"},
     ]
     flows = [
-        {"flow_name": "login_flow", "goal": "Log in", "starting_url": "https://example.com/", "business_criticality": "activation"},
+        {
+            "flow_name": "login_flow",
+            "goal": "Log in",
+            "starting_url": "https://example.com/",
+            "business_criticality": "activation",
+        },
         {"flow_name": "settings_flow", "goal": "Edit settings", "starting_url": "https://example.com/settings"},
     ]
     recorded = [
@@ -141,7 +145,11 @@ def test_build_context_graph_has_nodes_and_edges():
 
 
 def test_release_confidence_summary_infers_auth_boundary_and_uncovered_critical():
-    from blop.engine.context_graph import build_context_graph, get_context_graph_summary, get_uncovered_critical_journeys
+    from blop.engine.context_graph import (
+        build_context_graph,
+        get_context_graph_summary,
+        get_uncovered_critical_journeys,
+    )
 
     inventory = _empty_inventory()
     inventory.routes = ["/pricing", "/dashboard", "/billing"]

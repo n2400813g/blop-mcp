@@ -1,10 +1,10 @@
 """Tests that codegen properly escapes special characters in generated code."""
+
 from __future__ import annotations
 
 import ast
-import pytest
 
-from blop.engine.codegen import _esc_py, _esc_ts, _esc_re, generate_python, generate_typescript
+from blop.engine.codegen import _esc_py, _esc_re, _esc_ts, generate_python, generate_typescript
 from blop.schemas import FlowStep, RecordedFlow, StructuredAssertion
 
 
@@ -50,63 +50,75 @@ class TestGeneratePythonEscaping:
         )
 
     def test_fill_with_double_quotes(self):
-        flow = self._make_flow([
-            FlowStep(step_id=0, action="fill", selector="#input", value='hello "world"'),
-        ])
+        flow = self._make_flow(
+            [
+                FlowStep(step_id=0, action="fill", selector="#input", value='hello "world"'),
+            ]
+        )
         code = generate_python(flow)
         assert 'hello \\"world\\"' in code
         # Verify the generated code is syntactically valid Python
         ast.parse(code)
 
     def test_navigate_with_quotes_in_url(self):
-        flow = self._make_flow([
-            FlowStep(step_id=0, action="navigate", value='https://example.com/path?q="test"'),
-        ])
+        flow = self._make_flow(
+            [
+                FlowStep(step_id=0, action="navigate", value='https://example.com/path?q="test"'),
+            ]
+        )
         code = generate_python(flow)
         assert 'https://example.com/path?q=\\"test\\"' in code
         ast.parse(code)
 
     def test_selector_with_quotes(self):
-        flow = self._make_flow([
-            FlowStep(step_id=0, action="click", selector='[data-testid="submit"]', value=None),
-        ])
+        flow = self._make_flow(
+            [
+                FlowStep(step_id=0, action="click", selector='[data-testid="submit"]', value=None),
+            ]
+        )
         code = generate_python(flow)
         assert '\\"submit\\"' in code
         ast.parse(code)
 
     def test_assertion_text_with_quotes(self):
-        flow = self._make_flow([
-            FlowStep(
-                step_id=0,
-                action="assert",
-                structured_assertion=StructuredAssertion(
-                    assertion_type="text_present",
-                    expected='Welcome, "Admin"',
-                    description="Check welcome message",
+        flow = self._make_flow(
+            [
+                FlowStep(
+                    step_id=0,
+                    action="assert",
+                    structured_assertion=StructuredAssertion(
+                        assertion_type="text_present",
+                        expected='Welcome, "Admin"',
+                        description="Check welcome message",
+                    ),
                 ),
-            ),
-        ])
+            ]
+        )
         code = generate_python(flow)
         assert 'Welcome, \\"Admin\\"' in code
         ast.parse(code)
 
     def test_aria_name_with_quotes(self):
-        flow = self._make_flow([
-            FlowStep(
-                step_id=0,
-                action="click",
-                aria_role="button",
-                aria_name='Click "here"',
-            ),
-        ])
+        flow = self._make_flow(
+            [
+                FlowStep(
+                    step_id=0,
+                    action="click",
+                    aria_role="button",
+                    aria_name='Click "here"',
+                ),
+            ]
+        )
         code = generate_python(flow)
         assert 'Click \\"here\\"' in code
         ast.parse(code)
 
     def test_label_with_quotes(self):
-        flow = self._make_flow([
-            FlowStep(step_id=0, action="fill", label_text='Enter "name"', value="test"),
-        ])
+        flow = self._make_flow(
+            [
+                FlowStep(step_id=0, action="fill", label_text='Enter "name"', value="test"),
+            ]
+        )
         code = generate_python(flow)
         assert 'Enter \\"name\\"' in code
         ast.parse(code)
@@ -123,9 +135,11 @@ class TestGenerateTypeScriptEscaping:
         )
 
     def test_fill_with_single_quotes(self):
-        flow = self._make_flow([
-            FlowStep(step_id=0, action="fill", selector="#input", value="it's a value"),
-        ])
+        flow = self._make_flow(
+            [
+                FlowStep(step_id=0, action="fill", selector="#input", value="it's a value"),
+            ]
+        )
         code = generate_typescript(flow)
         assert "it\\'s a value" in code
 
@@ -141,8 +155,10 @@ class TestGenerateTypeScriptEscaping:
         assert "User\\'s checkout flow" in code
 
     def test_selector_with_single_quotes(self):
-        flow = self._make_flow([
-            FlowStep(step_id=0, action="click", selector="[data-label='submit']", value=None),
-        ])
+        flow = self._make_flow(
+            [
+                FlowStep(step_id=0, action="click", selector="[data-label='submit']", value=None),
+            ]
+        )
         code = generate_typescript(flow)
         assert "data-label=\\'submit\\'" in code

@@ -1,4 +1,5 @@
-"""Tests for blop.server_http (HTTP SSE server)."""
+"""Tests for blop.server_http (HTTP SSE server + /v1 API)."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
@@ -12,6 +13,13 @@ try:
     from blop.server_http import app
 except (ImportError, AttributeError):
     pytest.skip("blop[server] not installed (fastapi, sse-starlette, uvicorn)", allow_module_level=True)
+
+
+def _v1_client():
+    from httpx import ASGITransport, AsyncClient
+
+    transport = ASGITransport(app=app)
+    return AsyncClient(transport=transport, base_url="http://test")
 
 
 @pytest.mark.asyncio
@@ -97,3 +105,117 @@ async def test_stream_run_empty_events_then_terminal():
             break
 
     assert any("completed" in line for line in chunks)
+
+
+@pytest.mark.asyncio
+async def test_v1_post_projects(tmp_db):
+    """POST /v1/projects creates a project row."""
+    from blop import config
+
+    with patch.object(config, "BLOP_HTTP_API_KEY", None):
+        async with _v1_client() as client:
+            r = await client.post(
+                "/v1/projects",
+                json={"name": "acme", "repo_url": "https://github.com/acme/app"},
+            )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["name"] == "acme"
+        assert data["project_id"]
+        assert data["repo_url"] == "https://github.com/acme/app"
+
+
+@pytest.mark.asyncio
+async def test_v1_api_key_required_when_set(tmp_db):
+    from blop import config
+
+    with patch.object(config, "BLOP_HTTP_API_KEY", "test-secret-key"):
+        async with _v1_client() as client:
+            r = await client.post("/v1/projects", json={"name": "x"})
+        assert r.status_code == 401
+
+        async with _v1_client() as client:
+            r2 = await client.post(
+                "/v1/projects",
+                json={"name": "x"},
+                headers={"Authorization": "Bearer test-secret-key"},
+            )
+        assert r2.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_v1_release_brief(tmp_db):
+    from blop import config
+    from blop.storage.sqlite import save_release_brief
+
+    await save_release_brief(
+        "rel-1",
+        "run-z",
+        "https://app.example.com",
+        {
+            "release_id": "rel-1",
+            "run_id": "run-z",
+            "app_url": "https://app.example.com",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "decision": "SHIP",
+            "risk": {"value": 10, "level": "low"},
+            "confidence": {"value": 0.9, "label": "high"},
+            "blocker_count": 0,
+            "blocker_journey_names": [],
+            "critical_journey_failures": 0,
+            "top_actions": [],
+        },
+    )
+    with patch.object(config, "BLOP_HTTP_API_KEY", None):
+        async with _v1_client() as client:
+            r = await client.get("/v1/releases/rel-1/brief")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["decision"] == "SHIP"
+    assert "links" in body
+    assert "/v1/runs/run-z" in body["links"]["run"]
+
+
+@pytest.mark.asyncio
+async def test_v1_post_checks_mocked(tmp_db):
+    from blop import config
+
+    with patch.object(config, "BLOP_HTTP_API_KEY", None):
+        from blop.storage.sqlite import upsert_release_registration
+
+        await upsert_release_registration(
+            release_id="rel-x",
+            app_url="https://deploy.example.com",
+            project_id=None,
+            registration_metadata={"branch": "main"},
+        )
+        mock_result = {
+            "run_id": "run-mock",
+            "status": "queued",
+            "release_id": "rel-x",
+        }
+        with patch(
+            "blop.api.v1.router.run_release_check",
+            new=AsyncMock(return_value=mock_result),
+        ):
+            async with _v1_client() as client:
+                r = await client.post(
+                    "/v1/releases/rel-x/checks",
+                    json={"mode": "smoke"},
+                )
+        assert r.status_code == 200
+        out = r.json()
+        assert out["run_id"] == "run-mock"
+        assert out["check_id"] == "run-mock"
+
+
+@pytest.mark.asyncio
+async def test_metrics_endpoint():
+    from httpx import ASGITransport, AsyncClient
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get("/metrics")
+    assert r.status_code in (200, 503)
+    text = r.text
+    assert "blop_runs_total" in text or "prometheus_client not installed" in text

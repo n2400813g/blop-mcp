@@ -1,9 +1,9 @@
 """Shared stability bucket classification and summaries."""
+
 from __future__ import annotations
 
 from collections import Counter
 from typing import Any
-
 
 STABILITY_BUCKETS = (
     "auth_session_failure",
@@ -87,7 +87,13 @@ def classify_case_stability(
     bucket = "unknown_unclassified"
     confidence = "low"
 
-    if auth_status in {"expired_session", "redirected_to_auth", "missing_profile", "unresolved_storage_state", "validation_error"}:
+    if auth_status in {
+        "expired_session",
+        "redirected_to_auth",
+        "missing_profile",
+        "unresolved_storage_state",
+        "validation_error",
+    }:
         bucket = "auth_session_failure"
         confidence = "high"
         evidence.append(f"auth:{auth_status}")
@@ -140,7 +146,10 @@ def classify_case_stability(
         bucket = "network_transient_infra"
         confidence = "medium"
         evidence.append("network:error_observed")
-    elif "plan_drift" in (drift_summary.get("drift_types", []) or []) and replay_mode in {"hybrid_repair", "agent_repair"}:
+    elif "plan_drift" in (drift_summary.get("drift_types", []) or []) and replay_mode in {
+        "hybrid_repair",
+        "agent_repair",
+    }:
         bucket = "selector_healing_failure"
         confidence = "medium"
         evidence.append("drift:plan_drift")
@@ -162,7 +171,9 @@ def classify_case_stability(
         "bucket_recovery_recipe": list(_DEFAULT_RECOVERY_RECIPES[bucket]),
     }
     if bucket == "unknown_unclassified":
-        payload["unknown_classification_gaps"] = infer_unknown_classification_gaps(case, auth_provenance=auth_provenance)
+        payload["unknown_classification_gaps"] = infer_unknown_classification_gaps(
+            case, auth_provenance=auth_provenance
+        )
     return payload
 
 
@@ -209,6 +220,7 @@ def classify_report_stability(report: dict[str, Any]) -> dict[str, Any]:
             classified_cases,
             key=lambda item: ranking.get(item["stability_bucket"], 999),
         )[0]
+        primary.setdefault("unknown_classification_gaps", [])
         return primary
 
     return {
@@ -239,7 +251,16 @@ def classify_validation_issue(check_name: str, message: str, *, passed: bool) ->
         bucket = "auth_session_failure"
     elif "chromium" in lowered_name:
         bucket = "install_or_upgrade_failure"
-    elif "app_url_reachable" in lowered_name or any(token in lowered_message for token in ("connection refused", "timed out", "name or service not known", "temporary failure", "not reachable")):
+    elif "app_url_reachable" in lowered_name or any(
+        token in lowered_message
+        for token in (
+            "connection refused",
+            "timed out",
+            "name or service not known",
+            "temporary failure",
+            "not reachable",
+        )
+    ):
         bucket = "network_transient_infra"
     else:
         bucket = "environment_runtime_misconfig"
@@ -312,7 +333,14 @@ def build_stability_gate_summary(payload: dict[str, Any]) -> dict[str, Any]:
     review_buckets = sorted(
         bucket
         for bucket in counter
-        if bucket in {"stale_flow_drift", "selector_healing_failure", "network_transient_infra", "environment_runtime_misconfig", "product_regression"}
+        if bucket
+        in {
+            "stale_flow_drift",
+            "selector_healing_failure",
+            "network_transient_infra",
+            "environment_runtime_misconfig",
+            "product_regression",
+        }
     )
     follow_up: list[str] = []
     for bucket in blocking_buckets + review_buckets:
@@ -401,5 +429,15 @@ def _looks_like_network_issue(
     haystack = " ".join([*failure_reason_codes, *network_errors, *console_errors])
     return any(
         token in haystack
-        for token in ("timeout", "connection refused", "dns", "network", "502", "503", "504", "econn", "temporarily unavailable")
+        for token in (
+            "timeout",
+            "connection refused",
+            "dns",
+            "network",
+            "502",
+            "503",
+            "504",
+            "econn",
+            "temporarily unavailable",
+        )
     )

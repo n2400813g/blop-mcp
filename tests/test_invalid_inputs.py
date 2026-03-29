@@ -1,15 +1,15 @@
 """Invalid-input edge cases for all 4 canonical tools — no browser, no DB."""
+
 from __future__ import annotations
 
-import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # discover_critical_journeys — URL / regex validation
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_discover_journeys_rejects_ftp_url():
@@ -65,6 +65,7 @@ async def test_discover_journeys_rejects_malformed_exclude_pattern():
 # save_auth_profile — auth_type validation and missing required fields
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_save_auth_profile_rejects_oauth_auth_type():
     from blop.tools.auth import save_auth_profile
@@ -109,6 +110,7 @@ async def test_save_auth_profile_rejects_path_traversal_in_storage_state():
 # triage_release_blocker — no IDs provided
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_triage_blocker_requires_at_least_one_id():
     from blop.tools.triage import triage_release_blocker
@@ -130,6 +132,7 @@ async def test_triage_blocker_rejects_conflicting_flow_and_journey_ids():
 # ---------------------------------------------------------------------------
 # run_release_check — bad URL inputs
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_run_release_check_rejects_ftp_url():

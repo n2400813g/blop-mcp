@@ -1,9 +1,12 @@
 """Structured assertion tools — lightweight standalone verifications."""
+
 from __future__ import annotations
 
 from typing import Optional
 
 from blop.engine.browser_runtime import acquire_page_session
+from blop.engine.semantic_query import evaluate_semantic_query
+from blop.schemas import SemanticQuerySpec, StructuredAssertion
 
 
 async def _acquire_assertion_session(app_url: str, profile_name: Optional[str]):
@@ -135,6 +138,43 @@ async def verify_visual_state(
         }
     except Exception as e:
         return {"assertion": "visual_state", "passed": False, "error": str(e)}
+    finally:
+        if session:
+            await session.close()
+
+
+async def verify_semantic_query(
+    app_url: str,
+    query: str,
+    expected: str | None = None,
+    profile_name: Optional[str] = None,
+    target_selector: str | None = None,
+    target_role: str | None = None,
+    target_name: str | None = None,
+) -> dict:
+    """Navigate to app_url and evaluate a semantic query assertion."""
+    session = None
+    try:
+        session = await _acquire_assertion_session(app_url, profile_name)
+        assertion = StructuredAssertion(
+            assertion_type="semantic_query",
+            description=query,
+            expected=expected,
+            target=target_selector,
+            semantic_query=SemanticQuerySpec(
+                query=query,
+                expected=expected,
+                target_selector=target_selector,
+                target_role=target_role,
+                target_name=target_name,
+                match_mode="contains" if expected else "present",
+            ),
+        )
+        result = await evaluate_semantic_query(session.page, assertion)
+        result["app_url"] = app_url
+        return result
+    except Exception as e:
+        return {"assertion": query, "passed": False, "error": str(e), "eval_type": "semantic_query"}
     finally:
         if session:
             await session.close()

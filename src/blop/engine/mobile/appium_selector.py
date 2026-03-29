@@ -9,6 +9,7 @@ Priority order:
   6. text              (visible text match, cross-platform)
   7. xpath             (last resort — brittle)
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
 
 def _appium_by():
     from appium.webdriver.common.appiumby import AppiumBy
+
     return AppiumBy
 
 
@@ -47,7 +49,8 @@ async def find_element(driver, selector: "MobileSelector", platform: str):
             strategies.append((By.ACCESSIBILITY_ID, selector.content_desc))
 
     if selector.text:
-        strategies.append((By.XPATH, f"//*[@label='{selector.text}' or @value='{selector.text}' or @name='{selector.text}']"))
+        safe_text = selector.text.replace("'", "\\'")
+        strategies.append((By.XPATH, f"//*[@label='{safe_text}' or @value='{safe_text}' or @name='{safe_text}']"))
 
     if selector.xpath:
         strategies.append((By.XPATH, selector.xpath))
@@ -62,9 +65,8 @@ async def find_element(driver, selector: "MobileSelector", platform: str):
             errors.append(f"{strategy}={value!r}: {exc}")
 
     from selenium.common.exceptions import NoSuchElementException
-    raise NoSuchElementException(
-        f"No element found after trying {len(strategies)} strategies: " + "; ".join(errors)
-    )
+
+    raise NoSuchElementException(f"No element found after trying {len(strategies)} strategies: " + "; ".join(errors))
 
 
 def describe_selector(selector: "MobileSelector") -> str:
@@ -77,6 +79,8 @@ def describe_selector(selector: "MobileSelector") -> str:
         return f"class_chain={selector.class_chain!r}"
     if selector.android_uiautomator:
         return f"uiautomator={selector.android_uiautomator!r}"
+    if selector.content_desc:
+        return f"content_desc={selector.content_desc!r}"
     if selector.text:
         return f"text={selector.text!r}"
     if selector.xpath:

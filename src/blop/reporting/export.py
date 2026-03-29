@@ -1,4 +1,5 @@
 """Export test reports in markdown, HTML, or JSON format."""
+
 from __future__ import annotations
 
 import html
@@ -6,6 +7,7 @@ import json
 from datetime import datetime, timezone
 from typing import Literal
 
+from blop.engine.errors import BLOP_RUN_NOT_FOUND, tool_error
 from blop.schemas import FailureCase
 from blop.storage.files import report_path
 
@@ -41,8 +43,8 @@ def generate_markdown_report(
 
     lines.append("## Summary")
     lines.append("")
-    lines.append(f"| Metric | Count |")
-    lines.append(f"|--------|-------|")
+    lines.append("| Metric | Count |")
+    lines.append("|--------|-------|")
     lines.append(f"| Total cases | {len(cases)} |")
     lines.append(f"| Passed | {passed} |")
     lines.append(f"| Failed | {failed} |")
@@ -91,11 +93,11 @@ def generate_markdown_report(
             if c.failure_reason_codes:
                 lines.append(f"- **Reason codes:** {', '.join(c.failure_reason_codes)}")
             if c.assertion_failures:
-                lines.append(f"- **Assertion failures:**")
+                lines.append("- **Assertion failures:**")
                 for af in c.assertion_failures:
                     lines.append(f"  - {af}")
             if c.repro_steps:
-                lines.append(f"- **Repro steps:**")
+                lines.append("- **Repro steps:**")
                 for rs in c.repro_steps:
                     lines.append(f"  1. {rs}")
             if c.screenshots:
@@ -154,7 +156,7 @@ async def export_test_report(
 
     run = await get_run(run_id)
     if not run:
-        return {"error": f"Run {run_id} not found"}
+        return tool_error(f"Run {run_id} not found", BLOP_RUN_NOT_FOUND, details={"run_id": run_id})
 
     cases = await list_cases_for_run(run_id)
 

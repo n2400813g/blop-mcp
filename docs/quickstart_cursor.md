@@ -2,6 +2,8 @@
 
 This is the canonical production-style quickstart for Cursor using local managed `stdio`.
 
+For the product framing behind this setup, see [`docs/DOC_CONTRACT.md`](DOC_CONTRACT.md) and [`docs/AGENT_CONTEXT_PACK.md`](AGENT_CONTEXT_PACK.md).
+
 ## Prerequisites
 
 - Python 3.11+

@@ -6,6 +6,7 @@ from urllib.parse import quote
 
 from blop.config import BLOP_DISCOVERY_MAX_PAGES, validate_app_url
 from blop.engine import discovery
+from blop.engine.errors import BLOP_RESOURCE_NOT_FOUND, BLOP_URL_VALIDATION_FAILED, BLOP_VALIDATION_FAILED, tool_error
 from blop.engine.planner import build_execution_plan
 
 
@@ -24,16 +25,20 @@ async def discover_test_flows(
 ) -> dict:
     url_err = validate_app_url(app_url)
     if url_err:
-        return {"error": url_err}
-    for param_name, pattern in [("include_url_pattern", include_url_pattern), ("exclude_url_pattern", exclude_url_pattern)]:
+        return tool_error(url_err, BLOP_URL_VALIDATION_FAILED)
+    for param_name, pattern in [
+        ("include_url_pattern", include_url_pattern),
+        ("exclude_url_pattern", exclude_url_pattern),
+    ]:
         if pattern:
             try:
                 re.compile(pattern)
             except re.error as exc:
-                return {"error": f"Invalid {param_name}: {exc}"}
+                return tool_error(f"Invalid {param_name}: {exc}", BLOP_VALIDATION_FAILED, details={"param": param_name})
     # If command is provided, parse it for intent/priorities
     if command:
         from blop.engine.planner import parse_command
+
         intent = await parse_command(command, app_url, repo_path=repo_path, profile_name=profile_name)
         if intent.business_goal and not business_goal:
             business_goal = intent.business_goal
@@ -78,9 +83,7 @@ async def discover_test_flows(
             "prioritize business_criticality='revenue' and 'activation' flows first."
         )
     else:
-        result["workflow_hint"] = (
-            "No flows planned. Try passing business_goal='...' or increasing max_pages."
-        )
+        result["workflow_hint"] = "No flows planned. Try passing business_goal='...' or increasing max_pages."
     return result
 
 
@@ -95,7 +98,7 @@ async def explore_site_inventory(
 ) -> dict:
     url_err = validate_app_url(app_url)
     if url_err:
-        return {"error": url_err}
+        return tool_error(url_err, BLOP_URL_VALIDATION_FAILED)
     result = await discovery.explore_site_inventory(
         app_url=app_url,
         profile_name=profile_name,
@@ -118,7 +121,7 @@ async def get_inventory_resource(app_url: str) -> dict:
 
     latest = await get_latest_site_inventory(app_url)
     if not latest:
-        return {"error": f"No inventory found for {app_url}"}
+        return tool_error(f"No inventory found for {app_url}", BLOP_RESOURCE_NOT_FOUND, details={"app_url": app_url})
     latest["related_v2_resources"] = [
         f"blop://v2/context/{quote(app_url, safe='')}/latest",
     ]
@@ -126,12 +129,16 @@ async def get_inventory_resource(app_url: str) -> dict:
 
 
 async def get_context_graph_resource(app_url: str, profile_name: Optional[str] = None) -> dict:
-    from blop.storage.sqlite import get_latest_context_graph
     from blop.engine.context_graph import get_context_graph_summary
+    from blop.storage.sqlite import get_latest_context_graph
 
     graph = await get_latest_context_graph(app_url, profile_name=profile_name)
     if not graph:
-        return {"error": f"No context graph found for {app_url}"}
+        return tool_error(
+            f"No context graph found for {app_url}",
+            BLOP_RESOURCE_NOT_FOUND,
+            details={"app_url": app_url, "resource": "context_graph"},
+        )
     payload = graph.model_dump()
     payload["summary"] = get_context_graph_summary(graph).model_dump()
     payload["related_v2_resources"] = [
@@ -147,7 +154,7 @@ async def get_page_structure(
 ) -> dict:
     url_err = validate_app_url(url or app_url)
     if url_err:
-        return {"error": url_err}
+        return tool_error(url_err, BLOP_URL_VALIDATION_FAILED)
     return await discovery.get_page_structure(
         app_url=app_url,
         target_url=url,

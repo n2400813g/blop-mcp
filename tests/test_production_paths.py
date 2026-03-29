@@ -4,8 +4,8 @@ from pathlib import Path
 
 
 def test_runs_dir_resolves_relative_to_repo_root(monkeypatch, tmp_path):
-    from blop.storage import files
     from blop import config
+    from blop.storage import files
 
     monkeypatch.setattr(files, "_REPO_ROOT", tmp_path)
     monkeypatch.setattr(config, "BLOP_RUNS_DIR", "runs-prod")
@@ -14,8 +14,8 @@ def test_runs_dir_resolves_relative_to_repo_root(monkeypatch, tmp_path):
 
 
 def test_runs_dir_preserves_absolute_path(monkeypatch, tmp_path):
-    from blop.storage import files
     from blop import config
+    from blop.storage import files
 
     absolute_runs = tmp_path / "absolute-runs"
     monkeypatch.setattr(config, "BLOP_RUNS_DIR", str(absolute_runs))
@@ -24,8 +24,8 @@ def test_runs_dir_preserves_absolute_path(monkeypatch, tmp_path):
 
 
 def test_screenshot_path_stays_inside_configured_runs_dir(monkeypatch, tmp_path):
-    from blop.storage import files
     from blop import config
+    from blop.storage import files
 
     absolute_runs = tmp_path / "runs"
     monkeypatch.setattr(config, "BLOP_RUNS_DIR", str(absolute_runs))

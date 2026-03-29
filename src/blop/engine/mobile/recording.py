@@ -3,6 +3,7 @@
 Drives an Appium session via an LLM agent loop and captures each action
 as a FlowStep list, mirroring the structure of engine/recording.py.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -34,7 +35,7 @@ async def record_mobile_flow(
     Raises RuntimeError if the Appium client is not installed or session creation fails.
     """
     from blop.engine.mobile.driver import make_appium_driver
-    from blop.engine.mobile.evidence import capture_device_logs, take_device_screenshot
+    from blop.engine.mobile.evidence import capture_device_logs
     from blop.schemas import FlowStep, MobileSelector, RecordedFlow
 
     driver = await make_appium_driver(mobile_target)
@@ -56,6 +57,7 @@ async def record_mobile_flow(
             screenshot_p = mobile_screenshot_path(run_id, "record", step_id, platform)
             try:
                 from blop.engine.mobile.evidence import take_device_screenshot as _ss
+
                 await _ss(driver, path=screenshot_p)
             except Exception:
                 screenshot_p = None
@@ -91,6 +93,7 @@ async def record_mobile_flow(
         log_p = None
         try:
             from blop.storage.files import device_log_path
+
             log_p = device_log_path(run_id, "record", platform)
             await capture_device_logs(driver, platform=platform, output_path=log_p)
         except Exception:
@@ -100,14 +103,13 @@ async def record_mobile_flow(
         except Exception:
             pass
 
-    from blop.schemas import RecordedFlow
     return RecordedFlow(
         flow_id=uuid.uuid4().hex,
         flow_name=flow_name,
         app_url=app_id,
         goal=goal,
         steps=steps,
-        created_at=datetime.datetime.utcnow().isoformat(),
+        created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         business_criticality=business_criticality,  # type: ignore[arg-type]
         platform=platform,  # type: ignore[arg-type]
         mobile_target=mobile_target,
@@ -130,9 +132,9 @@ async def _run_agent_loop(
     and constructs a prompt asking the model what to do next given a
     screenshot and the current accessibility tree.
     """
-    from blop.engine.llm_factory import make_planning_llm, make_message
+    from blop.engine.llm_factory import make_message, make_planning_llm
 
-    llm = make_planning_llm()
+    llm = make_planning_llm(role="planner")
     actions: list[dict] = []
 
     system_prompt = (
@@ -150,6 +152,7 @@ async def _run_agent_loop(
         page_source = ""
         try:
             import asyncio as _asyncio
+
             loop = _asyncio.get_event_loop()
             page_source = await loop.run_in_executor(None, driver.page_source)
             # Trim to avoid token overflow — keep first 3000 chars
@@ -254,4 +257,4 @@ async def _execute_action(driver, action_dict: dict, platform: str) -> bool:
     except Exception:
         return False
 
-    return False
+    return False  # unrecognized action type

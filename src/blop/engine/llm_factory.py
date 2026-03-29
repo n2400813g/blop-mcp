@@ -1,64 +1,181 @@
 """LLM factory: supports google (Gemini), anthropic, and openai backends.
 
 Usage:
-    from blop.engine.llm_factory import make_planning_llm, make_agent_llm, make_message
+    from blop.engine.llm_factory import make_planning_llm, make_agent_llm, make_message, ainvoke_llm
 
     llm = make_planning_llm(temperature=0.3, max_output_tokens=2000)
-    response = await llm.ainvoke([make_message(prompt)])
+    response = await ainvoke_llm(llm, [make_message(prompt)], span_name="blop.llm.example", role="planner")
     text = str(response.content)
+
+``ainvoke_llm`` wraps ``llm.ainvoke`` with optional OpenTelemetry when ``BLOP_OTEL_TRACING=1``
+and ``blop-mcp[otel]`` is installed (see ``llm_tracing``).
 """
+
 from __future__ import annotations
 
 import os
 from typing import Any
 
+_ROLE_ENV_MAP = {
+    "agent": "BLOP_AGENT_LLM_MODEL",
+    "planner": "BLOP_PLANNER_LLM_MODEL",
+    "repair": "BLOP_REPAIR_LLM_MODEL",
+    "classifier": "BLOP_CLASSIFIER_LLM_MODEL",
+    "summary": "BLOP_CLASSIFIER_LLM_MODEL",
+    "vision": "BLOP_VISION_LLM_MODEL",
+    "assertion": "BLOP_VISION_LLM_MODEL",
+}
 
-def make_planning_llm(temperature: float = 0.3, max_output_tokens: int = 2000) -> Any:
-    """Return a chat model for planning/classification/remediation calls."""
+_DEFAULT_MODELS = {
+    "google": {
+        "agent": "gemini-2.5-flash",
+        "planner": "gemini-2.5-flash",
+        "repair": "gemini-2.5-flash",
+        "classifier": "gemini-2.5-flash",
+        "summary": "gemini-2.5-flash",
+        "vision": "gemini-2.5-flash",
+        "assertion": "gemini-2.5-flash",
+    },
+    "anthropic": {
+        "agent": "claude-3-5-sonnet-20241022",
+        "planner": "claude-3-5-haiku-20241022",
+        "repair": "claude-3-5-sonnet-20241022",
+        "classifier": "claude-3-5-haiku-20241022",
+        "summary": "claude-3-5-haiku-20241022",
+        "vision": "claude-3-5-sonnet-20241022",
+        "assertion": "claude-3-5-sonnet-20241022",
+    },
+    "openai": {
+        "agent": "gpt-4o",
+        "planner": "gpt-4o-mini",
+        "repair": "gpt-4o",
+        "classifier": "gpt-4o-mini",
+        "summary": "gpt-4o-mini",
+        "vision": "gpt-4o",
+        "assertion": "gpt-4o",
+    },
+}
+
+
+def resolve_llm_model(role: str, provider: str | None = None) -> str:
+    provider_name = (provider or os.getenv("BLOP_LLM_PROVIDER", "google")).lower()
+    role_name = (role or "planner").strip().lower()
+    env_name = _ROLE_ENV_MAP.get(role_name)
+    if env_name and os.getenv(env_name):
+        return os.getenv(env_name, "")
+    if os.getenv("BLOP_LLM_MODEL"):
+        return os.getenv("BLOP_LLM_MODEL", "")
+    return _DEFAULT_MODELS.get(provider_name, _DEFAULT_MODELS["google"]).get(
+        role_name,
+        _DEFAULT_MODELS.get(provider_name, _DEFAULT_MODELS["google"])["planner"],
+    )
+
+
+def _make_chat_model(
+    *,
+    role: str,
+    temperature: float,
+    max_output_tokens: int | None = None,
+) -> Any:
     provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
-    model_override = os.getenv("BLOP_LLM_MODEL", "")
+    model = resolve_llm_model(role, provider)
 
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic  # type: ignore[import-untyped]
-        model = model_override or "claude-3-5-haiku-20241022"
+
         api_key = os.getenv("ANTHROPIC_API_KEY", "") or None
-        return ChatAnthropic(model=model, api_key=api_key, temperature=temperature, max_tokens=max_output_tokens)
+        kwargs = {"model": model, "api_key": api_key, "temperature": temperature}
+        if max_output_tokens is not None:
+            kwargs["max_tokens"] = max_output_tokens
+        return ChatAnthropic(**kwargs)
 
     if provider == "openai":
         from langchain_openai import ChatOpenAI  # type: ignore[import-untyped]
-        model = model_override or "gpt-4o-mini"
+
         api_key = os.getenv("OPENAI_API_KEY", "") or None
-        return ChatOpenAI(model=model, api_key=api_key, temperature=temperature, max_tokens=max_output_tokens)
+        kwargs = {"model": model, "api_key": api_key, "temperature": temperature}
+        if max_output_tokens is not None:
+            kwargs["max_tokens"] = max_output_tokens
+        return ChatOpenAI(**kwargs)
 
     # Default: Google Gemini via browser_use
     from browser_use.llm import ChatGoogle
-    model = model_override or "gemini-2.5-flash"
+
     api_key = os.getenv("GOOGLE_API_KEY", "")
-    return ChatGoogle(model=model, api_key=api_key, temperature=temperature, max_output_tokens=max_output_tokens)
+    kwargs = {"model": model, "api_key": api_key, "temperature": temperature}
+    if max_output_tokens is not None:
+        kwargs["max_output_tokens"] = max_output_tokens
+    return ChatGoogle(**kwargs)
 
 
-def make_agent_llm() -> Any:
+def make_planning_llm(
+    temperature: float = 0.3,
+    max_output_tokens: int = 2000,
+    *,
+    role: str = "planner",
+) -> Any:
+    """Return a chat model for planning/classification/remediation calls."""
+    return _make_chat_model(
+        role=role,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+    )
+
+
+def make_agent_llm(*, role: str = "agent", temperature: float = 0.7) -> Any:
     """Return a chat model for use as the Browser-Use agent backbone."""
-    provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
-    model_override = os.getenv("BLOP_LLM_MODEL", "")
+    return _make_chat_model(role=role, temperature=temperature, max_output_tokens=None)
 
-    if provider == "anthropic":
-        from langchain_anthropic import ChatAnthropic  # type: ignore[import-untyped]
-        model = model_override or "claude-3-5-sonnet-20241022"
-        api_key = os.getenv("ANTHROPIC_API_KEY", "") or None
-        return ChatAnthropic(model=model, api_key=api_key, temperature=0.7)
 
-    if provider == "openai":
-        from langchain_openai import ChatOpenAI  # type: ignore[import-untyped]
-        model = model_override or "gpt-4o"
-        api_key = os.getenv("OPENAI_API_KEY", "") or None
-        return ChatOpenAI(model=model, api_key=api_key, temperature=0.7)
+async def ainvoke_llm(llm: Any, messages: list, *, span_name: str, **span_attrs: Any) -> Any:
+    """Invoke ``llm.ainvoke(messages)`` with tracing, retries, circuit breaker, and metrics."""
+    import asyncio
 
-    # Default: Google Gemini
-    from browser_use.llm import ChatGoogle
-    model = model_override or "gemini-2.5-flash"
-    api_key = os.getenv("GOOGLE_API_KEY", "")
-    return ChatGoogle(model=model, api_key=api_key, temperature=0.7)
+    from blop.config import BLOP_LLM_PROVIDER, BLOP_LLM_RETRY_MAX
+    from blop.engine import metrics as blop_metrics
+    from blop.engine.circuit_breaker import get_llm_circuit
+    from blop.engine.errors import BlopError
+    from blop.engine.llm_exceptions import classify_llm_failure
+    from blop.engine.llm_tracing import trace_llm_call
+
+    provider = (BLOP_LLM_PROVIDER or "google").strip().lower()
+    breaker = await get_llm_circuit(provider)
+    await breaker.before_call()
+
+    last_exc: BaseException | None = None
+    for attempt in range(BLOP_LLM_RETRY_MAX + 1):
+        try:
+            with trace_llm_call(span_name, span_attrs):
+                out = await llm.ainvoke(messages)
+            await breaker.record_outcome(success=True, circuit_worthy_failure=False)
+            blop_metrics.inc_llm_call(provider=provider, tool=span_name)
+            return out
+        except BlopError:
+            raise
+        except Exception as e:
+            last_exc = e
+            _, retriable = classify_llm_failure(e)
+            will_retry = retriable and attempt < BLOP_LLM_RETRY_MAX
+            if will_retry:
+                delay = min(8.0, 2.0**attempt)
+                await asyncio.sleep(delay)
+                try:
+                    await breaker.before_call()
+                except BlopError:
+                    await breaker.record_outcome(
+                        success=False,
+                        circuit_worthy_failure=classify_llm_failure(last_exc)[0],
+                    )
+                    raise
+                continue
+            break
+
+    assert last_exc is not None
+    await breaker.record_outcome(
+        success=False,
+        circuit_worthy_failure=classify_llm_failure(last_exc)[0],
+    )
+    raise last_exc
 
 
 def make_message(prompt: str) -> Any:
@@ -70,7 +187,9 @@ def make_message(prompt: str) -> Any:
     provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
     if provider in ("anthropic", "openai"):
         from langchain_core.messages import HumanMessage
+
         return HumanMessage(content=prompt)
     # google (browser_use)
     from browser_use.llm.messages import UserMessage
+
     return UserMessage(content=prompt)

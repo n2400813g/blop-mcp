@@ -5,8 +5,10 @@ from typing import Optional
 from pydantic import ValidationError
 
 from blop.engine import auth as auth_engine
+from blop.engine.errors import BLOP_AUTH_INVALID_INPUT, tool_error
 from blop.schemas import AuthProfile, AuthProfileResult
 from blop.storage import sqlite
+
 
 async def save_auth_profile(
     profile_name: str,
@@ -30,11 +32,8 @@ async def save_auth_profile(
             user_data_dir=user_data_dir,
         )
     except ValidationError as exc:
-        details = "; ".join(
-            f"{'.'.join(str(p) for p in err.get('loc', []))}: {err.get('msg')}"
-            for err in exc.errors()
-        )
-        return {"error": f"Invalid auth profile input. {details}"}
+        details = "; ".join(f"{'.'.join(str(p) for p in err.get('loc', []))}: {err.get('msg')}" for err in exc.errors())
+        return tool_error(f"Invalid auth profile input. {details}", BLOP_AUTH_INVALID_INPUT)
 
     storage_path: Optional[str] = None
     auth_warning: Optional[str] = None

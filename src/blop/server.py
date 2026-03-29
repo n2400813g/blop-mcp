@@ -1,5 +1,33 @@
+"""Blop FastMCP server — release confidence control plane.
+
+**Core MCP tools (default agent path)** — ``validate_release_setup``,
+``discover_critical_journeys``, ``record_test_flow``, ``run_release_check``,
+``triage_release_blocker``, context-read tools (``get_workspace_context``,
+``get_release_and_journeys``, …), ``get_mcp_capabilities``, and atomic browser
+tools (``navigate_to_url``, ``perform_step``, …).
+
+**Full release context in three or fewer tool calls**
+1. ``validate_release_setup(app_url=…)`` when preflight is needed.
+2. ``get_release_and_journeys(release_id)`` — or ``get_workspace_context()`` plus
+   the ``blop://journeys`` resource.
+3. ``run_release_check(…)``, then ``get_test_results(run_id)`` or
+   ``blop://release/{release_id}/brief`` for the decision.
+
+**Typical pipeline** — ``discover_critical_journeys`` → ``record_test_flow`` per
+journey → ``run_release_check(mode="replay")`` → read
+``blop://release/{release_id}/brief`` or ``get_release_context``.
+
+**Surface gating** — ``BLOP_ENABLE_LEGACY_MCP_TOOLS`` registers deprecated aliases
+(``discover_test_flows``, ``run_regression_test``, ``validate_setup``).
+``BLOP_ENABLE_COMPAT_TOOLS`` registers ``browser_*``, ``blop_v2_*``, and related
+extras. Logging is disabled before other imports so stdio JSON-RPC stays clean.
+"""
+
 import logging
 import os
+import sqlite3
+import uuid
+from importlib import import_module
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -10,6 +38,8 @@ os.environ.setdefault("BROWSER_USE_LOGGING_LEVEL", "CRITICAL")
 
 # blop logger bypasses logging.disable via explicit _logger.disabled = False
 from blop.engine.logger import get_logger as _get_blop_logger  # noqa: E402
+from blop.engine.logger import request_id_var  # noqa: E402
+
 _log = _get_blop_logger("server")
 
 from typing import Literal, Optional
@@ -18,16 +48,86 @@ from mcp.server.fastmcp import FastMCP
 
 from blop import capabilities as capability_flags
 from blop.config import BLOP_DISCOVERY_MAX_PAGES
+from blop.engine.errors import (
+    BLOP_CAPABILITY_DISABLED,
+    BLOP_MCP_INTERNAL_TOOL_ERROR,
+    BLOP_RUN_NOT_FOUND,
+    BlopError,
+    blop_error_from_sqlite,
+    tool_error,
+)
 from blop.schemas import ReleaseReference, TelemetrySignalInput
-from blop.storage import sqlite
-from blop.storage.sqlite import init_db
-from blop.tools import assertions as assertions_tools
-from blop.tools import auth, capture_auth, debug, discover, evaluate as evaluate_tools
-from blop.tools import baselines as baselines_tools
-from blop.tools import browser_compat
-from blop.tools import network as network_tools
-from blop.tools import record, regression, results, security as security_tools
-from blop.tools import storage as storage_tools, v2_surface, validate
+
+
+class _LazyModule:
+    """Proxy module imports until first attribute access.
+
+    This keeps ``import blop.server`` lighter while preserving existing patch
+    points such as ``blop.server.browser_compat.browser_hover`` in tests.
+    """
+
+    __slots__ = ("_module_name", "_module")
+
+    def __init__(self, module_name: str) -> None:
+        object.__setattr__(self, "_module_name", module_name)
+        object.__setattr__(self, "_module", None)
+
+    def _load(self):
+        module = object.__getattribute__(self, "_module")
+        if module is None:
+            module = import_module(object.__getattribute__(self, "_module_name"))
+            object.__setattr__(self, "_module", module)
+        return module
+
+    def __getattr__(self, name: str):
+        return getattr(self._load(), name)
+
+    def __setattr__(self, name: str, value) -> None:
+        if name in self.__slots__:
+            object.__setattr__(self, name, value)
+            return
+        setattr(self._load(), name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name in self.__slots__:
+            object.__delattr__(self, name)
+            return
+        delattr(self._load(), name)
+
+    def __repr__(self) -> str:
+        return f"<LazyModule {object.__getattribute__(self, '_module_name')}>"
+
+
+def _lazy_module(module_name: str) -> _LazyModule:
+    return _LazyModule(module_name)
+
+
+sqlite = _lazy_module("blop.storage.sqlite")
+assertions_tools = _lazy_module("blop.tools.assertions")
+auth = _lazy_module("blop.tools.auth")
+browser_compat = _lazy_module("blop.tools.browser_compat")
+capture_auth = _lazy_module("blop.tools.capture_auth")
+debug = _lazy_module("blop.tools.debug")
+discover = _lazy_module("blop.tools.discover")
+record = _lazy_module("blop.tools.record")
+regression = _lazy_module("blop.tools.regression")
+results = _lazy_module("blop.tools.results")
+v2_surface = _lazy_module("blop.tools.v2_surface")
+validate = _lazy_module("blop.tools.validate")
+baselines_tools = _lazy_module("blop.tools.baselines")
+evaluate_tools = _lazy_module("blop.tools.evaluate")
+network_tools = _lazy_module("blop.tools.network")
+security_tools = _lazy_module("blop.tools.security")
+storage_tools = _lazy_module("blop.tools.storage")
+atomic_browser_tools = _lazy_module("blop.tools.atomic_browser")
+context_read_tools = _lazy_module("blop.tools.context_read")
+journeys_tools = _lazy_module("blop.tools.journeys")
+release_check_tools = _lazy_module("blop.tools.release_check")
+resources_tools = _lazy_module("blop.tools.resources")
+triage_tools = _lazy_module("blop.tools.triage")
+prompts_tools = _lazy_module("blop.tools.prompts")
+process_insights_tools = _lazy_module("blop.tools.process_insights")
+qa_advisor_tools = _lazy_module("blop.tools.qa_advisor")
 
 mcp = FastMCP("blop")
 
@@ -35,49 +135,65 @@ mcp = FastMCP("blop")
 def _ensure_compat_enabled(tool_name: str) -> Optional[dict]:
     if capability_flags.is_tool_enabled(tool_name):
         return None
-    return {
-        "error": (
+    return tool_error(
+        (
             f"Tool '{tool_name}' is disabled by capabilities. "
             "Enable BLOP_CAPABILITIES=...,compat_browser to use Playwright-compatible browser_* tools."
-        )
-    }
+        ),
+        BLOP_CAPABILITY_DISABLED,
+        details={"tool": tool_name},
+    )
 
 
 async def _safe_call(handler, /, tool_name: Optional[str] = None, **kwargs) -> dict:
     """Standardized error envelope for MCP tool handlers."""
+    rid = uuid.uuid4().hex[:12]
+    token = request_id_var.set(rid)
     try:
-        return await handler(**kwargs)
-    except Exception as e:
-        _tool = tool_name or getattr(handler, "__qualname__", str(handler))
-        _log.error(
-            "tool_exception tool=%s error_type=%s",
-            _tool,
-            type(e).__name__,
-            extra={
-                "event": "tool_exception",
-                "tool": _tool,
-                "error_type": type(e).__name__,
-                "error": str(e),
-                "run_id": kwargs.get("run_id"),
-                "flow_id": kwargs.get("flow_id"),
-                "case_id": kwargs.get("case_id"),
-                "profile_name": kwargs.get("profile_name"),
-            },
-            exc_info=True,
-        )
-        payload = {
-            "error": (
-                f"Tool '{_tool}' encountered an internal error. "
-                "Check the configured BLOP_DEBUG_LOG for details."
-            ),
-            "error_type": type(e).__name__,
-            "tool": _tool,
-        }
-        for key in ("run_id", "flow_id", "case_id"):
-            value = kwargs.get(key)
-            if isinstance(value, str) and value:
-                payload[key] = value
-        return payload
+        try:
+            result = await handler(**kwargs)
+        except BlopError as e:
+            result = e.to_merged_response()
+        except sqlite3.Error as e:
+            # aiosqlite.Error subclasses sqlite3.Error
+            result = blop_error_from_sqlite(e).to_merged_response()
+        except Exception as e:
+            _tool = tool_name or getattr(handler, "__qualname__", str(handler))
+            _log.error(
+                "tool_exception tool=%s error_type=%s",
+                _tool,
+                type(e).__name__,
+                extra={
+                    "event": "tool_exception",
+                    "tool": _tool,
+                    "error_type": type(e).__name__,
+                    "error": str(e),
+                    "run_id": kwargs.get("run_id"),
+                    "flow_id": kwargs.get("flow_id"),
+                    "case_id": kwargs.get("case_id"),
+                    "profile_name": kwargs.get("profile_name"),
+                },
+                exc_info=True,
+            )
+            payload = tool_error(
+                (f"Tool '{_tool}' encountered an internal error. Check the configured BLOP_DEBUG_LOG for details."),
+                BLOP_MCP_INTERNAL_TOOL_ERROR,
+                details={"error_type": type(e).__name__, "tool": _tool},
+                error_type=type(e).__name__,
+                tool=_tool,
+                request_id=rid,
+            )
+            for key in ("run_id", "flow_id", "case_id"):
+                value = kwargs.get(key)
+                if isinstance(value, str) and value:
+                    payload[key] = value
+            return payload
+        if isinstance(result, dict):
+            result = dict(result)
+            result.setdefault("request_id", rid)
+        return result
+    finally:
+        request_id_var.reset(token)
 
 
 async def _safe_compat_call(tool_name: str, handler, /, **kwargs) -> dict:
@@ -108,11 +224,12 @@ def _add_deprecation_notice(
 def _compat_tools_enabled() -> bool:
     """Return True when BLOP_ENABLE_COMPAT_TOOLS=true.
 
-    Controls whether legacy/compat tools are registered in the MCP surface.
-    Default is False — only the 4 canonical release-confidence tools are visible.
-    Set BLOP_ENABLE_COMPAT_TOOLS=true to restore the full 87-tool surface.
+    Gates Playwright-compat browser_* names, blop_v2_*, and other legacy tools.
+    Default False: core release, context-read, and atomic browser tools still register.
+    Set True to restore the expanded legacy surface (dozens of tools).
     """
     from blop.config import BLOP_ENABLE_COMPAT_TOOLS
+
     return BLOP_ENABLE_COMPAT_TOOLS
 
 
@@ -123,7 +240,25 @@ def _if_compat(fn):
     return fn
 
 
-@mcp.tool()
+def _legacy_mcp_tools_enabled() -> bool:
+    """Return True when BLOP_ENABLE_LEGACY_MCP_TOOLS=true.
+
+    Gates deprecated MCP aliases: discover_test_flows, run_regression_test, validate_setup.
+    Default False: use discover_critical_journeys, run_release_check, validate_release_setup.
+    """
+    from blop.config import BLOP_ENABLE_LEGACY_MCP_TOOLS
+
+    return BLOP_ENABLE_LEGACY_MCP_TOOLS
+
+
+def _if_legacy(fn):
+    """Decorator: register fn as an MCP tool only when BLOP_ENABLE_LEGACY_MCP_TOOLS=true."""
+    if _legacy_mcp_tools_enabled():
+        return mcp.tool()(fn)
+    return fn
+
+
+@_if_legacy
 async def discover_test_flows(
     app_url: str,
     repo_path: Optional[str] = None,
@@ -312,10 +447,11 @@ async def list_auth_profiles() -> dict:
     """
     try:
         from blop.storage import sqlite
+
         profiles = await sqlite.list_auth_profiles()
         return {"profiles": profiles, "total": len(profiles)}
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 @mcp.tool()
@@ -368,6 +504,7 @@ async def evaluate_web_task(
 # ---------------------------------------------------------------------------
 # Playwright-MCP compatibility tools (capability-gated via compat_browser)
 # ---------------------------------------------------------------------------
+
 
 @_if_compat
 async def browser_navigate(url: str, profile_name: Optional[str] = None) -> dict:
@@ -1030,10 +1167,11 @@ async def cancel_run(run_id: str) -> dict:
     Returns:
         dict with run_id, previous_status, new_status
     """
+
     async def _cancel_handler() -> dict:
         run = await sqlite.get_run(run_id)
         if not run:
-            return {"error": f"Run {run_id} not found"}
+            return tool_error(f"Run {run_id} not found", BLOP_RUN_NOT_FOUND, details={"run_id": run_id})
         prev_status = run.get("status", "unknown")
         if prev_status in ("completed", "failed", "cancelled"):
             return {
@@ -1122,7 +1260,7 @@ async def package_authenticated_saas_baseline(
     )
 
 
-@mcp.tool()
+@_if_legacy
 async def run_regression_test(
     app_url: str,
     flow_ids: list[str],
@@ -1181,9 +1319,10 @@ async def compare_visual_baseline(
     """
     try:
         from blop.engine.visual_regression import compare_visual_baseline as _compare
+
         return await _compare(flow_id, step_index)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 @mcp.tool()
@@ -1201,6 +1340,30 @@ async def get_test_results(run_id: str) -> dict:
         step_failure_index, artifact_paths), severity_counts, failed_cases, next_actions
     """
     return await _safe_call(results.get_test_results, run_id=run_id)
+
+
+@mcp.tool()
+async def get_process_insights(run_id: str, include_pm4py: bool = True) -> dict:
+    """Derive process-mining style variants from run health events (optional PM4Py when installed).
+
+    Uses replay_step_completed and other health events. Install ``blop-mcp[insights]`` for PM4Py stats.
+    """
+    return await _safe_call(
+        process_insights_tools.get_process_insights,
+        tool_name="get_process_insights",
+        run_id=run_id,
+        include_pm4py=include_pm4py,
+    )
+
+
+@mcp.tool()
+async def export_run_trace(run_id: str) -> dict:
+    """Export OTLP-shaped JSON (resourceSpans) for a run — local SQLite only, no network upload."""
+    return await _safe_call(
+        process_insights_tools.export_run_trace_otel,
+        tool_name="export_run_trace",
+        run_id=run_id,
+    )
 
 
 @_if_compat
@@ -1234,12 +1397,13 @@ async def list_recorded_tests() -> dict:
         dict with flows (list of {flow_id, flow_name, app_url, goal, created_at}), total
     """
     try:
-        from blop.storage.sqlite import list_flows
         from blop.schemas import RecordedTestsResult
+        from blop.storage.sqlite import list_flows
+
         flows = await list_flows()
         return RecordedTestsResult(flows=flows, total=len(flows)).model_dump()
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 @mcp.tool()
@@ -1260,10 +1424,10 @@ async def debug_test_case(run_id: str, case_id: str) -> dict:
     try:
         return await debug.debug_test_case(run_id, case_id)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
-@mcp.tool()
+@_if_legacy
 async def validate_setup(
     app_url: Optional[str] = None,
     profile_name: Optional[str] = None,
@@ -1289,12 +1453,13 @@ async def validate_setup(
             check_mobile=check_mobile,
         )
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 # ---------------------------------------------------------------------------
 # Structured Assertion Tools — lightweight standalone verifications
 # ---------------------------------------------------------------------------
+
 
 @_if_compat
 async def verify_element_visible(
@@ -1314,7 +1479,7 @@ async def verify_element_visible(
     try:
         return await assertions_tools.verify_element_visible(app_url, role, accessible_name, profile_name)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 @_if_compat
@@ -1333,7 +1498,7 @@ async def verify_text_visible(
     try:
         return await assertions_tools.verify_text_visible(app_url, text, profile_name)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 @_if_compat
@@ -1354,7 +1519,7 @@ async def verify_value(
     try:
         return await assertions_tools.verify_value(app_url, selector, expected_value, profile_name)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 @_if_compat
@@ -1373,7 +1538,32 @@ async def verify_visual_state(
     try:
         return await assertions_tools.verify_visual_state(app_url, description, profile_name)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
+
+
+@_if_compat
+async def verify_semantic_query(
+    app_url: str,
+    query: str,
+    expected: Optional[str] = None,
+    profile_name: Optional[str] = None,
+    target_selector: Optional[str] = None,
+    target_role: Optional[str] = None,
+    target_name: Optional[str] = None,
+) -> dict:
+    """Verify a semantic assertion against the current page using accessibility/DOM extraction first."""
+    try:
+        return await assertions_tools.verify_semantic_query(
+            app_url,
+            query,
+            expected,
+            profile_name,
+            target_selector,
+            target_role,
+            target_name,
+        )
+    except Exception as e:
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 @_if_compat
@@ -1392,14 +1582,16 @@ async def export_test_report(
     """
     try:
         from blop.reporting.export import export_test_report as _export
+
         return await _export(run_id, format)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 # ---------------------------------------------------------------------------
 # Security Scanning Tools
 # ---------------------------------------------------------------------------
+
 
 @_if_compat
 async def security_scan(
@@ -1424,7 +1616,7 @@ async def security_scan(
     try:
         return await security_tools.security_scan(repo_path, scan_type, ruleset, severity_filter)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 @_if_compat
@@ -1446,12 +1638,13 @@ async def security_scan_url(
     try:
         return await security_tools.security_scan_url(app_url, scan_type)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 # ---------------------------------------------------------------------------
 # Canonical Routing + Legacy Network Mocking Tools
 # ---------------------------------------------------------------------------
+
 
 @_if_compat
 async def route_register(
@@ -1557,6 +1750,7 @@ async def clear_network_routes() -> dict:
 # Code Generation Tool
 # ---------------------------------------------------------------------------
 
+
 @_if_compat
 async def export_flow_as_code(
     flow_id: str,
@@ -1575,12 +1769,14 @@ async def export_flow_as_code(
         dict with flow_id, language, path to generated file, step_count
     """
     from blop.engine.codegen import export_flow_as_code as _export
+
     return await _safe_call(_export, flow_id=flow_id, language=language)
 
 
 # ---------------------------------------------------------------------------
 # Canonical Storage + Legacy Storage State Management Tools
 # ---------------------------------------------------------------------------
+
 
 @_if_compat
 async def storage_get(
@@ -1798,6 +1994,7 @@ async def save_browser_state(
 # ---------------------------------------------------------------------------
 # MCP v2 Tools — change intelligence + reliability control plane
 # ---------------------------------------------------------------------------
+
 
 @_if_compat
 async def blop_v2_get_surface_contract() -> dict:
@@ -2035,13 +2232,14 @@ async def blop_v2_archive_storage(
     """
     try:
         from blop.storage.sqlite import archive_old_runs, archive_old_telemetry
+
         result = await archive_old_runs(older_than_days=older_than_days, keep_failed=keep_failed)
         if archive_telemetry:
             tel_result = await archive_old_telemetry(older_than_days=telemetry_older_than_days)
             result["telemetry"] = tel_result
         return result
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 # ---------------------------------------------------------------------------
@@ -2054,15 +2252,12 @@ async def health_resource() -> dict:
     """Server health check: DB reachability, LLM key, Chromium, active run count."""
     import shutil
     from datetime import datetime, timezone
+
     from blop.config import check_llm_api_key, runtime_posture_snapshot
     from blop.storage import files as file_store
 
     has_key, _key_name = check_llm_api_key()
-    chromium_ok = bool(
-        shutil.which("chromium")
-        or shutil.which("chromium-browser")
-        or shutil.which("google-chrome")
-    )
+    chromium_ok = bool(shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome"))
     db_ok = False
     try:
         await sqlite.list_runs(limit=1)
@@ -2108,6 +2303,14 @@ async def run_artifact_index_resource(run_id: str) -> dict:
     return await results.get_artifact_index_resource(run_id)
 
 
+@mcp.resource("blop://run/{run_id}/mobile_artifacts")
+async def run_mobile_artifacts_resource(run_id: str) -> dict:
+    """Mobile replay evidence: screenshots, page_source paths, device logs (per run case)."""
+    from blop.tools import resources as _resources_mod
+
+    return await _resources_mod.run_mobile_artifacts_resource(run_id)
+
+
 @mcp.resource("blop://run/{run_id}/recommendation")
 async def run_recommendation_resource(run_id: str) -> dict:
     """Release recommendation (SHIP / INVESTIGATE / BLOCK) for a completed run. Lightweight polling target — cheaper than get_test_results."""
@@ -2124,13 +2327,15 @@ async def flow_stability_profile_resource(flow_id: str) -> dict:
 async def prompts_list_resource() -> dict:
     """Debug/internal resource: list available prompt templates with previews."""
     from blop.prompts import list_available_prompts
+
     return list_available_prompts()
 
 
 @mcp.resource("blop://prompts/{name}")
 async def prompt_resource(name: str) -> dict:
     """Debug/internal resource: read a specific engine prompt template by name (discover, repair, remediation, next_actions)."""
-    from blop.prompts import get_prompt, DISCOVER_PROMPT, REPAIR_STEP_PROMPT, REMEDIATION_PROMPT, NEXT_ACTIONS_PROMPT
+    from blop.prompts import DISCOVER_PROMPT, NEXT_ACTIONS_PROMPT, REMEDIATION_PROMPT, REPAIR_STEP_PROMPT, get_prompt
+
     defaults = {
         "discover": DISCOVER_PROMPT,
         "repair": REPAIR_STEP_PROMPT,
@@ -2222,6 +2427,7 @@ async def v2_correlation_resource(app: str, window: str) -> dict:
 # ---------------------------------------------------------------------------
 # MCP Prompts — surface workflow starting points in Claude Code / Cursor
 # ---------------------------------------------------------------------------
+
 
 @mcp.prompt()
 def discover_critical_flows() -> str:
@@ -2469,35 +2675,82 @@ def quick_web_eval() -> str:
 # ===========================================================================
 # CANONICAL MVP SURFACE — Release Confidence Control Plane
 # ===========================================================================
-# These canonical release tools + the blop://release/* resources are the primary public API.
-# All other tools are available only when BLOP_ENABLE_COMPAT_TOOLS=true.
+# Primary API: release tools + blop:// resources + context/atomic tools (see docs/MCP_CORE_WORKFLOW.md).
 #
-# Workflow:
+# Backbone (context-first): load_context → select_journeys → plan → navigate & act → observe
+#   → record_evidence → summarize
+#
+# Typical release gate:
 #   validate_release_setup → discover_critical_journeys → record_test_flow → run_release_check(mode="replay") → triage_release_blocker
+#
+# Extra tools (evaluate_web_task, etc.) register above; discover_test_flows / run_regression_test /
+# validate_setup register only when BLOP_ENABLE_LEGACY_MCP_TOOLS=true.
+# Playwright-compat browser_* and blop_v2_* register only when BLOP_ENABLE_COMPAT_TOOLS=true.
 # ===========================================================================
 
-from blop.tools import journeys as journeys_tools
-from blop.tools import release_check as release_check_tools
-from blop.tools import triage as triage_tools
-from blop.tools import resources as resources_tools
-from blop.tools.prompts import (
-    RELEASE_READINESS_REVIEW,
-    INVESTIGATE_BLOCKER,
-    EXPLAIN_RELEASE_RISK,
-)
+from blop.mcp.envelope import ok_response as _ok_tool_response
+
+
+@mcp.tool()
+async def get_mcp_capabilities() -> dict:
+    """O(1) probe: package version, surface flags, registered tool count, and canonical tool names.
+
+    Use this or the ``blop://health`` resource before heavier discovery or replay work.
+    """
+    from importlib import metadata
+
+    from blop.config import BLOP_ENABLE_COMPAT_TOOLS, BLOP_ENABLE_LEGACY_MCP_TOOLS
+
+    try:
+        pkg_version = metadata.version("blop-mcp")
+    except metadata.PackageNotFoundError:
+        pkg_version = "unknown"
+    tm = mcp._tool_manager
+    reg = getattr(tm, "_tools", {}) or {}
+    data = {
+        "package_version": pkg_version,
+        "registered_tool_count": len(reg),
+        "legacy_mcp_tools_enabled": BLOP_ENABLE_LEGACY_MCP_TOOLS,
+        "compat_tools_enabled": BLOP_ENABLE_COMPAT_TOOLS,
+        "health_resource_uri": "blop://health",
+        "canonical_release_tools": [
+            "validate_release_setup",
+            "discover_critical_journeys",
+            "record_test_flow",
+            "run_release_check",
+            "triage_release_blocker",
+            "get_qa_recommendations",
+        ],
+        "context_tools": [
+            "get_workspace_context",
+            "get_release_context",
+            "get_release_and_journeys",
+            "get_journeys_for_release",
+        ],
+    }
+    return _ok_tool_response(data).model_dump()
 
 
 @mcp.tool()
 async def validate_release_setup(
     app_url: Optional[str] = None,
     profile_name: Optional[str] = None,
+    check_mobile: bool = False,
 ) -> dict:
     """Preflight check before a release: verifies API key, Chromium, DB, app reachability, and auth profile.
 
     This is the canonical MVP entry point — run this before discover_critical_journeys or run_release_check.
+
+    Args:
+        check_mobile: If True, also checks Appium server reachability for mobile testing.
     """
-    return await _safe_call(validate.validate_release_setup, tool_name="validate_release_setup",
-                            app_url=app_url, profile_name=profile_name)
+    return await _safe_call(
+        validate.validate_release_setup,
+        tool_name="validate_release_setup",
+        app_url=app_url,
+        profile_name=profile_name,
+        check_mobile=check_mobile,
+    )
 
 
 @mcp.tool()
@@ -2542,6 +2795,7 @@ async def run_release_check(
     release_id: Optional[str] = None,
     headless: bool = True,
     run_mode: str = "hybrid",
+    smoke_preflight: bool = False,
 ) -> dict:
     """Flagship release confidence tool: replay critical journeys and return a SHIP / INVESTIGATE / BLOCK decision.
 
@@ -2554,6 +2808,7 @@ async def run_release_check(
         criticality_filter: defaults to ["revenue", "activation"].
         release_id: optional caller-supplied release identifier (auto-generated if omitted).
         mode: "replay" (default, golden path for release gating) or "targeted" (one-shot eval).
+        smoke_preflight: Optional advisory smoke sweep before replay. Does not block the release on its own.
     """
     return await _safe_call(
         release_check_tools.run_release_check,
@@ -2567,6 +2822,7 @@ async def run_release_check(
         release_id=release_id,
         headless=headless,
         run_mode=run_mode,
+        smoke_preflight=smoke_preflight,
     )
 
 
@@ -2597,7 +2853,166 @@ async def triage_release_blocker(
     )
 
 
+@mcp.tool()
+async def get_qa_recommendations(
+    app_url: str,
+    release_id: Optional[str] = None,
+    scope: Literal["full", "blockers_only", "coverage_gaps"] = "full",
+    lookback_runs: int = 10,
+) -> dict:
+    """QA-engineering view: test pyramid health, coverage gaps, flakiness signals, and prioritized recommendations.
+
+    Aggregates recorded journeys and recent run cases for app_url, then returns a RecommendationSet plus
+    embedded qa_context (risk matrix, defect mix, pyramid stats). Use scope to narrow the recommendation lists.
+    """
+    return await _safe_call(
+        qa_advisor_tools.get_qa_recommendations,
+        tool_name="get_qa_recommendations",
+        app_url=app_url,
+        release_id=release_id,
+        scope=scope,
+        lookback_runs=lookback_runs,
+    )
+
+
+# ── Context-first tools (agent-ergonomic JSON; see docs/MCP_CORE_WORKFLOW.md) ─
+
+
+@mcp.tool()
+async def get_workspace_context() -> dict:
+    """Return compact workspace metadata, resource URIs, and discovery defaults."""
+    return await _safe_call(context_read_tools.get_workspace_context, tool_name="get_workspace_context")
+
+
+@mcp.tool()
+async def get_release_context(release_id: str) -> dict:
+    """Return structured release brief (decision, risk, blockers) for a release_id."""
+    return await _safe_call(
+        context_read_tools.get_release_context,
+        tool_name="get_release_context",
+        release_id=release_id,
+    )
+
+
+@mcp.tool()
+async def get_journeys_for_release(
+    release_id: Optional[str] = None,
+    app_url: Optional[str] = None,
+) -> dict:
+    """List recorded journeys filtered by release brief app_url or explicit app_url."""
+    return await _safe_call(
+        context_read_tools.get_journeys_for_release,
+        tool_name="get_journeys_for_release",
+        release_id=release_id,
+        app_url=app_url,
+    )
+
+
+@mcp.tool()
+async def get_release_and_journeys(release_id: str) -> dict:
+    """Batch: release context plus journeys for the release app URL in one call."""
+    return await _safe_call(
+        context_read_tools.get_release_and_journeys,
+        tool_name="get_release_and_journeys",
+        release_id=release_id,
+    )
+
+
+@mcp.tool()
+async def get_prd_and_acceptance_criteria(
+    journey_id: Optional[str] = None,
+    release_id: Optional[str] = None,
+) -> dict:
+    """Summaries and acceptance-style criteria from recorded flows / release brief (no external PRD yet)."""
+    return await _safe_call(
+        context_read_tools.get_prd_and_acceptance_criteria,
+        tool_name="get_prd_and_acceptance_criteria",
+        journey_id=journey_id,
+        release_id=release_id,
+    )
+
+
+@mcp.tool()
+async def get_ux_taxonomy() -> dict:
+    """Static UX/criticality hints for planning (cached, small JSON)."""
+    return await _safe_call(context_read_tools.get_ux_taxonomy, tool_name="get_ux_taxonomy")
+
+
+# ── Atomic browser tools (shared Playwright session) ──────────────────────────
+
+
+@mcp.tool()
+async def navigate_to_url(url: str, profile_name: Optional[str] = None) -> dict:
+    """Navigate the shared browser session to a URL (ok/data envelope)."""
+    return await _safe_call(
+        atomic_browser_tools.navigate_to_url,
+        tool_name="navigate_to_url",
+        url=url,
+        profile_name=profile_name,
+    )
+
+
+@mcp.tool()
+async def navigate_to_journey(journey_id: str, profile_name: Optional[str] = None) -> dict:
+    """Open a recorded journey's entry URL (flow_id == journey_id)."""
+    return await _safe_call(
+        atomic_browser_tools.navigate_to_journey,
+        tool_name="navigate_to_journey",
+        journey_id=journey_id,
+        profile_name=profile_name,
+    )
+
+
+@mcp.tool()
+async def get_page_snapshot(selector: Optional[str] = None, filename: Optional[str] = None) -> dict:
+    """Compact interactive DOM snapshot (ARIA-ish) for the current page."""
+    return await _safe_call(
+        atomic_browser_tools.get_page_snapshot,
+        tool_name="get_page_snapshot",
+        selector=selector,
+        filename=filename,
+    )
+
+
+@mcp.tool()
+async def perform_step(step_spec: dict) -> dict:
+    """One structured step: click | type | wait | press_key | navigate (see PerformStepSpec)."""
+    return await _safe_call(
+        atomic_browser_tools.perform_step,
+        tool_name="perform_step",
+        step_spec=step_spec,
+    )
+
+
+@mcp.tool()
+async def capture_artifact(kind: str, metadata: Optional[dict] = None) -> dict:
+    """Capture screenshot, dom_snapshot, or network_log; optional run_id routes under runs/."""
+    return await _safe_call(
+        atomic_browser_tools.capture_artifact,
+        tool_name="capture_artifact",
+        kind=kind,
+        metadata=metadata,
+    )
+
+
+@mcp.tool()
+async def record_run_observation(
+    run_id: str,
+    observation_key: str,
+    observation_payload: dict,
+) -> dict:
+    """Idempotent agent observation keyed by (run_id, observation_key)."""
+    return await _safe_call(
+        atomic_browser_tools.record_run_observation,
+        tool_name="record_run_observation",
+        run_id=run_id,
+        observation_key=observation_key,
+        observation_payload=observation_payload,
+    )
+
+
 # ── MVP RESOURCES ─────────────────────────────────────────────────────────────
+
 
 @mcp.resource("blop://journeys")
 async def journeys_resource() -> dict:
@@ -2625,25 +3040,27 @@ async def release_incidents_resource(release_id: str) -> dict:
 
 # ── MVP PROMPTS ───────────────────────────────────────────────────────────────
 
+
 @mcp.prompt()
 def release_readiness_review() -> str:
-    return RELEASE_READINESS_REVIEW
+    return prompts_tools.RELEASE_READINESS_REVIEW
 
 
 @mcp.prompt()
 def investigate_blocker() -> str:
-    return INVESTIGATE_BLOCKER
+    return prompts_tools.INVESTIGATE_BLOCKER
 
 
 @mcp.prompt()
 def explain_release_risk() -> str:
-    return EXPLAIN_RELEASE_RISK
+    return prompts_tools.EXPLAIN_RELEASE_RISK
 
 
 def run() -> int:
     """Entry point for the MCP server."""
     import asyncio
     import signal
+
     from blop.config import BLOP_DB_PATH, BLOP_DEBUG_LOG, check_llm_api_key, runtime_config_issues
     from blop.storage import files as file_store
 
@@ -2681,7 +3098,19 @@ def run() -> int:
             _log.error("startup_config_error error=%s", err)
         return 1
 
-    asyncio.run(init_db())
+    asyncio.run(sqlite.init_db())
+    try:
+        resume_summary = asyncio.run(regression.resume_incomplete_runs())
+        if resume_summary.get("resumed", 0):
+            _log.info(
+                "startup event=resumed_runs resumed=%s eligible=%s waiting_auth=%s skipped=%s",
+                resume_summary.get("resumed", 0),
+                resume_summary.get("eligible", 0),
+                resume_summary.get("waiting_auth", 0),
+                resume_summary.get("skipped", 0),
+            )
+    except Exception as e:
+        _log.warning("startup_resume_runs_failed error=%s", e)
 
     # Startup validation warning (non-blocking)
     has_key, key_name = check_llm_api_key()
