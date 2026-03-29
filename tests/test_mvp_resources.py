@@ -98,6 +98,7 @@ async def test_release_brief_resource_unknown_id_returns_error(tmp_db):
 
     result = await release_brief_resource("nonexistent-release-id")
     assert "error" in result
+    assert result.get("blop_error", {}).get("code") == "BLOP_RELEASE_NOT_FOUND"
 
 
 @pytest.mark.asyncio

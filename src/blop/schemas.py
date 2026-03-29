@@ -7,6 +7,59 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 
+class SemanticQuerySpec(BaseModel):
+    """Deterministic semantic extraction/query specification for assertions."""
+
+    query: str
+    expected: str | None = None
+    extractor: Literal["auto", "accessible_text", "interactive_presence", "url", "title"] = "auto"
+    match_mode: Literal["contains", "equals", "regex", "present"] = "contains"
+    target_role: str | None = None
+    target_name: str | None = None
+    target_selector: str | None = None
+    required: bool = True
+
+
+class ApiExpectation(BaseModel):
+    """Journey-scoped API contract inferred or authored for a recorded flow."""
+
+    name: str
+    url_contains: str
+    methods: list[str] = Field(default_factory=list)
+    min_status: int = 200
+    max_status: int = 399
+    required: bool = True
+    description: str = ""
+
+
+class SmokeFinding(BaseModel):
+    """Advisory finding from a bounded preflight smoke probe."""
+
+    kind: Literal[
+        "unreachable",
+        "auth_redirect",
+        "console_error",
+        "server_error",
+        "sparse_interactives",
+        "navigation_error",
+    ]
+    severity: Literal["high", "medium", "low"] = "medium"
+    message: str
+    url: str | None = None
+    flow_id: str | None = None
+    flow_name: str | None = None
+
+
+class SmokeSummary(BaseModel):
+    """Aggregated bounded smoke-preflight result."""
+
+    status: Literal["clean", "advisory_findings", "probe_error"] = "clean"
+    probe_count: int = 0
+    findings: list[SmokeFinding] = Field(default_factory=list)
+    findings_by_kind: dict[str, int] = Field(default_factory=dict)
+    probed_urls: list[str] = Field(default_factory=list)
+
+
 class StructuredAssertion(BaseModel):
     """Machine-evaluable assertion captured during recording."""
 
@@ -17,12 +70,14 @@ class StructuredAssertion(BaseModel):
         "page_title",  # document.title contains expected substring
         "count",  # element count equals expected (integer string)
         "semantic",  # requires LLM/vision evaluation
+        "semantic_query",  # structured semantic extraction/query
         "visual_match",  # pixel-based + LLM visual comparison against golden baseline
     ]
     target: str | None = None  # CSS selector, ARIA role name, or URL substring
     expected: str | None = None  # expected text/value/count
     description: str = ""  # original natural-language form (always kept)
     negated: bool = False  # if True, assert that condition does NOT hold
+    semantic_query: SemanticQuerySpec | None = None
 
     @model_validator(mode="after")
     def _validate_shape(self) -> "StructuredAssertion":
@@ -38,6 +93,8 @@ class StructuredAssertion(BaseModel):
                 int(self.expected)
             except ValueError as exc:
                 raise ValueError("count expected must be an integer string") from exc
+        if kind == "semantic_query" and self.semantic_query is None:
+            raise ValueError("semantic_query requires semantic_query payload")
         if kind in {"semantic", "visual_match"} and not (self.description or self.target or self.expected):
             raise ValueError(f"{kind} requires description, target, or expected")
         return self
@@ -248,6 +305,7 @@ class RecordedFlow(BaseModel):
     created_at: str
     assertions_json: list[str] = []
     structured_assertions: list[StructuredAssertion] = []
+    api_expectations: list[ApiExpectation] = Field(default_factory=list)
     entry_url: str | None = None
     business_criticality: Literal["revenue", "activation", "retention", "support", "other"] = "other"
     spa_hints: SpaHints = Field(default_factory=SpaHints)
@@ -613,6 +671,8 @@ class ReplayTrace:
     step_failure_index: int | None = None
     console_errors: list[str] = field(default_factory=list)
     network_errors: list[str] = field(default_factory=list)
+    network_observations: list[dict] = field(default_factory=list)
+    api_verification_results: list[dict] = field(default_factory=list)
     screenshots: list[str] = field(default_factory=list)
     raw_result: str = ""
     trace_path: str | None = None
@@ -664,6 +724,8 @@ class FailureCase(BaseModel):
     repro_steps: list[str] = []
     console_errors: list[str] = []
     network_errors: list[str] = []
+    api_verification_results: list[dict] = []
+    api_verification_failures: list[str] = []
     screenshots: list[str] = []
     raw_result: str = ""
     replay_mode: str = "goal_fallback"
@@ -795,6 +857,7 @@ class ReleaseCheckRequest(BaseModel):
     release_id: str | None = None
     headless: bool = True
     run_mode: Literal["hybrid", "strict_steps", "goal_fallback"] = "hybrid"
+    smoke_preflight: bool = False
 
     @model_validator(mode="after")
     def _validate_alias_inputs(self) -> "ReleaseCheckRequest":
@@ -831,6 +894,7 @@ class ReleaseCheckResult(BaseModel):
     business_impact: str
     prioritized_actions: list[ActionItem]
     resource_links: dict[str, str]  # "brief" → "blop://release/{id}/brief", etc.
+    smoke_summary: SmokeSummary | None = None
 
 
 class ReleaseBrief(BaseModel):
@@ -845,6 +909,7 @@ class ReleaseBrief(BaseModel):
     blocker_journey_names: list[str]
     critical_journey_failures: int
     top_actions: list[ActionItem]
+    smoke_summary: SmokeSummary | None = None
 
 
 class BlockerTriage(BaseModel):
@@ -930,3 +995,69 @@ class PolicyEvaluation(BaseModel):
     contributing_gates: list[str] = Field(default_factory=list)
     applied_global_flags: list[str] = Field(default_factory=list)
     rationale: str
+
+
+# ── QA intelligence (risk-based testing, pyramid health, recommendations) ───
+
+
+class PyramidHealthSummary(BaseModel):
+    happy_path_count: int
+    negative_path_count: int
+    edge_case_count: int
+    total_flows: int
+    is_bottom_heavy: bool
+    coverage_efficiency: float
+
+
+class CoverageGap(BaseModel):
+    flow_name: str
+    gap_type: str
+    severity: str
+    business_criticality: str | None = None
+    last_run_days_ago: int | None = None
+
+
+class RiskMatrixEntry(BaseModel):
+    flow_name: str
+    likelihood: float
+    impact: float
+    risk_score: float
+    business_criticality: str | None = None
+
+
+class FlakinessSignal(BaseModel):
+    flow_name: str
+    pass_rate: float
+    cv: float
+    run_count: int
+    is_flaky: bool
+
+
+class QAContext(BaseModel):
+    app_url: str
+    test_pyramid: PyramidHealthSummary
+    coverage_gaps: list[CoverageGap]
+    flakiness_signals: list[FlakinessSignal]
+    defect_distribution: dict[str, int]
+    risk_matrix: list[RiskMatrixEntry]
+    analyzed_flows: int
+    analyzed_runs: int
+
+
+class Recommendation(BaseModel):
+    category: str
+    title: str
+    rationale: str
+    evidence: list[str]
+    remediation_steps: list[str]
+    confidence: str
+
+
+class RecommendationSet(BaseModel):
+    app_url: str
+    summary: str
+    blockers: list[Recommendation]
+    high_risk_gaps: list[Recommendation]
+    maintenance_alerts: list[Recommendation]
+    optimizations: list[Recommendation]
+    generated_at: str

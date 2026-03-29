@@ -667,3 +667,72 @@ def test_heuristic_flows_from_inventory_uses_cta_buttons():
     assert "enter_ai_agent" in flow_names
     assert "create_blank_project" in flow_names
     assert "start_caption_workflow" in flow_names
+
+
+def test_storefront_fallback_flows_adds_revenue_and_activation_paths():
+    from blop.engine.discovery import _fallback_flows
+    from blop.schemas import SiteInventory
+
+    inventory = SiteInventory(
+        app_url="https://www.demoblaze.com",
+        routes=["/", "/cart.html", "/prod.html"],
+        buttons=[{"text": "Add to cart"}, {"text": "Place Order"}],
+        links=[
+            {"text": "Cart", "href": "https://www.demoblaze.com/cart.html"},
+            {"text": "Phones", "href": "https://www.demoblaze.com/index.html#phones"},
+        ],
+        forms=[],
+        headings=["PRODUCT STORE", "CATEGORIES"],
+        auth_signals=[],
+        business_signals=["checkout", "plans"],
+        page_structures={},
+        crawled_pages=4,
+    )
+
+    flows = _fallback_flows("https://www.demoblaze.com", inventory=inventory)
+    by_name = {flow["flow_name"]: flow for flow in flows}
+
+    assert by_name["checkout_purchase"]["business_criticality"] == "revenue"
+    assert by_name["browse_catalog_and_product_details"]["business_criticality"] == "activation"
+    assert "order confirmation" in " ".join(by_name["checkout_purchase"]["likely_assertions"]).lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("init_test_db")
+async def test_discover_flows_enriches_storefront_gating_when_llm_returns_generic_flows():
+    from blop.engine.discovery import discover_flows
+    from blop.schemas import SiteInventory
+
+    inventory = SiteInventory(
+        app_url="https://www.demoblaze.com",
+        routes=["/", "/cart.html", "/prod.html"],
+        buttons=[{"text": "Add to cart"}],
+        links=[{"text": "Cart", "href": "https://www.demoblaze.com/cart.html"}],
+        forms=[],
+        headings=["PRODUCT STORE", "CATEGORIES"],
+        auth_signals=[],
+        business_signals=["checkout"],
+        page_structures={},
+        crawled_pages=5,
+    )
+
+    gemini_response = json.dumps(
+        [
+            {"flow_name": "page_loads", "goal": "Verify the homepage loads", "business_criticality": "other"},
+            {"flow_name": "nav_links", "goal": "Verify navigation links work", "business_criticality": "other"},
+            {"flow_name": "forms_work", "goal": "Verify forms work", "business_criticality": "other"},
+        ]
+    )
+    mock_response = MagicMock()
+    mock_response.content = gemini_response
+    mock_llm = AsyncMock()
+    mock_llm.ainvoke.return_value = mock_response
+
+    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+        with patch("blop.engine.discovery.inventory_site", new_callable=AsyncMock, return_value=inventory):
+            with patch("browser_use.llm.ChatGoogle", return_value=mock_llm):
+                result = await discover_flows("https://www.demoblaze.com")
+
+    criticalities = {flow["business_criticality"] for flow in result["flows"]}
+    assert "revenue" in criticalities
+    assert "activation" in criticalities

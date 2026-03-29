@@ -182,6 +182,15 @@ BLOP_HEADLESS: bool = os.getenv("BLOP_HEADLESS", "true").lower() == "true"
 BLOP_MAX_STEPS: int = int(os.getenv("BLOP_MAX_STEPS", "50"))
 BLOP_DISCOVERY_CONCURRENCY: int = int(os.getenv("BLOP_DISCOVERY_CONCURRENCY", "0"))
 BLOP_REPLAY_CONCURRENCY: int = int(os.getenv("BLOP_REPLAY_CONCURRENCY", "0"))
+# Fire-and-forget regression / release-check runs
+BLOP_MAX_CONCURRENT_RUNS: int = max(1, int(os.getenv("BLOP_MAX_CONCURRENT_RUNS", "3")))
+# LLM circuit breaker + bounded retries (used by ainvoke_llm)
+BLOP_LLM_CIRCUIT_FAILURE_THRESHOLD: int = max(1, int(os.getenv("BLOP_LLM_CIRCUIT_FAILURE_THRESHOLD", "3")))
+BLOP_LLM_CIRCUIT_COOLDOWN_SEC: float = float(os.getenv("BLOP_LLM_CIRCUIT_COOLDOWN_SEC", "60"))
+BLOP_LLM_RETRY_MAX: int = max(0, min(8, int(os.getenv("BLOP_LLM_RETRY_MAX", "4"))))
+# blop-http default rate limits (0 = fall back to server defaults)
+BLOP_HTTP_RATE_LIMIT_PER_MIN: int = max(0, int(os.getenv("BLOP_HTTP_RATE_LIMIT_PER_MIN", "60")))
+BLOP_HTTP_LLM_ROUTE_RATE_LIMIT_PER_MIN: int = max(0, int(os.getenv("BLOP_HTTP_LLM_ROUTE_RATE_LIMIT_PER_MIN", "10")))
 BLOP_CAPTURE_PROFILE: str = os.getenv("BLOP_CAPTURE_PROFILE", "balanced").strip().lower()
 BLOP_DURABILITY_MODE: str = get_durability_mode()
 
@@ -225,6 +234,9 @@ BLOP_STEP_TIMEOUT_SECS: int = int(os.getenv("BLOP_STEP_TIMEOUT_SECS", "45"))
 BLOP_COMPAT_OUTPUT_DIR: str = os.getenv("BLOP_COMPAT_OUTPUT_DIR", ".playwright-mcp")
 BLOP_COMPAT_HEADLESS: bool = _env_bool("BLOP_COMPAT_HEADLESS", True)
 BLOP_COMPAT_TEST_ID_ATTRIBUTE: str = os.getenv("BLOP_COMPAT_TEST_ID_ATTRIBUTE", "data-testid")
+BLOP_TEST_ID_ATTRIBUTE: str = (
+    os.getenv("BLOP_TEST_ID_ATTRIBUTE") or BLOP_COMPAT_TEST_ID_ATTRIBUTE or "data-testid"
+).strip() or "data-testid"
 BLOP_COMPAT_SNAPSHOT_MODE: str = (
     os.getenv("BLOP_COMPAT_SNAPSHOT_MODE") or os.getenv("BLOP_SNAPSHOT_MODE") or "incremental"
 ).lower()

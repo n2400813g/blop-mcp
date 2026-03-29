@@ -17,13 +17,14 @@ from blop.config import (
     BLOP_AGENT_MAX_ACTIONS_PER_STEP,
     BLOP_AGENT_MAX_FAILURES,
     BLOP_RECORDING_ENTRY_SETTLE_MS,
+    BLOP_TEST_ID_ATTRIBUTE,
 )
 from blop.engine.browser_pool import BROWSER_POOL
 from blop.engine.dom_utils import extract_interactive_nodes_flat
 from blop.engine.evidence_policy import cap_artifact_paths, resolve_evidence_policy, should_capture_screenshot
 from blop.engine.logger import get_logger
 from blop.engine.page_state import PageStateCache
-from blop.schemas import FlowStep, StructuredAssertion
+from blop.schemas import ApiExpectation, FlowStep, SemanticQuerySpec, StructuredAssertion
 
 _log = get_logger("recording")
 _LOW_SIGNAL_TARGET_TEXT = {
@@ -37,6 +38,76 @@ _LOW_SIGNAL_TARGET_TEXT = {
     "upload",
     "wait",
 }
+
+
+def _semantic_query_assertion(
+    *,
+    description: str,
+    query: str,
+    expected: str | None = None,
+    extractor: str = "auto",
+    target_selector: str | None = None,
+    target_role: str | None = None,
+    target_name: str | None = None,
+) -> StructuredAssertion:
+    return StructuredAssertion(
+        assertion_type="semantic_query",
+        description=description,
+        expected=expected,
+        target=target_selector,
+        semantic_query=SemanticQuerySpec(
+            query=query,
+            expected=expected,
+            extractor=extractor,
+            target_selector=target_selector,
+            target_role=target_role,
+            target_name=target_name,
+            match_mode="contains" if expected else "present",
+        ),
+    )
+
+
+def infer_api_expectations(goal: str) -> list[ApiExpectation]:
+    """Infer narrow journey-scoped API expectations from obvious business verbs."""
+    lowered = (goal or "").lower()
+    expectations: list[ApiExpectation] = []
+
+    def _add(expectation: ApiExpectation) -> None:
+        if any(existing.name == expectation.name for existing in expectations):
+            return
+        expectations.append(expectation)
+
+    if any(token in lowered for token in ("checkout", "purchase", "billing", "upgrade", "subscription")):
+        _add(
+            ApiExpectation(
+                name="checkout_api",
+                url_contains="/api/checkout",
+                methods=["POST"],
+                required=True,
+                description="Checkout flow should hit the checkout API successfully.",
+            )
+        )
+    if any(token in lowered for token in ("sign in", "signin", "login", "log in", "authenticate")):
+        _add(
+            ApiExpectation(
+                name="auth_api",
+                url_contains="/api/",
+                methods=["POST"],
+                required=True,
+                description="Authentication flow should issue at least one successful API POST.",
+            )
+        )
+    if any(token in lowered for token in ("save", "publish", "update", "submit")):
+        _add(
+            ApiExpectation(
+                name="save_or_publish_api",
+                url_contains="/api/",
+                methods=["POST", "PUT", "PATCH"],
+                required=False,
+                description="Save/publish flows should emit a successful write request.",
+            )
+        )
+    return expectations
 
 
 def _extract_goal_urls(goal: str) -> list[str]:
@@ -146,12 +217,21 @@ def _looks_like_public_page_assertion_target(goal: str, current_url: str) -> boo
     return any(marker in lowered_url for marker in public_markers) or lowered_url.rstrip("/").count("/") <= 2
 
 
+def _escape_attr_value(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _selector_for_test_id(value: str, attr_name: str | None = None) -> str:
+    attr = (attr_name or BLOP_TEST_ID_ATTRIBUTE or "data-testid").strip() or "data-testid"
+    safe_attr = attr.replace("\\", "\\\\").replace("'", "\\'")
+    return f"[{safe_attr}='{_escape_attr_value(value)}']"
+
+
 def _selector_from_interacted_attrs(interacted_hint: dict[str, Optional[str]], action: str) -> Optional[str]:
     attrs = interacted_hint or {}
     testid = attrs.get("testid")
     if testid:
-        safe = str(testid).replace("'", "\\'")
-        return f"[data-testid='{safe}']"
+        return _selector_for_test_id(str(testid), attrs.get("testid_attr"))
 
     element_id = attrs.get("id")
     if element_id and re.match(r"^[A-Za-z][A-Za-z0-9_:\\-]*$", element_id):
@@ -209,7 +289,21 @@ def _extract_interacted_attrs_from_description(description: str) -> dict[str, Op
 
     return {
         "id": attrs.get("id"),
-        "testid": attrs.get("data-testid") or attrs.get("data-cy") or attrs.get("data-test"),
+        "testid": attrs.get(BLOP_TEST_ID_ATTRIBUTE)
+        or attrs.get("data-testid")
+        or attrs.get("data-cy")
+        or attrs.get("data-test"),
+        "testid_attr": (
+            BLOP_TEST_ID_ATTRIBUTE
+            if attrs.get(BLOP_TEST_ID_ATTRIBUTE)
+            else "data-testid"
+            if attrs.get("data-testid")
+            else "data-cy"
+            if attrs.get("data-cy")
+            else "data-test"
+            if attrs.get("data-test")
+            else None
+        ),
         "placeholder": attrs.get("placeholder"),
         "name_attr": attrs.get("name"),
         "href": attrs.get("href"),
@@ -432,11 +526,12 @@ async def record_flow(
         try:
             history = await agent.run(max_steps=50)
         finally:
-            screenshot_task.cancel()
-            try:
-                await screenshot_task
-            except asyncio.CancelledError:
-                pass
+            if screenshot_task is not None:
+                screenshot_task.cancel()
+                try:
+                    await screenshot_task
+                except asyncio.CancelledError:
+                    pass
 
         # Get the active page reference for ARIA/testid extraction
         page_ref = None
@@ -822,12 +917,20 @@ Example:
                     elif isinstance(item, dict):
                         desc = item.get("description") or item.get("expected") or str(item)
                         try:
-                            sa = StructuredAssertion(
-                                assertion_type=item.get("type", "semantic"),
-                                target=item.get("target"),
-                                expected=item.get("expected"),
-                                description=desc,
-                            )
+                            if item.get("type") == "semantic":
+                                sa = _semantic_query_assertion(
+                                    description=desc,
+                                    query=desc,
+                                    expected=item.get("expected"),
+                                    target_selector=item.get("target"),
+                                )
+                            else:
+                                sa = StructuredAssertion(
+                                    assertion_type=item.get("type", "semantic"),
+                                    target=item.get("target"),
+                                    expected=item.get("expected"),
+                                    description=desc,
+                                )
                         except Exception:
                             sa = None
                         results.append((desc, sa))
@@ -899,7 +1002,7 @@ async def _capture_locator_attrs(
     dom_name: Optional[str] = None
     try:
         result = await page.evaluate(
-            """({ locator, locatorKind }) => {
+            """({ locator, locatorKind, testIdAttribute }) => {
                 try {
                     let el = null;
                     if (locatorKind === 'xpath') {
@@ -911,9 +1014,22 @@ async def _capture_locator_attrs(
                         el = document.querySelector(locator);
                     }
                     if (!el) return null;
-                    const testid = el.getAttribute('data-testid') ||
-                                   el.getAttribute('data-cy') ||
-                                   el.getAttribute('data-test');
+                    const candidates = Array.from(new Set([
+                        testIdAttribute,
+                        'data-testid',
+                        'data-cy',
+                        'data-test',
+                    ].filter(Boolean)));
+                    let testid = null;
+                    let testidAttr = null;
+                    for (const attr of candidates) {
+                        const value = el.getAttribute(attr);
+                        if (value) {
+                            testid = value;
+                            testidAttr = attr;
+                            break;
+                        }
+                    }
                     let label = null;
                     if (el.getAttribute('aria-label')) {
                         label = el.getAttribute('aria-label');
@@ -941,15 +1057,14 @@ async def _capture_locator_attrs(
                         el.getAttribute('placeholder') ||
                         el.value || ''
                     ).trim() || null;
-                    return {testid: testid, label: label, role: role, name: domName};
+                    return {testid: testid, testidAttr: testidAttr, label: label, role: role, name: domName};
                 } catch(e) { return null; }
             }""",
-            {"locator": locator, "locatorKind": locator_kind},
+            {"locator": locator, "locatorKind": locator_kind, "testIdAttribute": BLOP_TEST_ID_ATTRIBUTE},
         )
         if result:
             if result.get("testid"):
-                testid_val = str(result["testid"]).replace("'", "\\'")
-                testid_selector = f"[data-testid='{testid_val}']"
+                testid_selector = _selector_for_test_id(str(result["testid"]), result.get("testidAttr"))
             if action == "fill" and result.get("label"):
                 label_text = str(result["label"])[:100]
             dom_role = result.get("role") or None

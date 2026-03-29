@@ -123,6 +123,7 @@ def test_safe_call_wraps_exceptions():
     assert "error" in result
     assert result.get("error_type") == "ValueError"
     assert result.get("tool") == "test_tool"
+    assert result.get("blop_error", {}).get("code") == "BLOP_MCP_INTERNAL_TOOL_ERROR"
 
 
 def test_legacy_docstrings_point_to_canonical_alternatives():

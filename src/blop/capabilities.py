@@ -72,6 +72,7 @@ TOOL_GROUPS: dict[str, set[str]] = {
         "get_risk_analytics",
         "get_run_health_stream",
         "list_runs",
+        "get_qa_recommendations",
     },
     "v2": {
         "blop_v2_get_surface_contract",

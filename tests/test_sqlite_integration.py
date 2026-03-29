@@ -17,12 +17,15 @@ _TMP_DIR = tempfile.mkdtemp()
 os.environ["BLOP_DB_PATH"] = os.path.join(_TMP_DIR, "test_runs.db")
 
 from blop.schemas import (
+    ApiExpectation,
     AuthProfile,
     FailureCase,
     FlowStep,
     IncidentCluster,
     RecordedFlow,
+    SemanticQuerySpec,
     SiteContextGraph,
+    StructuredAssertion,
     TelemetrySignal,
 )
 from blop.storage import sqlite
@@ -87,17 +90,36 @@ async def test_save_and_get_flow():
             FlowStep(step_id=0, action="navigate", selector=None, value="https://example.com/login"),
             FlowStep(step_id=1, action="fill", selector="#email", value="user@test.com"),
             FlowStep(step_id=2, action="click", selector="#submit", value=None),
+            FlowStep(
+                step_id=3,
+                action="assert",
+                description="Dashboard is visible",
+                value="Dashboard is visible",
+                structured_assertion=StructuredAssertion(
+                    assertion_type="semantic_query",
+                    description="Dashboard is visible",
+                    semantic_query=SemanticQuerySpec(
+                        query="Dashboard is visible",
+                        expected="Dashboard",
+                        target_selector="main",
+                    ),
+                ),
+            ),
         ],
         created_at=datetime.now(timezone.utc).isoformat(),
         business_criticality="activation",
+        api_expectations=[ApiExpectation(name="auth_api", url_contains="/api/", methods=["POST"])],
     )
     await sqlite.save_flow(flow)
 
     loaded = await sqlite.get_flow(flow.flow_id)
     assert loaded is not None
     assert loaded.flow_name == "login-flow"
-    assert len(loaded.steps) == 3
+    assert len(loaded.steps) == 4
     assert loaded.business_criticality == "activation"
+    assert loaded.steps[-1].structured_assertion is not None
+    assert loaded.steps[-1].structured_assertion.assertion_type == "semantic_query"
+    assert loaded.api_expectations[0].name == "auth_api"
 
 
 @pytest.mark.asyncio

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
 from blop.config import BLOP_DB_PATH
+from blop.engine.errors import BLOP_STORAGE_DB_OPEN_FAILED, BLOP_STORAGE_MIGRATION_FAILED, BlopError
 from blop.engine.logger import get_logger
 from blop.schemas import (
     AuthProfile,
@@ -24,7 +27,13 @@ from blop.schemas import (
 
 _log = get_logger("sqlite")
 
+_TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
 _RUN_HEALTH_BUFFER_LIMIT = max(1, int(os.getenv("BLOP_RUN_HEALTH_BUFFER_LIMIT", "16")))
+_RUN_HEALTH_HARD_MAX = max(
+    _RUN_HEALTH_BUFFER_LIMIT,
+    max(1, int(os.getenv("BLOP_EVENT_BUFFER_MAX", "64"))),
+)
 _ARTIFACT_BUFFER_LIMIT = max(1, int(os.getenv("BLOP_ARTIFACT_BUFFER_LIMIT", "24")))
 _RUN_HEALTH_FLUSH_EVENTS = {
     "case_completed",
@@ -49,10 +58,89 @@ def _db_path() -> str:
     return os.environ.get("BLOP_DB_PATH", BLOP_DB_PATH)
 
 
+def _parse_run_duration_seconds(started_at: str | None, completed_at: str | None) -> float | None:
+    if not started_at or not completed_at:
+        return None
+    try:
+        s = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        e = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        if s.tzinfo is None:
+            s = s.replace(tzinfo=timezone.utc)
+        if e.tzinfo is None:
+            e = e.replace(tzinfo=timezone.utc)
+        return max(0.0, (e - s).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
+_shared_conn: aiosqlite.Connection | None = None
+_conn_path: str | None = None
+_conn_create_lock = asyncio.Lock()
+_db_rw_lock = asyncio.Lock()
+_db_connect_depth: contextvars.ContextVar[int] = contextvars.ContextVar("blop_sqlite_connect_depth", default=0)
+
+
+async def _close_shared_unlocked() -> None:
+    global _shared_conn, _conn_path
+    if _shared_conn is not None:
+        await _shared_conn.close()
+    _shared_conn = None
+    _conn_path = None
+
+
+async def reset_db_connection() -> None:
+    """Close the shared SQLite connection (tests or ``BLOP_DB_PATH`` change)."""
+    async with _conn_create_lock:
+        await _close_shared_unlocked()
+
+
+async def _ensure_shared_connection() -> aiosqlite.Connection:
+    global _shared_conn, _conn_path
+    path = os.path.abspath(_db_path())
+    if _shared_conn is not None and _conn_path == path:
+        return _shared_conn
+    async with _conn_create_lock:
+        if _shared_conn is not None and _conn_path != path:
+            await _close_shared_unlocked()
+        if _shared_conn is None:
+            os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
+            try:
+                _shared_conn = await aiosqlite.connect(path)
+            except Exception as e:
+                raise BlopError(
+                    BLOP_STORAGE_DB_OPEN_FAILED,
+                    f"Could not open SQLite database: {e}",
+                    retryable=True,
+                    details={"path": path, "error_type": type(e).__name__},
+                ) from e
+            await _shared_conn.execute("PRAGMA journal_mode=WAL")
+            await _shared_conn.execute("PRAGMA synchronous=NORMAL")
+            await _shared_conn.execute("PRAGMA foreign_keys=ON")
+            await _shared_conn.commit()
+            _conn_path = path
+        return _shared_conn
+
+
+@asynccontextmanager
+async def _db_connect():
+    """Serialize access to the shared connection; re-enter without re-acquiring the lock."""
+    conn = await _ensure_shared_connection()
+    depth = _db_connect_depth.get()
+    if depth > 0:
+        yield conn
+        return
+    token = _db_connect_depth.set(depth + 1)
+    try:
+        async with _db_rw_lock:
+            yield conn
+    finally:
+        _db_connect_depth.reset(token)
+
+
 async def init_db() -> None:
     path = _db_path()
     os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
-    async with aiosqlite.connect(path) as db:
+    async with _db_connect() as db:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=NORMAL")
         await db.execute("""
@@ -334,13 +422,23 @@ async def _migrate(db) -> None:
                 # Column already exists (e.g. re-run after partial failure): still advance
                 await _set_schema_version(db, version)
             else:
-                raise RuntimeError(f"Migration {version} failed — {table}.{column}: {exc}") from exc
+                raise BlopError(
+                    BLOP_STORAGE_MIGRATION_FAILED,
+                    f"Schema migration {version} failed for {table}.{column}: {exc}",
+                    retryable=False,
+                    details={
+                        "version": version,
+                        "table": table,
+                        "column": column,
+                        "cause": type(exc).__name__,
+                    },
+                ) from exc
 
     await db.commit()
 
 
 async def save_auth_profile(profile: AuthProfile, storage_state_path: str | None = None) -> None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         await db.execute(
             """
             INSERT OR REPLACE INTO auth_profiles
@@ -358,7 +456,7 @@ async def save_auth_profile(profile: AuthProfile, storage_state_path: str | None
 
 
 async def list_auth_profiles() -> list[dict]:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             "SELECT profile_name, auth_type, storage_state_path, created_at, refreshed_at FROM auth_profiles ORDER BY created_at DESC"
         ) as cursor:
@@ -376,7 +474,7 @@ async def list_auth_profiles() -> list[dict]:
 
 
 async def get_auth_profile(profile_name: str) -> AuthProfile | None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             "SELECT config_json FROM auth_profiles WHERE profile_name = ?",
             (profile_name,),
@@ -388,10 +486,11 @@ async def get_auth_profile(profile_name: str) -> AuthProfile | None:
 
 
 async def save_flow(flow: RecordedFlow) -> None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         mobile_target_json = None
         if getattr(flow, "mobile_target", None):
             mobile_target_json = flow.mobile_target.model_dump_json()
+        steps_payload = [s.model_dump() for s in flow.steps]
         await db.execute(
             """
             INSERT OR REPLACE INTO recorded_flows
@@ -405,9 +504,14 @@ async def save_flow(flow: RecordedFlow) -> None:
                 flow.flow_name,
                 flow.app_url,
                 flow.goal,
-                json.dumps([s.model_dump() for s in flow.steps]),
+                json.dumps(steps_payload),
                 flow.created_at,
-                json.dumps(flow.assertions_json),
+                json.dumps(
+                    {
+                        "assertions": flow.assertions_json,
+                        "api_expectations": [expectation.model_dump() for expectation in flow.api_expectations],
+                    }
+                ),
                 flow.entry_url,
                 flow.spa_hints.model_dump_json() if getattr(flow, "spa_hints", None) else None,
                 flow.business_criticality,
@@ -451,6 +555,8 @@ def _ensure_flow_step_shape(step_payload: dict) -> dict:
     step_payload.setdefault("testid_selector", None)
     step_payload.setdefault("label_text", None)
     step_payload.setdefault("structured_assertion", None)
+    if isinstance(step_payload.get("structured_assertion"), dict):
+        step_payload["structured_assertion"].setdefault("semantic_query", None)
     step_payload.setdefault("mobile_selector", None)
     step_payload.setdefault("swipe_direction", None)
     step_payload.setdefault("swipe_distance_pct", None)
@@ -467,9 +573,15 @@ def _deserialize_flow_row(row) -> RecordedFlow:
     steps = [FlowStep(**_ensure_flow_step_shape(dict(step_payload))) for step_payload in steps_data]
 
     assertions_json: list[str] = []
+    api_expectations: list = []
     if row[6]:
         try:
-            assertions_json = json.loads(row[6])
+            parsed_assertions = json.loads(row[6])
+            if isinstance(parsed_assertions, dict):
+                assertions_json = list(parsed_assertions.get("assertions", []) or [])
+                api_expectations = list(parsed_assertions.get("api_expectations", []) or [])
+            elif isinstance(parsed_assertions, list):
+                assertions_json = parsed_assertions
         except Exception:
             _log.debug("failed to parse assertions_json for flow", exc_info=True)
 
@@ -506,6 +618,7 @@ def _deserialize_flow_row(row) -> RecordedFlow:
         steps=steps,
         created_at=row[5],
         assertions_json=assertions_json,
+        api_expectations=api_expectations,
         entry_url=row[7],
         spa_hints=spa_hints,
         business_criticality=row[9] or "other",
@@ -532,7 +645,7 @@ def _flow_summary_from_row(row) -> dict:
 
 
 async def get_flow(flow_id: str) -> RecordedFlow | None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         row = None
         try:
             async with db.execute(
@@ -560,7 +673,7 @@ async def get_flow(flow_id: str) -> RecordedFlow | None:
 
 
 async def list_flows() -> list[dict]:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         rows = []
         try:
             async with db.execute(f"{_FLOW_SUMMARY_SELECT} ORDER BY created_at DESC") as cursor:
@@ -590,7 +703,7 @@ async def list_flows_full(
             params.extend(deduped)
     where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
 
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         rows = []
         try:
             async with db.execute(
@@ -621,7 +734,7 @@ async def get_flows(flow_ids: list[str]) -> list[RecordedFlow]:
         return []
     placeholders = ",".join("?" for _ in ordered_ids)
     flow_map: dict[str, RecordedFlow] = {}
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         rows = []
         try:
             async with db.execute(
@@ -649,7 +762,7 @@ async def get_flows(flow_ids: list[str]) -> list[RecordedFlow]:
 
 async def find_flow_by_url_and_name(app_url: str, flow_name: str) -> dict | None:
     """Return the first recorded flow matching *app_url* and *flow_name*, or None."""
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         try:
             async with db.execute(
                 "SELECT flow_id, flow_name, app_url, goal, created_at, run_mode_override, intent_contract_json "
@@ -688,7 +801,7 @@ async def create_run(
     artifacts_dir: str,
     run_mode: str = "hybrid",
 ) -> None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         await db.execute(
             """
             INSERT INTO runs (run_id, app_url, profile_name, flow_ids_json, status, started_at, headless, artifacts_dir, run_mode)
@@ -705,6 +818,9 @@ async def create_run(
             ),
         )
         await db.commit()
+    from blop.engine import metrics as blop_metrics
+
+    blop_metrics.inc_active_run()
 
 
 async def create_run_with_initial_events(
@@ -719,7 +835,7 @@ async def create_run_with_initial_events(
     run_queued_payload: dict,
     auth_context_payload: dict,
 ) -> None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         await db.execute(
             """
             INSERT INTO runs (run_id, app_url, profile_name, flow_ids_json, status, started_at, headless, artifacts_dir, run_mode)
@@ -761,16 +877,38 @@ async def create_run_with_initial_events(
             ),
         )
         await db.commit()
+    from blop.engine import metrics as blop_metrics
+
+    blop_metrics.inc_active_run()
 
 
 async def update_run_status(run_id: str, status: str) -> None:
     """Update only the status of a run (lightweight state-machine transition)."""
-    async with aiosqlite.connect(_db_path()) as db:
+    duration_sec: float | None = None
+    already_terminal = False
+    async with _db_connect() as db:
+        async with db.execute(
+            "SELECT status, started_at, completed_at FROM runs WHERE run_id = ?",
+            (run_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        prev = row[0] if row else None
+        already_terminal = bool(prev and prev in _TERMINAL_RUN_STATUSES)
+        if status in _TERMINAL_RUN_STATUSES and not already_terminal and row:
+            duration_sec = _parse_run_duration_seconds(row[1], row[2])
         await db.execute(
             "UPDATE runs SET status = ? WHERE run_id = ?",
             (status, run_id),
         )
         await db.commit()
+    if status in _TERMINAL_RUN_STATUSES:
+        from blop.engine import metrics as blop_metrics
+
+        blop_metrics.record_run_terminal(
+            status=status,
+            duration_seconds=duration_sec,
+            already_terminal=already_terminal,
+        )
 
 
 async def update_run(
@@ -780,7 +918,16 @@ async def update_run(
     completed_at: str | None = None,
     next_actions: list[str] | None = None,
 ) -> None:
-    async with aiosqlite.connect(_db_path()) as db:
+    duration_sec: float | None = None
+    already_terminal = False
+    async with _db_connect() as db:
+        async with db.execute("SELECT status, started_at FROM runs WHERE run_id = ?", (run_id,)) as cur:
+            row = await cur.fetchone()
+        prev = row[0] if row else None
+        already_terminal = bool(prev and prev in _TERMINAL_RUN_STATUSES)
+        started = row[1] if row else None
+        if status in _TERMINAL_RUN_STATUSES and not already_terminal and started and completed_at:
+            duration_sec = _parse_run_duration_seconds(started, completed_at)
         await db.execute(
             """
             UPDATE runs SET status = ?, cases_json = ?, completed_at = ?, next_actions_json = ?
@@ -795,10 +942,18 @@ async def update_run(
             ),
         )
         await db.commit()
+    if status in _TERMINAL_RUN_STATUSES:
+        from blop.engine import metrics as blop_metrics
+
+        blop_metrics.record_run_terminal(
+            status=status,
+            duration_seconds=duration_sec,
+            already_terminal=already_terminal,
+        )
 
 
 async def get_run(run_id: str) -> dict | None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """SELECT run_id, app_url, profile_name, flow_ids_json, status,
                       started_at, completed_at, headless, artifacts_dir, cases_json, run_mode,
@@ -838,7 +993,7 @@ async def list_runs(limit: int = 20, status: str | None = None) -> list[dict]:
     if status is not None and status not in _VALID_STATUSES:
         return []
     safe_limit = max(1, min(limit, 200))
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         if status:
             query = """SELECT run_id, app_url, profile_name, status, started_at, completed_at,
                               headless, artifacts_dir, run_mode
@@ -896,7 +1051,7 @@ async def save_case(case: FailureCase) -> None:
 async def save_cases(cases: list[FailureCase]) -> None:
     if not cases:
         return
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         await db.executemany(
             """
             INSERT OR REPLACE INTO run_cases
@@ -911,7 +1066,7 @@ async def save_cases(cases: list[FailureCase]) -> None:
 
 
 async def list_cases_for_run(run_id: str) -> list[FailureCase]:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             "SELECT result_json FROM run_cases WHERE run_id = ?",
             (run_id,),
@@ -934,7 +1089,7 @@ async def list_cases_for_runs(run_ids: list[str]) -> dict[str, list[FailureCase]
         return {}
     placeholders = ",".join("?" for _ in ordered_run_ids)
     grouped: dict[str, list[FailureCase]] = {run_id: [] for run_id in ordered_run_ids}
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             f"SELECT run_id, result_json FROM run_cases WHERE run_id IN ({placeholders}) ORDER BY rowid ASC",
             ordered_run_ids,
@@ -949,7 +1104,7 @@ async def list_cases_for_runs(run_ids: list[str]) -> dict[str, list[FailureCase]
 
 
 async def get_case(case_id: str) -> FailureCase | None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             "SELECT result_json FROM run_cases WHERE case_id = ?",
             (case_id,),
@@ -966,7 +1121,7 @@ async def get_case(case_id: str) -> FailureCase | None:
 async def _write_artifacts(records: list[dict]) -> None:
     if not records:
         return
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         await db.executemany(
             """
             INSERT INTO artifacts (artifact_id, run_id, case_id, artifact_type, path)
@@ -1026,7 +1181,7 @@ async def save_artifact(run_id: str, case_id: str | None, artifact_type: str, pa
 
 
 async def save_site_inventory(app_url: str, inventory_dict: dict) -> None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         await db.execute(
             """
             INSERT INTO site_inventories (id, app_url, inventory_json)
@@ -1038,7 +1193,7 @@ async def save_site_inventory(app_url: str, inventory_dict: dict) -> None:
 
 
 async def get_latest_site_inventory(app_url: str) -> dict | None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT id, app_url, crawled_at, inventory_json
@@ -1066,7 +1221,7 @@ async def get_latest_site_inventory(app_url: str) -> dict | None:
 
 async def list_artifacts_for_run(run_id: str) -> list[dict]:
     await flush_buffered_writes(run_id=run_id)
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT artifact_id, run_id, case_id, artifact_type, path, created_at
@@ -1098,7 +1253,7 @@ async def update_flow_step_selector(flow_id: str, step_id: int, updates: dict) -
     Returns True if the flow was found and updated.
     """
 
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         try:
             await db.execute("BEGIN IMMEDIATE")
             async with db.execute(
@@ -1137,7 +1292,7 @@ async def update_flow_step_selector(flow_id: str, step_id: int, updates: dict) -
 
 async def list_cases_for_flow(flow_id: str, limit: int = 50) -> list[FailureCase]:
     safe_limit = max(1, min(limit, 500))
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT result_json
@@ -1159,7 +1314,7 @@ async def list_cases_for_flow(flow_id: str, limit: int = 50) -> list[FailureCase
 
 
 async def save_context_graph(graph: SiteContextGraph) -> None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         await db.execute(
             """
             INSERT OR REPLACE INTO context_graphs
@@ -1179,7 +1334,7 @@ async def save_context_graph(graph: SiteContextGraph) -> None:
 
 
 async def get_latest_context_graph(app_url: str, profile_name: str | None = None) -> SiteContextGraph | None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         if profile_name:
             query = """
                 SELECT graph_json
@@ -1210,7 +1365,7 @@ async def get_latest_context_graph(app_url: str, profile_name: str | None = None
 
 
 async def get_context_graph(graph_id: str) -> SiteContextGraph | None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             "SELECT graph_json FROM context_graphs WHERE graph_id = ?",
             (graph_id,),
@@ -1226,7 +1381,7 @@ async def get_context_graph(graph_id: str) -> SiteContextGraph | None:
 
 async def list_context_graphs(app_url: str, limit: int = 5) -> list[dict]:
     safe_limit = max(1, min(limit, 100))
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT graph_id, app_url, profile_name, archetype, created_at
@@ -1252,7 +1407,7 @@ async def list_context_graphs(app_url: str, limit: int = 5) -> list[dict]:
 
 async def upsert_run_observation(run_id: str, observation_key: str, payload: dict) -> None:
     """Idempotent agent observation: same (run_id, observation_key) overwrites payload."""
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         await db.execute(
             """
             INSERT INTO run_observations (run_id, observation_key, payload_json, updated_at)
@@ -1267,7 +1422,7 @@ async def upsert_run_observation(run_id: str, observation_key: str, payload: dic
 
 
 async def get_run_observation(run_id: str, observation_key: str) -> dict | None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT payload_json, updated_at
@@ -1287,7 +1442,7 @@ async def get_run_observation(run_id: str, observation_key: str) -> dict | None:
 async def _write_run_health_events(events: list[dict]) -> None:
     if not events:
         return
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         await db.executemany(
             """
             INSERT INTO run_health_events (event_id, run_id, event_type, payload_json)
@@ -1346,7 +1501,11 @@ async def save_run_health_event(run_id: str, event_type: str, payload: dict) -> 
                 "payload": payload,
             }
         )
-        should_flush = len(buffer) >= _RUN_HEALTH_BUFFER_LIMIT or event_type in _RUN_HEALTH_FLUSH_EVENTS
+        should_flush = (
+            len(buffer) >= _RUN_HEALTH_BUFFER_LIMIT
+            or len(buffer) >= _RUN_HEALTH_HARD_MAX
+            or event_type in _RUN_HEALTH_FLUSH_EVENTS
+        )
     if should_flush:
         await flush_buffered_writes(run_id=run_id)
 
@@ -1376,7 +1535,7 @@ async def save_run_health_events(events: list[dict]) -> None:
 async def list_run_health_events(run_id: str, limit: int = 500) -> list[dict]:
     safe_limit = max(1, min(limit, 2000))
     await flush_buffered_writes(run_id=run_id)
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT event_id, run_id, event_type, payload_json, created_at
@@ -1408,7 +1567,7 @@ async def list_run_health_events(run_id: str, limit: int = 500) -> list[dict]:
 
 async def save_release_snapshot(snapshot: ReleaseSnapshot) -> None:
     """Persist graph/context snapshot; preserves brief_json, run_id, and project_id if row exists."""
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT brief_json, run_id, project_id FROM release_snapshots WHERE release_id = ?
@@ -1439,7 +1598,7 @@ async def save_release_snapshot(snapshot: ReleaseSnapshot) -> None:
 
 
 async def get_release_snapshot(release_id: str) -> ReleaseSnapshot | None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             "SELECT snapshot_json FROM release_snapshots WHERE release_id = ?",
             (release_id,),
@@ -1455,7 +1614,7 @@ async def get_release_snapshot(release_id: str) -> ReleaseSnapshot | None:
 
 async def list_release_snapshots(app_url: str, limit: int = 20) -> list[dict]:
     safe_limit = max(1, min(limit, 200))
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT release_id, app_url, created_at
@@ -1478,7 +1637,7 @@ async def list_release_snapshots(app_url: str, limit: int = 20) -> list[dict]:
 
 
 async def save_incident_cluster(cluster: IncidentCluster) -> None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         await db.execute(
             """
             INSERT OR REPLACE INTO incident_clusters
@@ -1498,7 +1657,7 @@ async def save_incident_cluster(cluster: IncidentCluster) -> None:
 
 
 async def get_incident_cluster(cluster_id: str) -> IncidentCluster | None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             "SELECT cluster_json FROM incident_clusters WHERE cluster_id = ?",
             (cluster_id,),
@@ -1514,7 +1673,7 @@ async def get_incident_cluster(cluster_id: str) -> IncidentCluster | None:
 
 async def list_open_incident_clusters(app_url: str, limit: int = 100) -> list[IncidentCluster]:
     safe_limit = max(1, min(limit, 500))
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT cluster_json
@@ -1536,7 +1695,7 @@ async def list_open_incident_clusters(app_url: str, limit: int = 100) -> list[In
 
 
 async def save_remediation_draft(draft: RemediationDraft) -> None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         await db.execute(
             """
             INSERT OR REPLACE INTO remediation_drafts
@@ -1553,7 +1712,7 @@ async def save_remediation_draft(draft: RemediationDraft) -> None:
 
 
 async def get_remediation_draft(cluster_id: str) -> RemediationDraft | None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             "SELECT draft_json FROM remediation_drafts WHERE cluster_id = ?",
             (cluster_id,),
@@ -1570,7 +1729,7 @@ async def get_remediation_draft(cluster_id: str) -> RemediationDraft | None:
 async def save_telemetry_signals(signals: list[TelemetrySignal]) -> tuple[int, int]:
     ingested = 0
     rejected = 0
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         for signal in signals:
             try:
                 await db.execute(
@@ -1601,7 +1760,7 @@ async def save_telemetry_signals(signals: list[TelemetrySignal]) -> tuple[int, i
 
 async def list_telemetry_signals(app_url: str, limit: int = 1000) -> list[dict]:
     safe_limit = max(1, min(limit, 5000))
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT signal_id, app_url, source, ts, signal_type, journey_key, route, value, unit, tags_json
@@ -1638,7 +1797,7 @@ async def list_telemetry_signals(app_url: str, limit: int = 1000) -> list[dict]:
 
 async def save_correlation_report(app_url: str, window: str, report: dict) -> str:
     report_id = str(uuid.uuid4())
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         await db.execute(
             """
             INSERT INTO correlation_reports (report_id, app_url, window, report_json)
@@ -1658,7 +1817,7 @@ async def save_risk_calibration_record(
     critical_journey_failures: int,
     flow_ids: list[str],
 ) -> None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         await db.execute(
             """
             INSERT OR REPLACE INTO risk_calibration
@@ -1681,7 +1840,7 @@ async def save_risk_calibration_record(
 async def list_risk_calibration(app_url: str, limit: int = 100) -> list[dict]:
     """Return recent risk calibration records for an app, newest first."""
     safe_limit = max(1, min(limit, 500))
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT record_id, run_id, app_url, predicted_decision,
@@ -1725,7 +1884,7 @@ async def _set_schema_version(db, version: int) -> None:
 async def list_cases_for_flow_since(flow_id: str, since_iso: str, limit: int = 500) -> list[FailureCase]:
     """Return cases for a flow where the parent run started at or after since_iso."""
     safe_limit = max(1, min(limit, 500))
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT rc.result_json FROM run_cases rc
@@ -1753,7 +1912,7 @@ async def save_release_brief(
     brief: dict,
 ) -> None:
     """Persist a ReleaseBrief as brief_json; keeps existing snapshot_json and project_id when set."""
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT snapshot_json, brief_json, run_id, project_id, created_at
@@ -1801,7 +1960,7 @@ async def save_release_brief(
 
 async def get_release_brief(release_id: str) -> dict | None:
     """Retrieve a ReleaseBrief by release_id."""
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             "SELECT brief_json, run_id, app_url FROM release_snapshots WHERE release_id = ?",
             (release_id,),
@@ -1822,7 +1981,7 @@ async def get_release_brief(release_id: str) -> dict | None:
 
 async def get_release_row(release_id: str) -> dict | None:
     """Full release_snapshots row for HTTP API (registration + brief pointers)."""
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT release_id, app_url, created_at, snapshot_json, brief_json, run_id, project_id
@@ -1848,7 +2007,7 @@ async def get_release_id_for_run(run_id: str) -> dict | None:
     """Map a run back to API release context (release_snapshots.run_id)."""
     if not run_id:
         return None
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT release_id, app_url FROM release_snapshots
@@ -1871,7 +2030,7 @@ async def upsert_release_registration(
 ) -> None:
     """Create or update API release registration without clobbering brief_json/run_id."""
     now = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT snapshot_json, brief_json, run_id, project_id, created_at
@@ -1941,7 +2100,7 @@ async def save_project(
     repo_url: str | None = None,
     metadata: dict | None = None,
 ) -> None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         await db.execute(
             """
             INSERT INTO projects (project_id, name, repo_url, metadata_json, created_at)
@@ -1957,7 +2116,7 @@ async def save_project(
 
 
 async def get_project(project_id: str) -> dict | None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT project_id, name, repo_url, metadata_json, created_at
@@ -1987,7 +2146,7 @@ async def archive_old_runs(older_than_days: int = 30, keep_failed: bool = True) 
     If keep_failed is True, failed runs are retained regardless of age.
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         if keep_failed:
             async with db.execute(
                 "SELECT run_id FROM runs WHERE started_at < ? AND status != 'failed'",
@@ -2024,7 +2183,7 @@ async def archive_old_runs(older_than_days: int = 30, keep_failed: bool = True) 
 async def archive_old_telemetry(older_than_days: int = 90) -> dict:
     """Delete telemetry signals older than older_than_days."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             "SELECT COUNT(*) FROM telemetry_signals WHERE ts < ?",
             (cutoff,),
@@ -2038,7 +2197,7 @@ async def archive_old_telemetry(older_than_days: int = 90) -> dict:
 
 
 async def get_latest_correlation_report(app_url: str, window: str) -> dict | None:
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             """
             SELECT report_id, app_url, window, created_at, report_json
@@ -2070,7 +2229,7 @@ async def get_latest_correlation_report(app_url: str, window: str) -> dict | Non
 
 async def save_policy(policy: ReleasePolicy) -> None:
     """Persist a ReleasePolicy. If is_default=True, clears the flag on all others first."""
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         if policy.is_default:
             await db.execute("UPDATE release_policies SET is_default = 0")
         await db.execute(
@@ -2094,7 +2253,7 @@ async def save_policy(policy: ReleasePolicy) -> None:
 
 async def get_policy(policy_id: str) -> ReleasePolicy | None:
     """Retrieve a ReleasePolicy by ID. Returns None if not found."""
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             "SELECT policy_json FROM release_policies WHERE policy_id = ?",
             (policy_id,),
@@ -2110,7 +2269,7 @@ async def get_policy(policy_id: str) -> ReleasePolicy | None:
 
 async def get_default_policy() -> ReleasePolicy | None:
     """Return the policy marked is_default=1, or None if none is saved."""
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute("SELECT policy_json FROM release_policies WHERE is_default = 1 LIMIT 1") as cursor:
             row = await cursor.fetchone()
             if not row:
@@ -2123,7 +2282,7 @@ async def get_default_policy() -> ReleasePolicy | None:
 
 async def list_policies() -> list[ReleasePolicy]:
     """Return all stored ReleasePolicy objects, default first."""
-    async with aiosqlite.connect(_db_path()) as db:
+    async with _db_connect() as db:
         async with db.execute(
             "SELECT policy_json FROM release_policies ORDER BY is_default DESC, created_at ASC"
         ) as cursor:

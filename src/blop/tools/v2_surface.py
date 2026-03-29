@@ -34,6 +34,7 @@ from blop.engine.context_graph import (
     list_journey_summaries,
     summarize_release_scope,
 )
+from blop.engine.errors import BLOP_CLUSTER_NOT_FOUND, BLOP_RESOURCE_NOT_FOUND, BLOP_VALIDATION_FAILED, tool_error
 from blop.engine.secrets import mask_text
 from blop.schemas import (
     CorrelationMatch,
@@ -564,9 +565,17 @@ async def compare_context(
     baseline = await sqlite.get_context_graph(baseline_graph_id)
     candidate = await sqlite.get_context_graph(candidate_graph_id)
     if not baseline or not candidate:
-        return {"error": "One or both graph IDs were not found"}
+        return tool_error(
+            "One or both graph IDs were not found",
+            BLOP_RESOURCE_NOT_FOUND,
+            details={"baseline_graph_id": baseline_graph_id, "candidate_graph_id": candidate_graph_id},
+        )
     if baseline.app_url != app_url or candidate.app_url != app_url:
-        return {"error": "Graph IDs do not match app_url"}
+        return tool_error(
+            "Graph IDs do not match app_url",
+            BLOP_VALIDATION_FAILED,
+            details={"app_url": app_url},
+        )
 
     diff = diff_context_graph(baseline, candidate)
     release_scope = summarize_release_scope(baseline, candidate)
@@ -718,6 +727,48 @@ async def assess_release_risk(
         f">={BLOP_RISK_THRESHOLD_MEDIUM}=MEDIUM (review), "
         f"<{BLOP_RISK_THRESHOLD_MEDIUM}=LOW (safe)."
     )
+
+    from blop.engine.qa_context import build_qa_context
+
+    flows_full = await sqlite.list_flows_full(app_url=app_url)
+    flow_dicts = [
+        {
+            "flow_name": f.flow_name,
+            "business_criticality": f.business_criticality,
+            "assertion_count": len(f.assertions_json) + len(f.structured_assertions),
+            "steps": [s.model_dump() for s in f.steps],
+        }
+        for f in flows_full
+    ]
+    recent_runs = [r for r in await sqlite.list_runs(limit=30) if r.get("app_url") == app_url][:10]
+    rids = [r["run_id"] for r in recent_runs]
+    started = {r["run_id"]: r.get("started_at") or "" for r in recent_runs}
+    grouped_cases = await sqlite.list_cases_for_runs(rids)
+    run_case_rows: list[dict] = []
+    for rid, cases in grouped_cases.items():
+        for c in cases:
+            fr = c.raw_result or (c.assertion_failures[0] if c.assertion_failures else None)
+            run_case_rows.append(
+                {
+                    "flow_name": c.flow_name,
+                    "status": "pass" if c.status == "pass" else "fail",
+                    "failure_reason": fr,
+                    "created_at": started.get(rid, ""),
+                    "run_id": rid,
+                }
+            )
+    qa_ctx = await build_qa_context(app_url, flow_dicts, run_case_rows)
+    critical_flows = [f for f in flows_full if f.business_criticality in ("revenue", "activation")]
+    no_test_names = {g.flow_name for g in qa_ctx.coverage_gaps if g.gap_type == "no_test"}
+    covered = sum(1 for f in critical_flows if f.flow_name not in no_test_names)
+    crit_pct = round(100.0 * covered / len(critical_flows), 1) if critical_flows else None
+    result["coverage_summary"] = {
+        "critical_flow_coverage_pct": crit_pct,
+        "test_pyramid_bottom_heavy": qa_ctx.test_pyramid.is_bottom_heavy,
+        "coverage_efficiency": qa_ctx.test_pyramid.coverage_efficiency,
+    }
+    result["top_coverage_gaps"] = [g.model_dump() for g in qa_ctx.coverage_gaps[:3]]
+
     return result
 
 
@@ -894,7 +945,11 @@ async def generate_remediation(
 ) -> dict:
     cluster = await sqlite.get_incident_cluster(cluster_id)
     if not cluster:
-        return {"error": f"Cluster {cluster_id} not found"}
+        return tool_error(
+            f"Cluster {cluster_id} not found",
+            BLOP_CLUSTER_NOT_FOUND,
+            details={"cluster_id": cluster_id},
+        )
     samples = []
     for case_id in cluster.member_case_ids[:3]:
         case = await sqlite.get_case(case_id)

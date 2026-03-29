@@ -7,6 +7,8 @@ import json
 import os
 import shutil
 
+from blop.engine.errors import BLOP_RESOURCE_NOT_FOUND, BLOP_SECURITY_VALIDATION_FAILED, tool_error
+
 
 async def run_semgrep_scan(
     repo_path: str,
@@ -18,14 +20,20 @@ async def run_semgrep_scan(
     Semgrep must be installed separately (`pip install semgrep` or `brew install semgrep`).
     """
     if not os.path.isdir(repo_path):
-        return {"error": f"Directory not found: {repo_path}"}
+        return tool_error(
+            f"Directory not found: {repo_path}",
+            BLOP_RESOURCE_NOT_FOUND,
+            details={"repo_path": repo_path},
+        )
 
     semgrep_bin = shutil.which("semgrep")
     if not semgrep_bin:
-        return {
-            "error": "Semgrep not found. Install it: pip install semgrep (or brew install semgrep)",
-            "install_hint": "pip install semgrep",
-        }
+        return tool_error(
+            "Semgrep not found. Install it: pip install semgrep (or brew install semgrep)",
+            BLOP_SECURITY_VALIDATION_FAILED,
+            details={"install_hint": "pip install semgrep"},
+            install_hint="pip install semgrep",
+        )
 
     cmd = [semgrep_bin, "--json", "--config", ruleset, repo_path]
     if severity_filter:
@@ -45,18 +53,23 @@ async def run_semgrep_scan(
             except ProcessLookupError:
                 pass
             await proc.wait()
-            return {"error": "Semgrep scan timed out after 300 seconds"}
+            return tool_error("Semgrep scan timed out after 300 seconds", BLOP_SECURITY_VALIDATION_FAILED)
 
         if proc.returncode not in (0, 1):
-            return {
-                "error": f"Semgrep exited with code {proc.returncode}",
-                "stderr": stderr.decode(errors="replace")[:2000],
-            }
+            return tool_error(
+                f"Semgrep exited with code {proc.returncode}",
+                BLOP_SECURITY_VALIDATION_FAILED,
+                details={
+                    "returncode": proc.returncode,
+                    "stderr": stderr.decode(errors="replace")[:2000],
+                },
+                stderr=stderr.decode(errors="replace")[:2000],
+            )
 
         try:
             raw = json.loads(stdout.decode(errors="replace"))
         except json.JSONDecodeError:
-            return {"error": "Failed to parse Semgrep JSON output"}
+            return tool_error("Failed to parse Semgrep JSON output", BLOP_SECURITY_VALIDATION_FAILED)
 
         findings = []
         for result in raw.get("results", []):
@@ -83,7 +96,7 @@ async def run_semgrep_scan(
         }
 
     except Exception as e:
-        return {"error": f"Semgrep scan failed: {str(e)}"}
+        return tool_error(f"Semgrep scan failed: {str(e)}", BLOP_SECURITY_VALIDATION_FAILED)
 
 
 SECURITY_HEADERS = {
@@ -130,12 +143,14 @@ async def scan_http_headers(app_url: str) -> dict:
 
     parsed = urllib.parse.urlparse(app_url)
     if parsed.scheme.lower() not in {"http", "https"}:
-        return {
-            "error": (
+        return tool_error(
+            (
                 f"Unsupported URL scheme for security header scan: '{parsed.scheme or 'missing'}'. "
                 "Only http and https are allowed."
-            )
-        }
+            ),
+            BLOP_SECURITY_VALIDATION_FAILED,
+            details={"scheme": parsed.scheme or "missing"},
+        )
 
     try:
         req = urllib.request.Request(app_url, method="HEAD")
@@ -145,7 +160,11 @@ async def scan_http_headers(app_url: str) -> dict:
     except urllib.error.HTTPError as e:
         headers = dict(e.headers) if e.headers else {}
     except Exception as e:
-        return {"error": f"Failed to fetch {app_url}: {str(e)}"}
+        return tool_error(
+            f"Failed to fetch {app_url}: {str(e)}",
+            BLOP_SECURITY_VALIDATION_FAILED,
+            details={"app_url": app_url, "cause": type(e).__name__},
+        )
 
     header_keys_lower = {k.lower(): v for k, v in headers.items()}
     results = []

@@ -11,7 +11,21 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from blop.schemas import FailureCase, RecordedFlow
 
+from blop.engine.errors import BLOP_MOBILE_REPLAY_STEP_FAILED, BlopError
 from blop.storage.files import device_log_path, mobile_page_source_path, mobile_screenshot_path
+
+
+def _mobile_step_fail(message: str, *, action: str | None = None, exc: BaseException | None = None) -> dict:
+    details: dict[str, str] = {}
+    if action is not None:
+        details["action"] = action
+    if exc is not None:
+        details["cause"] = type(exc).__name__
+    return BlopError(
+        BLOP_MOBILE_REPLAY_STEP_FAILED,
+        message,
+        details=details or None,
+    ).to_merged_response(ok=False)
 
 
 async def execute_mobile_flow(
@@ -171,7 +185,7 @@ async def run_mobile_flows(
 async def _replay_step(driver, step, platform: str) -> dict:
     """Execute a single FlowStep against the Appium driver.
 
-    Returns {"ok": True} on success or {"ok": False, "error": str} on failure.
+    Returns ``{"ok": True}`` on success, or a merged error dict with string ``error`` plus ``blop_error``.
     """
     from blop.engine.mobile import interaction as intr
 
@@ -188,7 +202,10 @@ async def _replay_step(driver, step, platform: str) -> dict:
             elif step.touch_x_pct is not None and step.touch_y_pct is not None:
                 await intr.tap(driver, x_pct=step.touch_x_pct, y_pct=step.touch_y_pct)
             else:
-                return {"ok": False, "error": "tap step missing mobile_selector and coordinates"}
+                return _mobile_step_fail(
+                    "tap step missing mobile_selector and coordinates",
+                    action=action,
+                )
 
         elif action == "swipe":
             await intr.swipe(
@@ -202,7 +219,7 @@ async def _replay_step(driver, step, platform: str) -> dict:
 
         elif action == "fill":
             if not step.mobile_selector:
-                return {"ok": False, "error": "fill step missing mobile_selector"}
+                return _mobile_step_fail("fill step missing mobile_selector", action=action)
             from blop.engine.mobile.appium_selector import find_element
 
             element = await find_element(driver, step.mobile_selector, platform)
@@ -228,7 +245,10 @@ async def _replay_step(driver, step, platform: str) -> dict:
             if step.structured_assertion:
                 ok = await _evaluate_assertion(driver, step.structured_assertion, platform)
                 if not ok:
-                    return {"ok": False, "error": f"Assertion failed: {step.structured_assertion.description}"}
+                    return _mobile_step_fail(
+                        f"Assertion failed: {step.structured_assertion.description}",
+                        action=action,
+                    )
 
         elif action == "long_press":
             if step.mobile_selector:
@@ -244,7 +264,7 @@ async def _replay_step(driver, step, platform: str) -> dict:
         return {"ok": True}
 
     except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+        return _mobile_step_fail(str(exc), action=action, exc=exc)
 
 
 async def _evaluate_assertion(driver, assertion, platform: str) -> bool:

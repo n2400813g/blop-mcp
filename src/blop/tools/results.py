@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import os
+import statistics
+from collections import defaultdict
 from datetime import datetime, timezone
 from urllib.parse import quote
 
 from blop.engine.context_graph import get_context_graph_summary, get_next_checks_for_release_scope
+from blop.engine.defect_classifier import categorize_failure_reason as _categorize_failure_reason
+from blop.engine.errors import BLOP_FLOW_NOT_FOUND, BLOP_RUN_NOT_FOUND, tool_error
 from blop.reporting import results as reporting
 from blop.schemas import FailureCase
 from blop.stability import (
@@ -15,6 +19,34 @@ from blop.stability import (
     describe_flow_staleness,
 )
 from blop.storage import sqlite
+
+
+def _compute_flow_flakiness(cases: list[dict]) -> list[dict]:
+    """Per-flow CV from flat case dicts (status passed/failed)."""
+    flow_results: dict[str, list[int]] = defaultdict(list)
+    for case in cases:
+        flow_name = case.get("flow_name") or case.get("name", "unknown")
+        result = 1 if case.get("status") == "passed" else 0
+        flow_results[flow_name].append(result)
+
+    signals: list[dict] = []
+    for flow_name, results in flow_results.items():
+        if len(results) < 2:
+            continue
+        mean = sum(results) / len(results)
+        std = statistics.stdev(results)
+        cv = std / mean if mean > 0 else 0.0
+        signals.append(
+            {
+                "flow_name": flow_name,
+                "pass_rate": round(mean, 3),
+                "cv": round(cv, 3),
+                "run_count": len(results),
+                "is_flaky": cv > 0.3 and len(results) >= 3,
+            }
+        )
+
+    return sorted(signals, key=lambda x: x["cv"], reverse=True)
 
 
 async def _build_auth_provenance(run: dict, events: list[dict]) -> dict:
@@ -195,7 +227,7 @@ def _build_stale_flow_guidance(report: dict) -> str | None:
 async def get_test_results(run_id: str) -> dict:
     run = await sqlite.get_run(run_id)
     if not run:
-        return {"error": f"Run {run_id} not found"}
+        return tool_error(f"Run {run_id} not found", BLOP_RUN_NOT_FOUND, details={"run_id": run_id})
 
     # Try run_cases table first, fall back to cases_json in runs
     cases = await sqlite.list_cases_for_run(run_id)
@@ -211,6 +243,10 @@ async def get_test_results(run_id: str) -> dict:
     checkpoint = await sqlite.get_run_observation(run_id, "durable_checkpoint")
     if checkpoint:
         report["run_checkpoint"] = checkpoint
+    smoke_summary = await sqlite.get_run_observation(run_id, "smoke_preflight")
+    if smoke_summary:
+        smoke_summary.pop("updated_at", None)
+        report["smoke_summary"] = smoke_summary
     report["auth_provenance"] = await _build_auth_provenance(run, events)
     report["top_failure_mode"] = reporting.infer_top_failure_mode(report)
     report["recommended_remediation_steps"] = reporting.remediation_steps_for_failure_mode(report["top_failure_mode"])
@@ -339,7 +375,7 @@ async def get_run_recommendation_resource(run_id: str) -> dict:
     """Return just the release_recommendation for a run — lightweight polling target."""
     run = await sqlite.get_run(run_id)
     if not run:
-        return {"error": f"Run {run_id} not found"}
+        return tool_error(f"Run {run_id} not found", BLOP_RUN_NOT_FOUND, details={"run_id": run_id})
 
     from blop.reporting.results import _compute_release_recommendation
     from blop.schemas import FailureCase
@@ -393,7 +429,7 @@ async def list_runs(limit: int = 20, status: str | None = None) -> dict:
 async def get_artifact_index_resource(run_id: str) -> dict:
     run = await sqlite.get_run(run_id)
     if not run:
-        return {"error": f"Run {run_id} not found"}
+        return tool_error(f"Run {run_id} not found", BLOP_RUN_NOT_FOUND, details={"run_id": run_id})
     artifacts = await sqlite.list_artifacts_for_run(run_id)
     cases = await sqlite.list_cases_for_run(run_id)
     artifact_types: dict[str, int] = {}
@@ -414,7 +450,7 @@ async def get_artifact_index_resource(run_id: str) -> dict:
 async def get_flow_stability_profile_resource(flow_id: str) -> dict:
     flow = await sqlite.get_flow(flow_id)
     if not flow:
-        return {"error": f"Flow {flow_id} not found"}
+        return tool_error(f"Flow {flow_id} not found", BLOP_FLOW_NOT_FOUND, details={"flow_id": flow_id})
 
     cases = await sqlite.list_cases_for_flow(flow_id, limit=100)
     total = len(cases)
@@ -464,7 +500,7 @@ async def get_flow_stability_profile_resource(flow_id: str) -> dict:
 async def get_run_health_stream(run_id: str, limit: int = 500) -> dict:
     run = await sqlite.get_run(run_id)
     if not run:
-        return {"error": f"Run {run_id} not found"}
+        return tool_error(f"Run {run_id} not found", BLOP_RUN_NOT_FOUND, details={"run_id": run_id})
     events = await sqlite.list_run_health_events(run_id, limit=limit)
     app_url = run.get("app_url", "")
     encoded_app = quote(app_url, safe="") if app_url else ""
@@ -487,6 +523,15 @@ async def get_risk_analytics(limit_runs: int = 30) -> dict:
     run_ids = [r["run_id"] for r in runs]
     cases_by_run = await sqlite.list_cases_for_runs(run_ids)
     all_cases = [case for run_id in run_ids for case in cases_by_run.get(run_id, [])]
+    all_cases_for_flakiness: list[dict] = []
+    defect_counts: dict[str, int] = {
+        "functional": 0,
+        "integration": 0,
+        "security": 0,
+        "performance": 0,
+        "ui": 0,
+        "unknown": 0,
+    }
     flow_ids = [
         flow_id
         for flow_id in dict.fromkeys(case.flow_id for case in all_cases if case.status in ("fail", "error", "blocked"))
@@ -516,6 +561,15 @@ async def get_risk_analytics(limit_runs: int = 30) -> dict:
         business_risk[bc]["total"] += 1
         if case.status in ("fail", "error", "blocked"):
             business_risk[bc]["failed"] += 1
+
+        mapped_status = "passed" if case.status == "pass" else "failed"
+        all_cases_for_flakiness.append({"flow_name": case.flow_name or "unknown", "status": mapped_status})
+        if case.status in ("fail", "error", "blocked"):
+            failure_reason = case.raw_result or (case.assertion_failures[0] if case.assertion_failures else None)
+            category = _categorize_failure_reason(failure_reason)
+            if category not in defect_counts:
+                category = "unknown"
+            defect_counts[category] = defect_counts.get(category, 0) + 1
 
         if case.step_failure_index is not None and case.status in ("fail", "error", "blocked"):
             step_key = f"{case.flow_name}#step_{case.step_failure_index}"
@@ -611,6 +665,9 @@ async def get_risk_analytics(limit_runs: int = 30) -> dict:
     for bucket, stats in stability_buckets.items():
         stats["rate"] = round(int(stats["count"]) / total_failures, 4) if total_failures else None
 
+    flakiness_leaderboard = _compute_flow_flakiness(all_cases_for_flakiness)[:10]
+    defect_distribution = {k: v for k, v in defect_counts.items() if v > 0}
+
     return {
         "analyzed_runs": len(run_ids),
         "flaky_steps_leaderboard": flaky_leaderboard,
@@ -625,6 +682,8 @@ async def get_risk_analytics(limit_runs: int = 30) -> dict:
         ),
         "surface_bucket_breakdown": per_surface_buckets,
         "calibration_summary": calibration_summary,
+        "flakiness_leaderboard": flakiness_leaderboard,
+        "defect_distribution": defect_distribution,
         "related_v2_resources": [
             "blop://v2/contracts/tools",
         ],

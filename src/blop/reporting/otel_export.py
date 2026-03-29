@@ -8,6 +8,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from blop.engine.errors import BLOP_RUN_NOT_FOUND, tool_error
 from blop.storage import sqlite
 
 
@@ -37,7 +38,7 @@ async def build_otel_run_trace_export(run_id: str, *, health_limit: int = 2000) 
     """Return OTLP JSON-like resourceSpans for one run (read-only, local SQLite)."""
     run = await sqlite.get_run(run_id)
     if not run:
-        return {"error": f"run_not_found:{run_id}"}
+        return tool_error(f"run_not_found:{run_id}", BLOP_RUN_NOT_FOUND, details={"run_id": run_id})
 
     events = await sqlite.list_run_health_events(run_id, limit=health_limit)
     resource_attrs = [

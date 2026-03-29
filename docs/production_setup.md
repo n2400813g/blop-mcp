@@ -12,6 +12,10 @@ Related guides:
 - Codex-compatible quickstart: [`quickstart_codex.md`](quickstart_codex.md)
 - Operator failure guide: [`operator_failures.md`](operator_failures.md)
 - Compatibility policy: [`compatibility_policy.md`](compatibility_policy.md)
+- Customer onboarding: [`CUSTOMER_ONBOARDING.md`](CUSTOMER_ONBOARDING.md)
+- Data handling (security reviews): [`DATA_HANDLING.md`](DATA_HANDLING.md)
+- Support / escalation: [`SUPPORT_RUNBOOK.md`](SUPPORT_RUNBOOK.md)
+- Versioning: [`VERSIONING.md`](VERSIONING.md)
 
 ## 1) Recommended Architecture
 

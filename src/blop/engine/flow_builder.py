@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Callable, Optional, TypedDict
 
-from blop.schemas import FlowStep, IntentContract, RecordedFlow, SpaHints
+from blop.schemas import ApiExpectation, FlowStep, IntentContract, RecordedFlow, SpaHints
 
 
 class AgentStepInfo(TypedDict, total=False):
@@ -23,6 +23,7 @@ def build_recorded_flow(
     goal: str,
     steps: list[FlowStep],
     assertions_json: Optional[list[str]] = None,
+    api_expectations: Optional[list[ApiExpectation]] = None,
     entry_url: Optional[str] = None,
     business_criticality: str = "other",
     spa_hints: Optional[SpaHints] = None,
@@ -37,6 +38,7 @@ def build_recorded_flow(
         steps=steps,
         created_at=datetime.now(timezone.utc).isoformat(),
         assertions_json=assertions_json or [],
+        api_expectations=api_expectations or [],
         entry_url=entry_url or app_url,
         business_criticality=business_criticality,
         spa_hints=spa_hints or SpaHints(),

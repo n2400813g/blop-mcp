@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from blop.engine.browser_runtime import acquire_page_session
 from blop.engine.browser_session_manager import SESSION_MANAGER
+from blop.engine.errors import BLOP_STORAGE_OPERATION_FAILED, tool_error
 from blop.engine.path_safety import resolve_within_base
 
 # Safe directory for storage_import — must resolve within .blop/
@@ -137,7 +138,7 @@ async def _profile_url_get(
             "session_storage": {"count": len(session_payload), "items": session_payload},
         }
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_STORAGE_OPERATION_FAILED)
     finally:
         if session:
             await session.close()
@@ -258,7 +259,7 @@ async def _profile_url_set(
             result["persisted"] = False
         return result
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_STORAGE_OPERATION_FAILED)
     finally:
         if session:
             await session.close()
@@ -321,7 +322,7 @@ async def storage_get(
                 }
             return _storage_error(f"Unsupported resource '{resource}'")
         except Exception as e:
-            return {"error": str(e)}
+            return tool_error(str(e), BLOP_STORAGE_OPERATION_FAILED)
     if scope == "regression_replay":
         return _storage_error(
             "scope='regression_replay' does not expose runtime storage introspection yet",
@@ -422,7 +423,7 @@ async def storage_set(
                 return {"status": "ok", "resource": "all", "operation": "clear"}
             return _storage_error(f"Unsupported resource '{resource}'")
         except Exception as e:
-            return {"error": str(e)}
+            return tool_error(str(e), BLOP_STORAGE_OPERATION_FAILED)
     if scope == "regression_replay":
         return _storage_error(
             "scope='regression_replay' does not expose runtime storage mutation yet",
@@ -471,7 +472,7 @@ async def storage_export(
             Path(output_path).write_text(json.dumps(state, indent=2))
             return {"status": "saved", "scope": scope, "path": output_path, "app_url": app_url}
         except Exception as e:
-            return {"error": str(e)}
+            return tool_error(str(e), BLOP_STORAGE_OPERATION_FAILED)
         finally:
             if session:
                 await session.close()
@@ -534,7 +535,7 @@ async def storage_import(
                     continue
             return {"status": "imported", "scope": scope, "path": str(fp), "merge": merge}
         except Exception as e:
-            return {"error": str(e)}
+            return tool_error(str(e), BLOP_STORAGE_OPERATION_FAILED)
         finally:
             if session:
                 await session.close()

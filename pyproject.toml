@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blop-mcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "MCP-native release confidence control plane for web apps"
 requires-python = ">=3.11"
 readme = "README.md"
 license = "MIT"
 keywords = ["mcp", "browser automation", "release confidence", "qa", "playwright"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
@@ -58,6 +58,8 @@ server = [
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.30.0",
   "sse-starlette>=2.0.0",
+  "slowapi>=0.1.9",
+  "prometheus-client>=0.20.0",
 ]
 mobile = [
   "Appium-Python-Client>=4.0.0",
@@ -80,6 +82,8 @@ all = [
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.30.0",
   "sse-starlette>=2.0.0",
+  "slowapi>=0.1.9",
+  "prometheus-client>=0.20.0",
   "Appium-Python-Client>=4.0.0",
   "pm4py>=2.7.0",
   "pandas>=2.0.0",

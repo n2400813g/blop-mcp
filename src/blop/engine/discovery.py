@@ -92,6 +92,13 @@ def _dedupe_keep_order(items: list[str]) -> list[str]:
     return list(dict.fromkeys(item for item in items if item))
 
 
+def _normalize_business_criticality(value: str | None) -> str:
+    criticality = (value or "other").strip().lower()
+    if criticality in {"revenue", "activation", "retention", "support", "other"}:
+        return criticality
+    return "other"
+
+
 def _normalize_inventory_buttons(items: list[dict]) -> list[dict]:
     deduped = _dedupe_dict_items(items, ("text", "href"))
     return sorted(
@@ -565,6 +572,175 @@ def _inventory_section_fallback_flows(inventory: SiteInventory) -> list[dict]:
     return flows
 
 
+def _inventory_text_blob(inventory: SiteInventory, business_goal: str | None = None) -> str:
+    parts: list[str] = []
+    parts.extend(inventory.routes or [])
+    parts.extend(inventory.auth_signals or [])
+    parts.extend(inventory.business_signals or [])
+    parts.extend(inventory.headings or [])
+    parts.extend(str(button.get("text", "")) for button in inventory.buttons or [])
+    parts.extend(str(link.get("text", "")) for link in inventory.links or [])
+    parts.extend(str(link.get("href", "")) for link in inventory.links or [])
+    if business_goal:
+        parts.append(business_goal)
+    return " ".join(part.strip().lower() for part in parts if part).strip()
+
+
+def _is_storefront_inventory(inventory: SiteInventory, business_goal: str | None = None) -> bool:
+    blob = _inventory_text_blob(inventory, business_goal)
+    storefront_hits = (
+        "cart",
+        "product store",
+        "add to cart",
+        "place order",
+        "checkout",
+        "category",
+        "catalog",
+        "phones",
+        "laptops",
+        "monitors",
+        "prod.html",
+    )
+    return sum(1 for token in storefront_hits if token in blob) >= 2
+
+
+def _infer_flow_business_criticality(flow: dict, inventory: SiteInventory, business_goal: str | None = None) -> str:
+    existing = _normalize_business_criticality(flow.get("business_criticality"))
+    if existing != "other":
+        return existing
+
+    text = " ".join(
+        [
+            str(flow.get("flow_name", "")),
+            str(flow.get("goal", "")),
+            str(flow.get("starting_url", "")),
+            " ".join(str(item) for item in flow.get("likely_assertions", []) or []),
+            business_goal or "",
+        ]
+    ).lower()
+
+    if any(token in text for token in ("checkout", "place order", "order confirmation", "purchase", "payment")):
+        return "revenue"
+    if "cart" in text and any(token in text for token in ("add", "remove", "update", "buy", "order")):
+        return "revenue"
+    if any(token in text for token in ("signup", "sign up", "onboarding", "get started", "activate")):
+        return "activation"
+    if any(token in text for token in ("catalog", "browse", "category", "product details", "merchandising")):
+        return "activation"
+    if any(token in text for token in ("help center", "support", "contact us", "faq", "customer support")):
+        return "support"
+    if any(token in text for token in ("shared", "saved", "history", "return", "revisit")):
+        return "retention"
+    if _is_storefront_inventory(inventory, business_goal):
+        if "cart" in text:
+            return "revenue"
+        if any(token in text for token in ("prod.html", "product", "category")):
+            return "activation"
+    return "other"
+
+
+def _storefront_fallback_flows(inventory: SiteInventory) -> list[dict]:
+    if not _is_storefront_inventory(inventory):
+        return []
+
+    target_routes = {
+        urlparse(route if "://" in route else urljoin(inventory.app_url, route)).path for route in inventory.routes
+    }
+    cart_url = urljoin(inventory.app_url, "/cart.html" if "/cart.html" in target_routes else "/")
+    product_url = urljoin(inventory.app_url, "/prod.html" if "/prod.html" in target_routes else "/")
+
+    return [
+        {
+            "flow_name": "browse_catalog_and_product_details",
+            "goal": (
+                f"Navigate to {inventory.app_url}, browse the catalog, switch between categories if available, "
+                f"open a product details page (prefer {product_url} when reachable), and verify product merchandising "
+                "content plus add-to-cart controls are visible."
+            ),
+            "starting_url": inventory.app_url,
+            "preconditions": [],
+            "likely_assertions": [
+                "catalog content visible",
+                "product details page opens",
+                "add-to-cart call to action visible",
+            ],
+            "severity_if_broken": "high",
+            "confidence": 0.78,
+            "business_criticality": "activation",
+        },
+        {
+            "flow_name": "checkout_purchase",
+            "goal": (
+                f"Navigate to {inventory.app_url}, open a product, add it to cart, visit {cart_url}, "
+                "place an order with synthetic customer details, and verify an order confirmation appears."
+            ),
+            "starting_url": inventory.app_url,
+            "preconditions": [],
+            "likely_assertions": [
+                "item added to cart",
+                "cart page loads",
+                "order confirmation dialog appears",
+            ],
+            "severity_if_broken": "blocker",
+            "confidence": 0.82,
+            "business_criticality": "revenue",
+        },
+        {
+            "flow_name": "manage_cart_contents",
+            "goal": (
+                f"Navigate to {inventory.app_url}, add a product to cart, open {cart_url}, remove the item, "
+                "return to the catalog, add a product again, and verify the cart reflects the updated contents."
+            ),
+            "starting_url": inventory.app_url,
+            "preconditions": [],
+            "likely_assertions": [
+                "cart reflects item removal",
+                "cart reflects item re-added",
+            ],
+            "severity_if_broken": "medium",
+            "confidence": 0.74,
+            "business_criticality": "support",
+        },
+    ]
+
+
+def _enrich_discovered_flows(
+    flows: list[dict], inventory: SiteInventory, business_goal: str | None = None
+) -> list[dict]:
+    enriched: list[dict] = []
+    seen_names: set[str] = set()
+    for flow in flows:
+        if not isinstance(flow, dict) or not {"flow_name", "goal"}.issubset(flow.keys()):
+            continue
+        candidate = dict(flow)
+        candidate.setdefault("starting_url", inventory.app_url)
+        candidate.setdefault("preconditions", [])
+        candidate.setdefault("likely_assertions", [])
+        candidate.setdefault("severity_if_broken", "medium")
+        candidate.setdefault("confidence", 0.7)
+        candidate["business_criticality"] = _infer_flow_business_criticality(candidate, inventory, business_goal)
+        name = str(candidate.get("flow_name", "")).strip().lower()
+        if not name or name in seen_names:
+            continue
+        seen_names.add(name)
+        enriched.append(candidate)
+
+    if _is_storefront_inventory(inventory, business_goal):
+        existing_criticalities = {flow.get("business_criticality") for flow in enriched}
+        for candidate in _storefront_fallback_flows(inventory):
+            criticality = candidate["business_criticality"]
+            if criticality in existing_criticalities:
+                continue
+            name = candidate["flow_name"].strip().lower()
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+            existing_criticalities.add(criticality)
+            enriched.append(candidate)
+
+    return enriched[:8]
+
+
 from blop.engine.dom_utils import extract_interactive_nodes_flat as _extract_interactive_nodes_flat
 
 
@@ -1008,15 +1184,10 @@ async def plan_flows_from_inventory(
             valid_flows = []
             for f in flows:
                 if isinstance(f, dict) and required_keys.issubset(f.keys()):
-                    f.setdefault("starting_url", inventory.app_url)
-                    f.setdefault("preconditions", [])
-                    f.setdefault("likely_assertions", [])
-                    f.setdefault("severity_if_broken", "medium")
-                    f.setdefault("confidence", 0.7)
-                    f.setdefault("business_criticality", "other")
-                    valid_flows.append(f)
+                    valid_flows.append(dict(f))
             if valid_flows:
-                return (valid_flows, fallback_meta) if include_meta else valid_flows
+                enriched = _enrich_discovered_flows(valid_flows, inventory, business_goal)
+                return (enriched, fallback_meta) if include_meta else enriched
     except Exception as e:
         _log.debug("LLM flow planning failed, using fallback flows", exc_info=True)
         fallback_meta = {
@@ -1262,7 +1433,7 @@ Return only a JSON array:
                     f.setdefault("business_criticality", "other")
                     valid.append(f)
             if valid:
-                return valid
+                return _enrich_discovered_flows(valid, inventory, business_goal)
     except Exception:
         _log.debug("LLM repo-based flow generation failed, falling back to inventory planning", exc_info=True)
 
@@ -1301,6 +1472,7 @@ def _fallback_flows(app_url: str, inventory: SiteInventory | None = None) -> lis
     ]
     if inventory is not None:
         flows.extend(_inventory_section_fallback_flows(inventory))
+        flows.extend(_storefront_fallback_flows(inventory))
     deduped: list[dict] = []
     seen: set[str] = set()
     for flow in flows:
@@ -1308,5 +1480,8 @@ def _fallback_flows(app_url: str, inventory: SiteInventory | None = None) -> lis
         if not name or name in seen:
             continue
         seen.add(name)
+        if inventory is not None:
+            flow = dict(flow)
+            flow["business_criticality"] = _infer_flow_business_criticality(flow, inventory)
         deduped.append(flow)
     return deduped[:8]

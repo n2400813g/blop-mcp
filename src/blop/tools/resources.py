@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 from blop.engine.context_graph import find_journey_summary, get_context_graph_summary
+from blop.engine.errors import (
+    BLOP_RELEASE_NOT_FOUND,
+    BLOP_STORAGE_OPERATION_FAILED,
+    BLOP_VALIDATION_FAILED,
+    tool_error,
+)
 from blop.reporting.results import describe_flow_staleness
 from blop.schemas import CriticalJourney, ReleaseBrief
 from blop.storage import files as file_store
@@ -13,13 +19,25 @@ async def run_mobile_artifacts_resource(run_id: str) -> dict:
     """Index mobile replay artifacts: screenshots, page_source XML, device logs per case."""
     rid = (run_id or "").strip()
     if not rid:
-        return {"run_id": run_id, "error": "run_id is required", "cases": []}
+        return tool_error(
+            "run_id is required",
+            BLOP_VALIDATION_FAILED,
+            details={"field": "run_id"},
+            run_id=run_id,
+            cases=[],
+        )
 
     cases_out: list[dict] = []
     try:
         cases = await sqlite.list_cases_for_run(rid)
     except Exception as exc:
-        return {"run_id": rid, "error": str(exc), "cases": []}
+        return tool_error(
+            str(exc),
+            BLOP_STORAGE_OPERATION_FAILED,
+            details={"stage": "run_mobile_artifacts_resource", "cause": type(exc).__name__},
+            run_id=rid,
+            cases=[],
+        )
 
     for c in cases:
         if getattr(c, "platform", "web") not in ("ios", "android"):
@@ -133,10 +151,12 @@ async def release_brief_resource(release_id: str) -> dict:
     """Return the condensed ReleaseBrief for a given release_id."""
     brief = await sqlite.get_release_brief(release_id)
     if not brief:
-        return {
-            "release_id": release_id,
-            "error": f"No release brief found for release_id='{release_id}'. Run run_release_check to generate one.",
-        }
+        return tool_error(
+            f"No release brief found for release_id='{release_id}'. Run run_release_check to generate one.",
+            BLOP_RELEASE_NOT_FOUND,
+            details={"release_id": release_id},
+            release_id=release_id,
+        )
     brief = ReleaseBrief.model_validate(brief).model_dump()
     app_url = brief.get("app_url")
     if app_url:
@@ -152,11 +172,13 @@ async def release_artifacts_resource(release_id: str) -> dict:
     run_id = brief.get("run_id") if brief else None
 
     if not run_id:
-        return {
-            "release_id": release_id,
-            "error": f"No run linked to release_id='{release_id}'.",
-            "artifacts": {},
-        }
+        return tool_error(
+            f"No run linked to release_id='{release_id}'.",
+            BLOP_RELEASE_NOT_FOUND,
+            details={"release_id": release_id, "reason": "no_run_for_release"},
+            release_id=release_id,
+            artifacts={},
+        )
 
     raw_artifacts = await sqlite.list_artifacts_for_run(run_id)
     grouped: dict[str, list] = {}
@@ -179,11 +201,13 @@ async def release_incidents_resource(release_id: str) -> dict:
     run_id = brief.get("run_id") if brief else None
 
     if not app_url:
-        return {
-            "release_id": release_id,
-            "error": f"No release brief found for release_id='{release_id}'.",
-            "incidents": [],
-        }
+        return tool_error(
+            f"No release brief found for release_id='{release_id}'.",
+            BLOP_RELEASE_NOT_FOUND,
+            details={"release_id": release_id},
+            release_id=release_id,
+            incidents=[],
+        )
 
     all_clusters = await sqlite.list_open_incident_clusters(app_url)
 

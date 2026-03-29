@@ -181,6 +181,8 @@ async def test_get_test_results_adds_summary_first_fields():
             failure_class="test_fragility",
             healing_decision="propose_patch",
             repair_confidence=0.62,
+            api_verification_results=[{"expectation": "checkout_api", "required": True, "passed": False}],
+            api_verification_failures=["checkout_api"],
         )
     ]
     auth_profile = AuthProfile(
@@ -223,7 +225,22 @@ async def test_get_test_results_adds_summary_first_fields():
             with patch("blop.storage.sqlite.list_run_health_events", new_callable=AsyncMock, return_value=events):
                 with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=auth_profile):
                     with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=None):
-                        out = await results.get_test_results("run-summary")
+                        with patch("blop.storage.sqlite.get_flows", new_callable=AsyncMock, return_value=[]):
+                            with patch(
+                                "blop.storage.sqlite.get_run_observation",
+                                new_callable=AsyncMock,
+                                side_effect=[
+                                    None,
+                                    {
+                                        "status": "advisory_findings",
+                                        "probe_count": 1,
+                                        "findings": [{"kind": "console_error", "message": "boom"}],
+                                        "findings_by_kind": {"console_error": 1},
+                                        "probed_urls": ["https://example.com"],
+                                    },
+                                ],
+                            ):
+                                out = await results.get_test_results("run-summary")
 
     assert out["decision_summary"]["decision"] == "BLOCK"
     assert out["decision_summary"]["top_blocker_journeys"] == ["checkout"]
@@ -232,6 +249,10 @@ async def test_get_test_results_adds_summary_first_fields():
         "/tmp/runs/run-summary/screenshots/1.png",
         "/tmp/runs/run-summary/traces/case-1.zip",
     ]
+    assert out["evidence_summary"]["api_verification_failure_count"] == 1
+    assert out["decision_summary"]["api_verification_failure_count"] == 1
+    assert out["decision_summary"]["smoke_status"] == "advisory_findings"
+    assert out["coverage_summary"]["smoke_status"] == "advisory_findings"
     assert out["evidence_quality"]["traces_present"] is True
     assert "automation fragility" in out["evidence_quality"]["confidence_drivers"][-1].lower()
     assert out["coverage_summary"]["failure_kinds"] == ["automation_fragility"]
@@ -299,7 +320,12 @@ async def test_get_test_results_stale_flow_guidance_prioritizes_refresh():
                 with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=None):
                     with patch.dict("os.environ", {"BLOP_FLOW_STALE_DAYS": "14"}):
                         with patch("blop.storage.sqlite.get_flows", new_callable=AsyncMock, return_value=[stale_flow]):
-                            out = await results.get_test_results("run-stale")
+                            with patch(
+                                "blop.storage.sqlite.get_run_observation",
+                                new_callable=AsyncMock,
+                                side_effect=[None, None],
+                            ):
+                                out = await results.get_test_results("run-stale")
 
     assert out["stale_flow_guidance"].startswith("Refresh the stale recording")
     assert out["recommended_next_action"] == out["stale_flow_guidance"]
@@ -409,7 +435,13 @@ async def test_get_test_results_success_report_includes_coverage_proof():
             with patch("blop.storage.sqlite.list_run_health_events", new_callable=AsyncMock, return_value=events):
                 with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=auth_profile):
                     with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=None):
-                        out = await results.get_test_results("run-pass")
+                        with patch("blop.storage.sqlite.get_flows", new_callable=AsyncMock, return_value=[]):
+                            with patch(
+                                "blop.storage.sqlite.get_run_observation",
+                                new_callable=AsyncMock,
+                                side_effect=[None, None],
+                            ):
+                                out = await results.get_test_results("run-pass")
 
     assert out["decision_summary"]["decision"] == "SHIP"
     assert out["decision_summary"]["verified_journeys"] == [
@@ -486,7 +518,13 @@ async def test_get_test_results_downgrades_drifted_critical_passes():
         with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=cases):
             with patch("blop.storage.sqlite.list_run_health_events", new_callable=AsyncMock, return_value=[]):
                 with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=None):
-                    out = await results.get_test_results("run-drift")
+                    with patch("blop.storage.sqlite.get_flows", new_callable=AsyncMock, return_value=[]):
+                        with patch(
+                            "blop.storage.sqlite.get_run_observation",
+                            new_callable=AsyncMock,
+                            side_effect=[None, None],
+                        ):
+                            out = await results.get_test_results("run-drift")
 
     assert out["decision_summary"]["decision"] == "INVESTIGATE"
     assert out["decision_summary"]["critical_drifted_passes"] == 1
@@ -527,7 +565,13 @@ async def test_get_test_results_waiting_auth_uses_auth_status_guidance():
             with patch("blop.storage.sqlite.list_run_health_events", new_callable=AsyncMock, return_value=events):
                 with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=None):
                     with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=None):
-                        out = await results.get_test_results("run-auth")
+                        with patch("blop.storage.sqlite.get_flows", new_callable=AsyncMock, return_value=[]):
+                            with patch(
+                                "blop.storage.sqlite.get_run_observation",
+                                new_callable=AsyncMock,
+                                side_effect=[None, None],
+                            ):
+                                out = await results.get_test_results("run-auth")
 
     assert out["status"] == "waiting_auth"
     assert out["top_failure_mode"] == "waiting_auth"
@@ -572,7 +616,13 @@ async def test_get_test_results_unknown_bucket_includes_classification_gaps():
             with patch("blop.storage.sqlite.list_run_health_events", new_callable=AsyncMock, return_value=[]):
                 with patch("blop.storage.sqlite.get_auth_profile", new_callable=AsyncMock, return_value=None):
                     with patch("blop.storage.sqlite.get_flow", new_callable=AsyncMock, return_value=None):
-                        out = await results.get_test_results("run-unknown")
+                        with patch("blop.storage.sqlite.get_flows", new_callable=AsyncMock, return_value=[]):
+                            with patch(
+                                "blop.storage.sqlite.get_run_observation",
+                                new_callable=AsyncMock,
+                                side_effect=[None, None],
+                            ):
+                                out = await results.get_test_results("run-unknown")
 
     assert out["stability_bucket"] == "unknown_unclassified"
     assert out["bucket_confidence"] == "low"

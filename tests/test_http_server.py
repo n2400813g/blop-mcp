@@ -207,3 +207,15 @@ async def test_v1_post_checks_mocked(tmp_db):
         out = r.json()
         assert out["run_id"] == "run-mock"
         assert out["check_id"] == "run-mock"
+
+
+@pytest.mark.asyncio
+async def test_metrics_endpoint():
+    from httpx import ASGITransport, AsyncClient
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get("/metrics")
+    assert r.status_code in (200, 503)
+    text = r.text
+    assert "blop_runs_total" in text or "prometheus_client not installed" in text

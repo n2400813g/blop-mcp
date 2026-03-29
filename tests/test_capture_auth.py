@@ -105,6 +105,7 @@ async def test_capture_auth_session_timeout(tmp_path):
     assert result["status"] == "timeout"
     assert result["profile_name"] == "test"
     assert "No successful login detected" in result["note"]
+    assert result.get("blop_error", {}).get("code") == "BLOP_AUTH_CAPTURE_TIMEOUT"
 
 
 @pytest.mark.asyncio

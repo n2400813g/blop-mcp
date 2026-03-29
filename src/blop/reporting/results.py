@@ -563,6 +563,10 @@ def build_decision_summary(report: dict) -> dict:
         "blocker_count": rec.get("blocker_count", 0),
         "critical_journey_failures": rec.get("critical_journey_failures", 0),
         "critical_drifted_passes": rec.get("critical_drifted_passes", 0),
+        "api_verification_failure_count": sum(
+            len(case.get("api_verification_failures", []) or []) for case in (report.get("cases", []) or [])
+        ),
+        "smoke_status": ((report.get("smoke_summary", {}) or {}).get("status")),
         "top_blocker_journeys": top_blockers,
         "verified_journeys": [
             case.get("flow_name", "")
@@ -585,11 +589,21 @@ def build_evidence_summary(report: dict) -> dict:
     healed_case_count = 0
     trace_count = 0
     screenshot_count = 0
+    semantic_assertion_count = 0
+    api_verification_failure_count = 0
+    api_verification_checked_count = 0
 
     for case in all_cases:
         if case.get("trace_path"):
             trace_count += 1
         screenshot_count += len(case.get("artifact_paths", []) or [])
+        api_verification_failure_count += len(case.get("api_verification_failures", []) or [])
+        api_verification_checked_count += len(case.get("api_verification_results", []) or [])
+        semantic_assertion_count += sum(
+            1
+            for result in (case.get("assertion_results", []) or [])
+            if "semantic_query" in str(result.get("eval_type"))
+        )
 
     for case in evidence_cases[:5]:
         console_error_count += len(case.get("console_errors", []) or [])
@@ -611,7 +625,11 @@ def build_evidence_summary(report: dict) -> dict:
         "healed_case_count": healed_case_count,
         "trace_count": trace_count,
         "screenshot_count": screenshot_count,
+        "semantic_assertion_count": semantic_assertion_count,
+        "api_verification_checked_count": api_verification_checked_count,
+        "api_verification_failure_count": api_verification_failure_count,
         "top_artifact_refs": artifact_refs,
+        "smoke_summary": report.get("smoke_summary"),
     }
 
 
@@ -623,6 +641,8 @@ def build_coverage_summary(report: dict) -> dict:
     observed_assertions: list[str] = []
     proof_artifact_refs: list[str] = []
     failure_kinds: list[str] = []
+    api_verified_expectations: list[str] = []
+    semantic_assertions: list[str] = []
 
     for case in passed_cases:
         for assertion in _extract_observed_assertions(case):
@@ -635,6 +655,16 @@ def build_coverage_summary(report: dict) -> dict:
                 proof_artifact_refs.append(path)
             if len(proof_artifact_refs) >= 5:
                 break
+        for result in case.get("assertion_results", []) or []:
+            if "semantic_query" in str(result.get("eval_type")):
+                assertion = str(result.get("assertion", "")).strip()
+                if assertion and assertion not in semantic_assertions:
+                    semantic_assertions.append(assertion)
+        for result in case.get("api_verification_results", []) or []:
+            if result.get("passed"):
+                name = str(result.get("expectation", "")).strip()
+                if name and name not in api_verified_expectations:
+                    api_verified_expectations.append(name)
         if len(observed_assertions) >= 5 and len(proof_artifact_refs) >= 5:
             break
 
@@ -661,8 +691,11 @@ def build_coverage_summary(report: dict) -> dict:
         "verified_journeys": verified_journeys[:5],
         "blocked_journeys": blocked_journeys[:5],
         "observed_assertions": observed_assertions[:5],
+        "semantic_assertions": semantic_assertions[:5],
+        "api_verified_expectations": api_verified_expectations[:5],
         "proof_artifact_refs": proof_artifact_refs[:5],
         "failure_kinds": failure_kinds[:3],
+        "smoke_status": ((report.get("smoke_summary", {}) or {}).get("status")),
     }
 
 

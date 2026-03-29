@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from blop.config import BLOP_ALLOW_SCREENSHOT_LLM
+from blop.engine.errors import BLOP_VISUAL_BASELINE_NOT_FOUND, tool_error
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -194,12 +195,20 @@ async def compare_visual_baseline(flow_id: str, step_index: int | None = None) -
 
     bdir = baseline_dir(flow_id)
     if not bdir.exists():
-        return {"error": f"No baselines found for flow {flow_id}"}
+        return tool_error(
+            f"No baselines found for flow {flow_id}",
+            BLOP_VISUAL_BASELINE_NOT_FOUND,
+            details={"flow_id": flow_id},
+        )
 
     if step_index is not None:
         golden = get_golden_path(flow_id, step_index)
         if not golden:
-            return {"error": f"No baseline for step {step_index}"}
+            return tool_error(
+                f"No baseline for step {step_index}",
+                BLOP_VISUAL_BASELINE_NOT_FOUND,
+                details={"flow_id": flow_id, "step_index": step_index},
+            )
 
         current_path = str(bdir / f"step_{step_index:03d}_current.png")
         if Path(current_path).exists():

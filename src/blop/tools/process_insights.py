@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from blop.engine.errors import BLOP_PM4PY_INSIGHTS_FAILED, BlopError
 from blop.reporting.process_event_log import build_process_event_log_for_run, event_log_to_csv_dicts
 
 
@@ -76,7 +77,13 @@ async def get_process_insights(run_id: str, include_pm4py: bool = True) -> dict[
             "hint": "pip install 'blop-mcp[insights]' (pm4py + pandas)",
         }
     except Exception as e:
-        out["pm4py"] = {"available": False, "error": str(e)[:500]}
+        _msg = str(e)[:500]
+        _be = BlopError(
+            BLOP_PM4PY_INSIGHTS_FAILED,
+            _msg,
+            details={"cause": type(e).__name__},
+        ).to_dict()["error"]
+        out["pm4py"] = {"available": False, "error": _msg, "blop_error": _be}
 
     return out
 

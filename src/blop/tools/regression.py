@@ -8,9 +8,11 @@ import traceback
 import uuid
 from typing import Optional
 
+from blop.config import BLOP_MAX_CONCURRENT_RUNS
 from blop.engine import auth as auth_engine
 from blop.engine import classifier
 from blop.engine import regression as regression_engine
+from blop.engine.errors import BLOP_REGRESSION_START_FAILED, BlopError
 from blop.engine.logger import get_logger
 from blop.reporting.results import explain_run_status
 from blop.schemas import RunStartedResult
@@ -156,14 +158,35 @@ def _execution_plan_summary(flows: list, run_mode: str, profile_name: str | None
 
 
 def _start_error(message: str) -> dict:
-    return {
-        "error": message,
-        "run_id": None,
-        "status": "error",
-        "message": message,
-        "flow_count": 0,
-        "artifacts_dir": "",
-    }
+    err = BlopError(
+        BLOP_REGRESSION_START_FAILED,
+        message,
+        details={"stage": "run_regression_test"},
+    )
+    return err.to_merged_response(
+        run_id=None,
+        status="error",
+        message=message,
+        flow_count=0,
+        artifacts_dir="",
+    )
+
+
+def _concurrency_exceeded_response(active: int, limit: int) -> dict:
+    err = BlopError(
+        "BLOP_RUN_CONCURRENCY_EXCEEDED",
+        f"Too many concurrent runs ({active}/{limit}). "
+        "Wait for existing runs to complete or raise BLOP_MAX_CONCURRENT_RUNS.",
+        retryable=True,
+        details={"active": active, "limit": limit},
+    )
+    return err.to_merged_response(
+        run_id=None,
+        status="error",
+        message=err.message,
+        flow_count=0,
+        artifacts_dir="",
+    )
 
 
 async def _return_waiting_auth(
@@ -506,13 +529,9 @@ async def run_regression_test(
 
     run_mode = normalize_run_mode(run_mode)
 
-    _MAX_CONCURRENT = int(os.getenv("BLOP_MAX_CONCURRENT_RUNS", "10"))
     active = sum(1 for t in _RUN_TASKS.values() if not t.done())
-    if active >= _MAX_CONCURRENT:
-        return _start_error(
-            f"Too many concurrent runs ({active}/{_MAX_CONCURRENT}). "
-            "Wait for existing runs to complete or increase BLOP_MAX_CONCURRENT_RUNS."
-        )
+    if active >= BLOP_MAX_CONCURRENT_RUNS:
+        return _concurrency_exceeded_response(active, BLOP_MAX_CONCURRENT_RUNS)
 
     if not flow_ids:
         return _start_error("flow_ids must include at least one recorded flow id")

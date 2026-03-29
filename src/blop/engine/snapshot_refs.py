@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 
@@ -13,6 +14,22 @@ class SnapshotNode:
     name: str
     selector: str
     disabled: bool = False
+    stable_key: str = ""
+
+
+def build_stable_key(*, role: str, name: str, selector: str, disabled: bool = False) -> str:
+    """Build a short deterministic key for a snapshot node."""
+    payload = json.dumps(
+        {
+            "role": role,
+            "name": name,
+            "selector": selector,
+            "disabled": disabled,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
 
 def render_snapshot_markdown(nodes: list[SnapshotNode]) -> str:

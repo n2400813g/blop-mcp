@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Optional
 
 from blop.engine.context_graph import build_failure_neighborhood, get_next_checks_for_release_scope
+from blop.engine.defect_classifier import categorize_failure_reason
+from blop.engine.errors import BLOP_TRIAGE_INVALID_INPUT, tool_error
 from blop.schemas import BlockerTriage
 from blop.storage import sqlite
 
@@ -27,12 +29,18 @@ async def triage_release_blocker(
     user_business_impact, recommended_action, and linked_artifacts.
     """
     if flow_id and journey_id and flow_id != journey_id:
-        return {"error": "Pass only one of flow_id or journey_id. journey_id is a deprecated alias for flow_id."}
+        return tool_error(
+            "Pass only one of flow_id or journey_id. journey_id is a deprecated alias for flow_id.",
+            BLOP_TRIAGE_INVALID_INPUT,
+        )
 
     effective_flow_id = flow_id or journey_id
 
     if not any([run_id, release_id, effective_flow_id, incident_cluster_id]):
-        return {"error": "At least one of run_id, release_id, flow_id, journey_id, or incident_cluster_id is required."}
+        return tool_error(
+            "At least one of run_id, release_id, flow_id, journey_id, or incident_cluster_id is required.",
+            BLOP_TRIAGE_INVALID_INPUT,
+        )
 
     # Resolve run_id from release_id if not provided
     if release_id and not run_id:
@@ -141,6 +149,9 @@ async def triage_release_blocker(
         assertion_fails = getattr(top, "assertion_failures", [])
         if assertion_fails:
             evidence_parts.append(f"Assertion failures: {assertion_fails[0][:150]}")
+        api_fails = getattr(top, "api_verification_failures", [])
+        if api_fails:
+            evidence_parts.append(f"API verification failures: {api_fails[0][:150]}")
     elif failed_cases:
         top = failed_cases[0]
         neighborhood = build_failure_neighborhood(
@@ -192,11 +203,15 @@ async def triage_release_blocker(
             suggested_owner = owner_hints[0]
     elif blocker_cases:
         top = blocker_cases[0]
-        next_act = getattr(top, "repro_steps", [])
-        if next_act:
-            recommended_action = f"Investigate: {next_act[-1]}"
+        api_fails = getattr(top, "api_verification_failures", [])
+        if api_fails:
+            recommended_action = f"Inspect the failing journey-scoped API contract: {api_fails[0]}"
         else:
-            recommended_action = f"Re-run debug_test_case(case_id='{getattr(top, 'case_id', '')}') for evidence."
+            next_act = getattr(top, "repro_steps", [])
+            if next_act:
+                recommended_action = f"Investigate: {next_act[-1]}"
+            else:
+                recommended_action = f"Re-run debug_test_case(case_id='{getattr(top, 'case_id', '')}') for evidence."
     next_checks = get_next_checks_for_release_scope(
         graph,
         failed_journey_labels=[getattr(c, "flow_name", "") for c in failed_cases if getattr(c, "flow_name", "")],
@@ -240,6 +255,43 @@ async def triage_release_blocker(
             if len(top_evidence_refs) >= 5:
                 break
 
+    defect_category = "functional"
+    flakiness_context: dict = {
+        "flow_name": None,
+        "recent_pass_count": 0,
+        "recent_fail_count": 0,
+        "is_known_flaky": False,
+    }
+    primary = None
+    if blocker_cases:
+        primary = blocker_cases[0]
+    elif failed_cases:
+        primary = failed_cases[0]
+    if primary is not None:
+        fr = getattr(primary, "raw_result", None) or ""
+        if getattr(primary, "assertion_failures", None):
+            fr = fr or primary.assertion_failures[0]
+        defect_category = categorize_failure_reason(fr or None)
+        flakiness_context["flow_name"] = getattr(primary, "flow_name", None)
+        flow_id = getattr(primary, "flow_id", None)
+        if flow_id:
+            hist = await sqlite.list_cases_for_flow(flow_id, limit=40)
+            passes = sum(1 for c in hist if c.status == "pass")
+            fails = sum(1 for c in hist if c.status in ("fail", "error", "blocked"))
+            flakiness_context["recent_pass_count"] = passes
+            flakiness_context["recent_fail_count"] = fails
+            n = passes + fails
+            if n >= 5:
+                p_rate = passes / n
+                flakiness_context["is_known_flaky"] = 0.15 < p_rate < 0.85
+
+    if remediation:
+        remediation_confidence = "HIGH"
+    elif blocker_cases or failed_cases:
+        remediation_confidence = "MEDIUM"
+    else:
+        remediation_confidence = "LOW"
+
     canonical = BlockerTriage.model_validate(
         {
             "subject_id": subject_id,
@@ -254,6 +306,9 @@ async def triage_release_blocker(
 
     return {
         **canonical,
+        "defect_category": defect_category,
+        "flakiness_context": flakiness_context,
+        "remediation_confidence": remediation_confidence,
         "subject_type": subject_type,
         "evidence_summary_compact": {
             "failed_case_count": len(failed_cases),

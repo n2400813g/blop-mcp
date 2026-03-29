@@ -7,6 +7,7 @@ import json
 from datetime import datetime, timezone
 from typing import Literal
 
+from blop.engine.errors import BLOP_RUN_NOT_FOUND, tool_error
 from blop.schemas import FailureCase
 from blop.storage.files import report_path
 
@@ -155,7 +156,7 @@ async def export_test_report(
 
     run = await get_run(run_id)
     if not run:
-        return {"error": f"Run {run_id} not found"}
+        return tool_error(f"Run {run_id} not found", BLOP_RUN_NOT_FOUND, details={"run_id": run_id})
 
     cases = await list_cases_for_run(run_id)
 

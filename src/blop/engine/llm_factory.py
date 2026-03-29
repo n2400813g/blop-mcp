@@ -128,11 +128,54 @@ def make_agent_llm(*, role: str = "agent", temperature: float = 0.7) -> Any:
 
 
 async def ainvoke_llm(llm: Any, messages: list, *, span_name: str, **span_attrs: Any) -> Any:
-    """Invoke ``llm.ainvoke(messages)`` with an optional OpenTelemetry span (see ``llm_tracing``)."""
+    """Invoke ``llm.ainvoke(messages)`` with tracing, retries, circuit breaker, and metrics."""
+    import asyncio
+
+    from blop.config import BLOP_LLM_PROVIDER, BLOP_LLM_RETRY_MAX
+    from blop.engine import metrics as blop_metrics
+    from blop.engine.circuit_breaker import get_llm_circuit
+    from blop.engine.errors import BlopError
+    from blop.engine.llm_exceptions import classify_llm_failure
     from blop.engine.llm_tracing import trace_llm_call
 
-    with trace_llm_call(span_name, span_attrs):
-        return await llm.ainvoke(messages)
+    provider = (BLOP_LLM_PROVIDER or "google").strip().lower()
+    breaker = await get_llm_circuit(provider)
+    await breaker.before_call()
+
+    last_exc: BaseException | None = None
+    for attempt in range(BLOP_LLM_RETRY_MAX + 1):
+        try:
+            with trace_llm_call(span_name, span_attrs):
+                out = await llm.ainvoke(messages)
+            await breaker.record_outcome(success=True, circuit_worthy_failure=False)
+            blop_metrics.inc_llm_call(provider=provider, tool=span_name)
+            return out
+        except BlopError:
+            raise
+        except Exception as e:
+            last_exc = e
+            _, retriable = classify_llm_failure(e)
+            will_retry = retriable and attempt < BLOP_LLM_RETRY_MAX
+            if will_retry:
+                delay = min(8.0, 2.0**attempt)
+                await asyncio.sleep(delay)
+                try:
+                    await breaker.before_call()
+                except BlopError:
+                    await breaker.record_outcome(
+                        success=False,
+                        circuit_worthy_failure=classify_llm_failure(last_exc)[0],
+                    )
+                    raise
+                continue
+            break
+
+    assert last_exc is not None
+    await breaker.record_outcome(
+        success=False,
+        circuit_worthy_failure=classify_llm_failure(last_exc)[0],
+    )
+    raise last_exc
 
 
 def make_message(prompt: str) -> Any:

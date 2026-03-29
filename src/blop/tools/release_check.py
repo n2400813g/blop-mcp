@@ -8,7 +8,15 @@ from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from blop.config import validate_app_url, validate_mobile_replay_app_url
+from blop.engine.errors import (
+    BLOP_RESOURCE_NOT_FOUND,
+    BLOP_URL_VALIDATION_FAILED,
+    BLOP_VALIDATION_FAILED,
+    merge_tool_error,
+    tool_error,
+)
 from blop.engine.logger import get_logger
+from blop.engine.smoke import run_smoke_preflight
 from blop.reporting.results import explain_run_status
 from blop.schemas import ReleaseCheckRequest
 from blop.stability import build_stability_gate_summary
@@ -88,8 +96,28 @@ def _queued_release_check_result(
     profile_name: str | None,
     run_mode: str,
     criticality_filter: list[str],
+    smoke_summary: dict | None = None,
 ) -> dict:
     status_meta = explain_run_status(status, run_id=run_id)
+    prioritized_actions = [
+        {
+            "priority": 1,
+            "action": "Poll the release check until it reaches a terminal status.",
+            "owner_hint": None,
+            "evidence_ref": run_id,
+        }
+    ]
+    smoke_findings = list((smoke_summary or {}).get("findings", []) or [])
+    if smoke_findings:
+        top_finding = smoke_findings[0]
+        prioritized_actions.append(
+            {
+                "priority": 2,
+                "action": f"Review advisory smoke finding before replay results finish: {top_finding.get('message', '')}",
+                "owner_hint": None,
+                "evidence_ref": run_id,
+            }
+        )
     return {
         "release_id": release_id,
         "run_id": run_id,
@@ -99,19 +127,13 @@ def _queued_release_check_result(
         "decision": "INVESTIGATE",
         "blocker_journeys": [],
         "business_impact": "Release check queued. Critical journeys have not finished executing yet.",
-        "prioritized_actions": [
-            {
-                "priority": 1,
-                "action": "Poll the release check until it reaches a terminal status.",
-                "owner_hint": None,
-                "evidence_ref": run_id,
-            }
-        ],
+        "prioritized_actions": prioritized_actions,
         "resource_links": {
             "brief": f"blop://release/{release_id}/brief",
             "artifacts": f"blop://release/{release_id}/artifacts",
             "incidents": f"blop://release/{release_id}/incidents",
         },
+        "smoke_summary": smoke_summary,
         "flow_count": len(flow_ids),
         "selected_flows": _summarize_selected_flows(selected_flows),
         "execution_plan_summary": _summarize_execution_plan(selected_flows, run_mode, profile_name),
@@ -183,6 +205,7 @@ def _build_release_check_result(
     run_result: dict,
     release_id: str,
     app_url: str,
+    smoke_summary: dict | None = None,
 ) -> dict:
     """Map a run_result (from run_regression_test or get_test_results) → ReleaseCheckResult."""
     run_id = run_result.get("run_id", "")
@@ -248,6 +271,7 @@ def _build_release_check_result(
         "business_impact": business_impact,
         "prioritized_actions": prioritized_actions,
         "resource_links": resource_links,
+        "smoke_summary": smoke_summary,
         "stability_gate_summary": gate_summary,
         "release_exit_criteria": {
             "blocking_rules": [
@@ -287,6 +311,7 @@ async def _save_release_brief(release_check_result: dict, app_url: str) -> None:
         "blocker_journey_names": blocker_journeys,
         "critical_journey_failures": blocker_count,
         "top_actions": actions[:3],
+        "smoke_summary": release_check_result.get("smoke_summary"),
     }
 
     try:
@@ -305,6 +330,7 @@ async def run_release_check(
     release_id: Optional[str] = None,
     headless: bool = True,
     run_mode: str = "hybrid",
+    smoke_preflight: bool = False,
 ) -> dict:
     """Run a release confidence check against critical journeys.
 
@@ -324,6 +350,7 @@ async def run_release_check(
         release_id: Optional caller-supplied release identifier (auto-generated if omitted).
         headless: Run browser headlessly (default True).
         run_mode: Replay mode — "hybrid" (default), "strict_steps", or "goal_fallback".
+        smoke_preflight: Optional advisory preflight over the app root and top flow entry URLs.
     """
     try:
         request = ReleaseCheckRequest.model_validate(
@@ -337,10 +364,11 @@ async def run_release_check(
                 "release_id": release_id,
                 "headless": headless,
                 "run_mode": run_mode,
+                "smoke_preflight": smoke_preflight,
             }
         )
     except Exception as exc:
-        return {"error": str(exc)}
+        return tool_error(str(exc), BLOP_VALIDATION_FAILED, details={"stage": "release_check_request"})
 
     release_id = request.release_id or uuid.uuid4().hex
     effective_flow_ids = request.flow_ids if request.flow_ids is not None else request.journey_ids
@@ -348,7 +376,7 @@ async def run_release_check(
     if request.mode == "targeted":
         url_err = validate_app_url(request.app_url)
         if url_err:
-            return {"error": url_err}
+            return tool_error(url_err, BLOP_URL_VALIDATION_FAILED)
         result = await _run_targeted(
             request.app_url, effective_flow_ids, request.profile_name, release_id, request.headless
         )
@@ -359,16 +387,18 @@ async def run_release_check(
             list(request.criticality_filter),
         )
         if not resolved_ids:
-            return {
-                "error": (
+            return tool_error(
+                (
                     "No recorded flows found matching criticality_filter. "
                     "Record journeys first with record_test_flow, or pass explicit flow_ids."
                 ),
-                "release_id": release_id,
-            }
+                BLOP_RESOURCE_NOT_FOUND,
+                details={"release_id": release_id, "reason": "no_flows_for_criticality"},
+                release_id=release_id,
+            )
         url_err = _url_validate_for_replay_flows(request.app_url, selected_flows)
         if url_err:
-            return {"error": url_err}
+            return tool_error(url_err, BLOP_URL_VALIDATION_FAILED, release_id=release_id)
         result = await _run_replay(
             app_url=request.app_url,
             flow_ids=effective_flow_ids,
@@ -377,6 +407,7 @@ async def run_release_check(
             release_id=release_id,
             headless=request.headless,
             run_mode=request.run_mode,
+            smoke_preflight=request.smoke_preflight,
             preresolved=(resolved_ids, selected_flows),
         )
 
@@ -431,6 +462,7 @@ async def _run_replay(
     release_id: str,
     headless: bool,
     run_mode: str,
+    smoke_preflight: bool,
     *,
     preresolved: tuple[list[str], list] | None = None,
 ) -> dict:
@@ -442,13 +474,36 @@ async def _run_replay(
         flow_ids, selected_flows = await _resolve_replay_selection(app_url, flow_ids, criticality_filter)
 
     if not flow_ids:
-        return {
-            "error": (
+        return tool_error(
+            (
                 "No recorded flows found matching criticality_filter. "
                 "Record journeys first with record_test_flow, or pass explicit flow_ids."
             ),
-            "release_id": release_id,
-        }
+            BLOP_RESOURCE_NOT_FOUND,
+            details={"release_id": release_id, "reason": "no_flows_for_criticality"},
+            release_id=release_id,
+        )
+
+    smoke_summary = None
+    if smoke_preflight:
+        try:
+            smoke_summary = (
+                await run_smoke_preflight(
+                    app_url=app_url,
+                    flows=selected_flows,
+                    profile_name=profile_name,
+                )
+            ).model_dump()
+        except Exception as exc:
+            smoke_summary = {
+                "status": "probe_error",
+                "probe_count": 0,
+                "findings": [
+                    {"kind": "navigation_error", "severity": "high", "message": f"Smoke preflight failed: {exc}"}
+                ],
+                "findings_by_kind": {"navigation_error": 1},
+                "probed_urls": [],
+            }
 
     run_result = await run_regression_test(
         app_url=app_url,
@@ -459,7 +514,7 @@ async def _run_replay(
     )
 
     if "error" in run_result:
-        return {"error": run_result["error"], "release_id": release_id}
+        return merge_tool_error(run_result, release_id=release_id)
 
     run_id = run_result.get("run_id", "")
     status = run_result.get("status", "queued")
@@ -474,7 +529,14 @@ async def _run_replay(
         profile_name=profile_name,
         run_mode=run_mode,
         criticality_filter=criticality_filter,
+        smoke_summary=smoke_summary,
     )
+
+    if smoke_summary is not None:
+        try:
+            await sqlite.upsert_run_observation(run_id, "smoke_preflight", smoke_summary)
+        except Exception as exc:
+            _log.warning("save_smoke_preflight_failed run_id=%s error=%s", run_id, exc, exc_info=True)
 
     # Best-effort persist a preliminary brief
     try:
@@ -494,6 +556,7 @@ async def _run_replay(
                 "blocker_journey_names": [],
                 "critical_journey_failures": 0,
                 "top_actions": [],
+                "smoke_summary": smoke_summary,
             },
         )
     except Exception as exc:
@@ -533,15 +596,20 @@ async def _run_targeted(
     )
 
     if "error" in eval_result:
-        return {"error": eval_result["error"], "release_id": release_id}
+        return merge_tool_error(eval_result, release_id=release_id)
 
     run_id = eval_result.get("run_id")
     if not run_id:
-        return {"error": "Targeted evaluation did not return a run_id.", "release_id": release_id}
+        return tool_error(
+            "Targeted evaluation did not return a run_id.",
+            BLOP_VALIDATION_FAILED,
+            details={"release_id": release_id, "stage": "targeted_eval"},
+            release_id=release_id,
+        )
 
     detailed_result = await get_test_results(run_id)
     if "error" in detailed_result:
-        return {"error": detailed_result["error"], "release_id": release_id}
+        return merge_tool_error(detailed_result, release_id=release_id)
 
     result = _build_release_check_result(detailed_result, release_id, app_url)
     result.update(detailed_result)
@@ -593,5 +661,8 @@ async def refresh_release_brief_after_run(run_id: str) -> None:
         return
     release_id = link["release_id"]
     app_url = link["app_url"] or detailed.get("app_url") or ""
-    result = _build_release_check_result(detailed, release_id, app_url)
+    smoke_summary = await sqlite.get_run_observation(run_id, "smoke_preflight")
+    if isinstance(smoke_summary, dict):
+        smoke_summary.pop("updated_at", None)
+    result = _build_release_check_result(detailed, release_id, app_url, smoke_summary=smoke_summary)
     await _save_release_brief(result, app_url)

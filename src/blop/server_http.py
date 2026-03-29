@@ -10,6 +10,7 @@ Run:
 Endpoints:
     GET /runs/{run_id}/stream  — SSE stream of run health events
     GET /health                — liveness probe
+    GET /metrics               — Prometheus text when prometheus-client is installed
     /v1/*                      — API key optional when BLOP_HTTP_API_KEY unset (see docs)
 """
 
@@ -48,6 +49,19 @@ if _HAS_DEPS:
 
     app = FastAPI(title="blop HTTP server", version="0.3.0", lifespan=_lifespan)
 
+    try:
+        from slowapi.errors import RateLimitExceeded
+        from slowapi.middleware import SlowAPIMiddleware
+
+        from blop.api.problem_handlers import rate_limit_exceeded_handler
+        from blop.api.v1.rate_limit import http_limiter
+
+        app.state.limiter = http_limiter
+        app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+        app.add_middleware(SlowAPIMiddleware)
+    except ImportError:
+        pass
+
     from blop.api.v1.router import router as v1_router
 
     app.include_router(v1_router, prefix="/v1")
@@ -78,6 +92,21 @@ if _HAS_DEPS:
     @app.get("/health")
     async def health():
         return {"status": "ok"}
+
+    @app.get("/metrics")
+    async def metrics():
+        from fastapi.responses import Response
+
+        from blop.engine.metrics import metrics_text
+
+        body = metrics_text()
+        if body is None:
+            return Response(
+                status_code=503,
+                content="# prometheus_client not installed; pip install blop-mcp[server]\n",
+                media_type="text/plain; charset=utf-8",
+            )
+        return Response(content=body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 def run() -> int:

@@ -10,9 +10,13 @@ Compatible MCP clients: **Cursor**, **Claude Code**, and other clients that supp
 
 ## Quick Navigation
 
+- [Changelog](CHANGELOG.md) · [Security](SECURITY.md) · [Versioning](docs/VERSIONING.md)
+- [Customer onboarding](docs/CUSTOMER_ONBOARDING.md) · [Data handling](docs/DATA_HANDLING.md) · [Support runbook](docs/SUPPORT_RUNBOOK.md)
 - [Contributing](CONTRIBUTING.md)
 - [Product thesis](#product-thesis)
 - [Documentation contract](#documentation-contract)
+- [OSS competitive analysis](docs/oss_core_competitive_analysis.md)
+- [Open-core capability placement](docs/capability_placement_open_core.md)
 - [What it actually does](#what-does-it-actually-do)
 - [Why blop vs generic AI testing agents](#why-blop-vs-generic-ai-testing-agents)
 - [Before you start](#before-you-start--what-youll-need)
@@ -40,6 +44,8 @@ Compatible MCP clients: **Cursor**, **Claude Code**, and other clients that supp
 
 - Repo-level source of truth for documentation scope: [`docs/DOC_CONTRACT.md`](docs/DOC_CONTRACT.md)
 - Contributor and agent orientation pack: [`docs/AGENT_CONTEXT_PACK.md`](docs/AGENT_CONTEXT_PACK.md)
+- OSS-core competitive module memo: [`docs/oss_core_competitive_analysis.md`](docs/oss_core_competitive_analysis.md)
+- Open-core placement memo for upcoming capability layers: [`docs/capability_placement_open_core.md`](docs/capability_placement_open_core.md)
 - Canonical product thesis in Linear: [Product thesis: analyst vision (P1–P4 map)](https://linear.app/blopaidk/document/product-thesis-analyst-vision-p1-p4-map-b747d50a40ae)
 
 ---

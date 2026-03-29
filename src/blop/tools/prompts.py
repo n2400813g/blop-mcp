@@ -27,6 +27,9 @@ Step 4 — Record or refresh any missing release-gating journeys:
 Step 5 — Run release check:
    run_release_check(app_url="https://your-app.com", mode="replay")
    → This queues a run. Note the run_id and release_id returned.
+   Optional advisory preflight:
+   run_release_check(app_url="https://your-app.com", mode="replay", smoke_preflight=True)
+   → Runs a bounded smoke sweep first; replay remains the authoritative release gate.
 
 Step 6 — Poll for results:
    get_test_results(run_id="<run_id from step 4>")

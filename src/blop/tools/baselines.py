@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from blop.config import validate_app_url
+from blop.engine.errors import BLOP_URL_VALIDATION_FAILED, BLOP_VALIDATION_FAILED, tool_error
 from blop.engine.flow_builder import build_recorded_flow
 from blop.engine.planner import build_execution_plan, build_intent_contract
 from blop.schemas import AuthenticatedBaselineRecipe, FlowStep, StructuredAssertion
@@ -261,11 +262,15 @@ async def package_authenticated_saas_baseline(
     """Create strict-step authenticated SaaS release-gate flows from reusable recipes."""
     url_err = validate_app_url(app_url)
     if url_err:
-        return {"error": url_err}
+        return tool_error(url_err, BLOP_URL_VALIDATION_FAILED)
     if not baseline_name or not baseline_name.strip():
-        return {"error": "baseline_name is required"}
+        return tool_error("baseline_name is required", BLOP_VALIDATION_FAILED, details={"field": "baseline_name"})
     if not recipes:
-        return {"error": "recipes must include at least one baseline recipe"}
+        return tool_error(
+            "recipes must include at least one baseline recipe",
+            BLOP_VALIDATION_FAILED,
+            details={"field": "recipes"},
+        )
 
     parsed: list[AuthenticatedBaselineRecipe] = []
     for recipe in recipes:

@@ -12,6 +12,12 @@ from typing import Optional, Tuple
 
 from blop.config import validate_app_url
 from blop.engine import auth as auth_engine
+from blop.engine.errors import (
+    BLOP_AUTH_PROFILE_NOT_FOUND,
+    BLOP_URL_VALIDATION_FAILED,
+    BLOP_VALIDATION_FAILED,
+    tool_error,
+)
 from blop.engine.flow_builder import (
     AgentStepInfo,
     build_recorded_flow,
@@ -41,11 +47,15 @@ async def evaluate_web_task(
     """
     url_err = validate_app_url(app_url)
     if url_err:
-        return {"error": url_err}
+        return tool_error(url_err, BLOP_URL_VALIDATION_FAILED)
     if not task or not task.strip():
-        return {"error": "task is required"}
+        return tool_error("task is required", BLOP_VALIDATION_FAILED, details={"field": "task"})
     if format not in {"markdown", "text", "json"}:
-        return {"error": f"Invalid format '{format}'. Must be one of: markdown, text, json"}
+        return tool_error(
+            f"Invalid format '{format}'. Must be one of: markdown, text, json",
+            BLOP_VALIDATION_FAILED,
+            details={"field": "format"},
+        )
 
     capture_flags = set(capture or ["screenshots", "console", "network", "trace"])
     valid_flags = {"screenshots", "console", "network", "trace"}
@@ -57,21 +67,25 @@ async def evaluate_web_task(
     if profile_name:
         profile = await sqlite.get_auth_profile(profile_name)
         if profile is None:
-            return {
-                "error": (
+            return tool_error(
+                (
                     f"Auth profile '{profile_name}' was not found. "
                     "Provide a valid profile_name or omit it to run without auth."
-                )
-            }
+                ),
+                BLOP_AUTH_PROFILE_NOT_FOUND,
+                details={"profile_name": profile_name},
+            )
         try:
             storage_state = await auth_engine.resolve_storage_state(profile)
         except Exception as exc:
-            return {
-                "error": (
+            return tool_error(
+                (
                     f"Auth profile '{profile_name}' could not be resolved: {exc}. "
                     "Refresh credentials or run capture_auth_session."
-                )
-            }
+                ),
+                BLOP_VALIDATION_FAILED,
+                details={"profile_name": profile_name, "cause": type(exc).__name__},
+            )
     if storage_state is None:
         storage_state = await auth_engine.auto_storage_state_from_env()
 

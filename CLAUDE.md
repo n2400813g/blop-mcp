@@ -148,3 +148,4 @@ Screenshots, traces, and console logs are in `runs/<type>/<run_id>/`. SQLite DB 
 - `run_regression_test` fires an `asyncio.create_task` and returns immediately — caller must poll `get_test_results`. Run status: `queued` → `running` → `completed`/`failed`/`cancelled`; `waiting_auth` if auth profile cannot be resolved.
 - `business_criticality` (revenue, activation, retention, support, other) is stored on flows and cases; classifier and reporting use it for severity labels (e.g. "BLOCKER in revenue flow").
 - Exploration profile defaults are configurable via `BLOP_EXPLORATION_PROFILE` (`default`/`saas_marketing`) with override knobs for network idle, SPA settle, agent retries, and crawl page limits.
+- Structured errors: many handlers return top-level `error` (string) and `blop_error` (`code`, `message`, `retryable`, `details`); see `docs/DOC_CONTRACT.md` and `src/blop/engine/errors.py`.

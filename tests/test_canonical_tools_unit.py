@@ -47,6 +47,7 @@ def test_release_check_request_defaults_release_gating_filter():
 
     request = ReleaseCheckRequest(app_url="https://example.com", criticality_filter=[])
     assert request.criticality_filter == ["revenue", "activation"]
+    assert request.smoke_preflight is False
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +234,39 @@ async def test_run_release_check_result_contains_resource_links():
 
 
 @pytest.mark.asyncio
+async def test_run_release_check_smoke_preflight_attaches_advisory_summary():
+    from blop.tools.release_check import run_release_check
+
+    mock_run_result = {"run_id": "run-smoke", "status": "queued"}
+    selected_flow = _make_flow("f1", "revenue")
+    smoke_summary = {
+        "status": "advisory_findings",
+        "probe_count": 1,
+        "findings": [{"kind": "console_error", "message": "boom"}],
+        "findings_by_kind": {"console_error": 1},
+        "probed_urls": ["https://example.com"],
+    }
+
+    with patch("blop.storage.sqlite.list_flows_full", new_callable=AsyncMock, return_value=[selected_flow]):
+        with patch("blop.tools.release_check.run_smoke_preflight", new_callable=AsyncMock) as smoke_mock:
+            smoke_mock.return_value = MagicMock(model_dump=lambda: smoke_summary)
+            with patch(
+                "blop.tools.regression.run_regression_test", new_callable=AsyncMock, return_value=mock_run_result
+            ):
+                with patch("blop.storage.sqlite.save_release_brief", new_callable=AsyncMock):
+                    with patch("blop.storage.sqlite.upsert_run_observation", new_callable=AsyncMock):
+                        result = await run_release_check(
+                            app_url="https://example.com",
+                            mode="replay",
+                            smoke_preflight=True,
+                            release_id="rel-smoke",
+                        )
+
+    assert result["smoke_summary"]["status"] == "advisory_findings"
+    assert any("smoke finding" in action["action"].lower() for action in result["prioritized_actions"])
+
+
+@pytest.mark.asyncio
 async def test_run_release_check_targeted_uses_expanded_budget_and_stored_report():
     """targeted mode should pass a larger step budget and build its result from get_test_results."""
     from blop.tools.release_check import run_release_check
@@ -353,7 +387,12 @@ async def test_triage_revenue_failure_mentions_revenue_in_impact():
     with patch("blop.storage.sqlite.get_run", new_callable=AsyncMock, return_value={"run_id": "r1"}):
         with patch("blop.storage.sqlite.list_cases_for_run", new_callable=AsyncMock, return_value=[case]):
             with patch("blop.storage.sqlite.list_artifacts_for_run", new_callable=AsyncMock, return_value=[]):
-                result = await triage_release_blocker(run_id="r1")
+                with patch(
+                    "blop.storage.sqlite.list_cases_for_flow",
+                    new_callable=AsyncMock,
+                    return_value=[],
+                ):
+                    result = await triage_release_blocker(run_id="r1")
 
     assert (
         "Revenue" in result.get("user_business_impact", "")

@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Optional
 
 from blop.config import validate_app_url
+from blop.engine.errors import (
+    BLOP_AUTH_CAPTURE_TIMEOUT,
+    BLOP_URL_VALIDATION_FAILED,
+    BLOP_VALIDATION_FAILED,
+    tool_error,
+)
 from blop.engine.path_safety import resolve_within_base, sanitize_component
 
 _BLOP_DIR: str = str(Path(__file__).parent.parent.parent.parent / ".blop")
@@ -32,22 +38,26 @@ async def capture_auth_session(
     try:
         safe_profile_name = sanitize_component(profile_name, field_name="profile_name")
     except ValueError as exc:
-        return {
-            "error": str(exc),
-            "error_type": "invalid_profile_name",
-            "status": "error",
-            "profile_name": profile_name,
-            "note": str(exc),
-        }
+        return tool_error(
+            str(exc),
+            BLOP_VALIDATION_FAILED,
+            details={"field": "profile_name", "error_type": "invalid_profile_name"},
+            error_type="invalid_profile_name",
+            status="error",
+            profile_name=profile_name,
+            note=str(exc),
+        )
     url_err = validate_app_url(login_url)
     if url_err:
-        return {
-            "error": url_err,
-            "error_type": "invalid_login_url",
-            "status": "error",
-            "profile_name": profile_name,
-            "note": url_err,
-        }
+        return tool_error(
+            url_err,
+            BLOP_URL_VALIDATION_FAILED,
+            details={"field": "login_url", "error_type": "invalid_login_url"},
+            error_type="invalid_login_url",
+            status="error",
+            profile_name=profile_name,
+            note=url_err,
+        )
 
     from urllib.parse import urlparse
 
@@ -70,13 +80,15 @@ async def capture_auth_session(
                 must_exist=False,
             )
             if resolved_user_data_dir is None:
-                return {
-                    "error": "user_data_dir must resolve within the repository root",
-                    "error_type": "invalid_user_data_dir",
-                    "status": "error",
-                    "profile_name": profile_name,
-                    "note": "user_data_dir must resolve within the repository root",
-                }
+                return tool_error(
+                    "user_data_dir must resolve within the repository root",
+                    BLOP_VALIDATION_FAILED,
+                    details={"field": "user_data_dir", "error_type": "invalid_user_data_dir"},
+                    error_type="invalid_user_data_dir",
+                    status="error",
+                    profile_name=profile_name,
+                    note="user_data_dir must resolve within the repository root",
+                )
             os.makedirs(resolved_user_data_dir, exist_ok=True)
             context = await p.chromium.launch_persistent_context(
                 str(resolved_user_data_dir),
@@ -148,15 +160,17 @@ async def capture_auth_session(
                     pass
 
     if not captured:
-        return {
-            "status": "timeout",
-            "profile_name": profile_name,
-            "error": "No successful login detected within timeout.",
-            "error_type": "auth_capture_timeout",
-            "note": (
-                "No successful login detected within timeout. Check success_url_pattern or increase timeout_secs."
-            ),
-        }
+        _msg = "No successful login detected within timeout."
+        _note = "No successful login detected within timeout. Check success_url_pattern or increase timeout_secs."
+        return tool_error(
+            _msg,
+            BLOP_AUTH_CAPTURE_TIMEOUT,
+            details={"error_type": "auth_capture_timeout"},
+            status="timeout",
+            profile_name=profile_name,
+            note=_note,
+            error_type="auth_capture_timeout",
+        )
 
     # Upsert auth profile in SQLite as storage_state type
     profile = AuthProfile(

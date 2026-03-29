@@ -8,6 +8,7 @@ from typing import Optional
 
 from blop.config import BLOP_DISCOVERY_MAX_PAGES, validate_app_url
 from blop.engine import discovery
+from blop.engine.errors import BLOP_URL_VALIDATION_FAILED, BLOP_VALIDATION_FAILED, tool_error
 from blop.schemas import CriticalJourney
 from blop.storage import sqlite
 
@@ -48,7 +49,7 @@ async def discover_critical_journeys(
     """
     url_err = validate_app_url(app_url)
     if url_err:
-        return {"error": url_err}
+        return tool_error(url_err, BLOP_URL_VALIDATION_FAILED)
     for param_name, pattern in [
         ("include_url_pattern", include_url_pattern),
         ("exclude_url_pattern", exclude_url_pattern),
@@ -57,7 +58,7 @@ async def discover_critical_journeys(
             try:
                 re.compile(pattern)
             except re.error as exc:
-                return {"error": f"Invalid {param_name}: {exc}"}
+                return tool_error(f"Invalid {param_name}: {exc}", BLOP_VALIDATION_FAILED, details={"param": param_name})
 
     result = await discovery.discover_flows(
         app_url=app_url,

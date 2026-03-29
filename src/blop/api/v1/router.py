@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from blop import config
 from blop.api.v1.deps import require_v1_api_key
+from blop.api.v1.rate_limit import LLM_HEAVY_ROUTE_LIMIT, http_limiter
 from blop.api.v1.schemas import (
     ArtifactItemOut,
     ArtifactListOut,
@@ -119,6 +120,7 @@ async def register_release(body: ReleaseRegisterRequest) -> ReleaseOut:
 
 
 @router.post("/releases/{release_id}/checks", response_model=CheckCreatedOut)
+@http_limiter.limit(LLM_HEAVY_ROUTE_LIMIT)
 async def create_check(
     release_id: str,
     body: CheckCreateRequest,

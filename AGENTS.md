@@ -164,3 +164,4 @@ Screenshots, traces, and console logs are in `runs/<type>/<run_id>/`. SQLite DB 
 - `run_release_check` is the flagship release-confidence entry point. In replay mode it returns immediately with a `run_id`; callers then poll `get_test_results`. Compatibility alias `run_regression_test` maps onto the same underlying replay path.
 - `business_criticality` (revenue, activation, retention, support, other) is stored on flows and cases; classifier and reporting use it for severity labels (e.g. "BLOCKER in revenue flow").
 - Exploration profile defaults are configurable via `BLOP_EXPLORATION_PROFILE` (`default`/`saas_marketing`) with override knobs for network idle, SPA settle, agent retries, and crawl page limits.
+- Tool/resource failures commonly return a string `error` plus structured `blop_error` (`code`, `message`, `retryable`, `details`); see `docs/DOC_CONTRACT.md` and `src/blop/engine/errors.py` (`tool_error`, `BlopError`).

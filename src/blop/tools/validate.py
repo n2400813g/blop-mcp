@@ -596,6 +596,9 @@ async def validate_release_setup(
                 f"Run the release-confidence check: run_release_check(app_url='{app_url}', flow_ids=['...'], mode='replay')"
             )
             canonical_steps.append(
+                f"Optional advisory preflight before replay: run_release_check(app_url='{app_url}', flow_ids=['...'], mode='replay', smoke_preflight=True)"
+            )
+            canonical_steps.append(
                 "When the run completes, inspect the brief and triage blockers: read blop://release/{release_id}/brief, then call triage_release_blocker(release_id='...') if needed"
             )
         else:

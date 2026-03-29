@@ -29,6 +29,14 @@ jobs:
           uv run ruff check src tests
           uv run ruff format --check src tests
 
+      - name: Run unit tests
+        run: |
+          uv run pytest tests/ \
+            --ignore=tests/integration \
+            --ignore=tests/performance \
+            -m "not slow" \
+            -q
+
       - name: Build distributions
         run: uv run --with build python -m build
 

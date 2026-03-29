@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from blop.config import validate_app_url
 from blop.engine import auth as auth_engine
 from blop.engine import recording
+from blop.engine.errors import BLOP_URL_VALIDATION_FAILED, BLOP_VALIDATION_FAILED, tool_error
 from blop.engine.flow_builder import build_recorded_flow
 from blop.engine.logger import get_logger
 from blop.engine.planner import build_execution_plan, build_intent_contract
@@ -120,11 +121,11 @@ async def record_test_flow(
 
     url_err = validate_app_url(app_url)
     if url_err:
-        return {"error": url_err}
+        return tool_error(url_err, BLOP_URL_VALIDATION_FAILED)
     if not flow_name or not flow_name.strip():
-        return {"error": "flow_name is required"}
+        return tool_error("flow_name is required", BLOP_VALIDATION_FAILED, details={"field": "flow_name"})
     if not goal or not goal.strip():
-        return {"error": "goal is required"}
+        return tool_error("goal is required", BLOP_VALIDATION_FAILED, details={"field": "goal"})
 
     planning_source = "explicit_goal"
     # If command provided, parse for additional intent context
@@ -238,6 +239,7 @@ async def record_test_flow(
         goal=goal,
         steps=steps,
         assertions_json=assertions_json,
+        api_expectations=recording.infer_api_expectations(goal),
         entry_url=entry_url,
         business_criticality=bc,
         spa_hints=spa_hints,
@@ -300,16 +302,22 @@ async def _record_mobile_flow(
     from blop.schemas import MobileDeviceTarget
 
     if not app_id or not app_id.strip():
-        return {"error": "app_url (app_id) is required for mobile flows (use bundle ID or package name)"}
+        return tool_error(
+            "app_url (app_id) is required for mobile flows (use bundle ID or package name)",
+            BLOP_VALIDATION_FAILED,
+            details={"field": "app_id"},
+        )
     if not flow_name or not flow_name.strip():
-        return {"error": "flow_name is required"}
+        return tool_error("flow_name is required", BLOP_VALIDATION_FAILED, details={"field": "flow_name"})
     if not goal or not goal.strip():
-        return {"error": "goal is required"}
+        return tool_error("goal is required", BLOP_VALIDATION_FAILED, details={"field": "goal"})
 
     try:
         target = MobileDeviceTarget(platform=platform, app_id=app_id, **mobile_target)
     except Exception as exc:
-        return {"error": f"Invalid mobile_target: {exc}"}
+        return tool_error(
+            f"Invalid mobile_target: {exc}", BLOP_VALIDATION_FAILED, details={"cause": type(exc).__name__}
+        )
 
     run_id = uuid.uuid4().hex
 
@@ -326,9 +334,13 @@ async def _record_mobile_flow(
             business_criticality=business_criticality,
         )
     except RuntimeError as exc:
-        return {"error": str(exc)}
+        return tool_error(str(exc), BLOP_VALIDATION_FAILED, details={"stage": "mobile_record"})
     except Exception as exc:
-        return {"error": f"Mobile recording failed: {exc}"}
+        return tool_error(
+            f"Mobile recording failed: {exc}",
+            BLOP_VALIDATION_FAILED,
+            details={"stage": "mobile_record", "cause": type(exc).__name__},
+        )
 
     await sqlite.save_flow(flow)
 

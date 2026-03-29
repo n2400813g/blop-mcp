@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import aiosqlite
 import pytest
 
+from blop.engine.errors import BlopError
 from blop.storage import sqlite
 
 
@@ -21,7 +22,7 @@ async def test_migrate_does_not_advance_version_on_non_duplicate_failure():
     db = _FakeDb(side_effect=RuntimeError("disk I/O error"))
     with patch("blop.storage.sqlite._get_schema_version", new=AsyncMock(return_value=16)):
         with patch("blop.storage.sqlite._set_schema_version", new=AsyncMock()) as set_version:
-            with pytest.raises(RuntimeError, match="Migration 17 failed"):
+            with pytest.raises(BlopError, match="Schema migration 17 failed"):
                 await sqlite._migrate(db)
 
     set_version.assert_not_awaited()

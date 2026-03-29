@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 
+from blop.engine.errors import BLOP_CODEGEN_FLOW_NOT_FOUND, tool_error
 from blop.schemas import FlowStep, RecordedFlow
 from blop.storage.files import codegen_path
 
@@ -203,7 +204,7 @@ async def export_flow_as_code(
 
     flow = await get_flow(flow_id)
     if not flow:
-        return {"error": f"Flow {flow_id} not found"}
+        return tool_error(f"Flow {flow_id} not found", BLOP_CODEGEN_FLOW_NOT_FOUND, details={"flow_id": flow_id})
 
     if language == "typescript":
         code = generate_typescript(flow)

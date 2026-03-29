@@ -172,7 +172,8 @@ async def test_record_flow_empty_flow_name():
         goal="Test goal",
     )
 
-    assert result == {"error": "flow_name is required"}
+    assert result.get("error") == "flow_name is required"
+    assert result.get("blop_error", {}).get("code") == "BLOP_VALIDATION_FAILED"
 
 
 @pytest.mark.asyncio
@@ -186,7 +187,8 @@ async def test_record_flow_empty_goal():
         goal="",
     )
 
-    assert result == {"error": "goal is required"}
+    assert result.get("error") == "goal is required"
+    assert result.get("blop_error", {}).get("code") == "BLOP_VALIDATION_FAILED"
 
 
 @pytest.mark.asyncio

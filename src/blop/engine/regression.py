@@ -12,9 +12,11 @@ import time
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 from urllib.parse import urlparse
 
+from blop.engine.api_verification import evaluate_api_expectations
 from blop.engine.browser_pool import BROWSER_POOL
 from blop.engine.evidence_policy import cap_artifact_paths, resolve_evidence_policy, should_capture_screenshot
 from blop.engine.logger import get_logger
+from blop.engine.semantic_query import evaluate_semantic_query
 from blop.schemas import FailureCase, RecordedFlow, ReplayStepResult, ReplayTrace, StabilityFingerprint
 from blop.storage import files as file_store
 
@@ -327,10 +329,22 @@ async def execute_recorded_flow(
 
     # Capture console errors
     page.on("console", lambda msg: trace.console_errors.append(msg.text) if msg.type == "error" else None)
-    page.on(
-        "response",
-        lambda resp: trace.network_errors.append(f"{resp.status} {resp.url}") if resp.status >= 500 else None,
-    )
+
+    def _capture_response(resp) -> None:
+        try:
+            observation = {
+                "url": resp.url,
+                "status": resp.status,
+                "method": resp.request.method,
+                "resource_type": resp.request.resource_type,
+            }
+            trace.network_observations.append(observation)
+            if resp.status >= 500:
+                trace.network_errors.append(f"{resp.status} {resp.url}")
+        except Exception:
+            _log.debug("capture response failed", exc_info=True)
+
+    page.on("response", _capture_response)
 
     try:
         deferred_asserts: list[tuple[int, object]] = []  # (step_idx, step) for assert steps
@@ -455,16 +469,9 @@ async def execute_recorded_flow(
             assertion_eval_results = await _evaluate_assertions(page, deferred_asserts)
             for result in assertion_eval_results:
                 step_obj = result["step"]
-                passed = result["passed"]
-                eval_type = result["eval_type"]
-                trace.assertion_results.append(
-                    {
-                        "assertion": step_obj.value or step_obj.description,
-                        "passed": passed,
-                        "eval_type": eval_type,
-                        **({"failed": True} if not passed else {}),
-                    }
-                )
+                passed = result.get("passed", False)
+                eval_type = result.get("eval_type", "unknown")
+                trace.assertion_results.append({k: v for k, v in result.items() if k != "step"})
                 trace.step_results.append(
                     ReplayStepResult(
                         step_id=step_obj.step_id,
@@ -473,6 +480,9 @@ async def execute_recorded_flow(
                         replay_mode=eval_type,
                     )
                 )
+
+        if getattr(flow, "api_expectations", None):
+            trace.api_verification_results = evaluate_api_expectations(flow, trace.network_observations)
 
         # Take final screenshot
         try:
@@ -1158,6 +1168,13 @@ async def _evaluate_assertions(page: "Page", deferred_asserts: list) -> list[dic
             semantic_batch.append((step_obj, text))
             continue
 
+        if sa.assertion_type == "semantic_query":
+            try:
+                results.append({"step": step_obj, **(await evaluate_semantic_query(page, sa))})
+            except Exception:
+                semantic_batch.append((step_obj, text))
+            continue
+
         try:
             passed = await _eval_deterministic(page, sa)
         except Exception:
@@ -1165,7 +1182,15 @@ async def _evaluate_assertions(page: "Page", deferred_asserts: list) -> list[dic
             semantic_batch.append((step_obj, text))
             continue
 
-        results.append({"step": step_obj, "passed": passed, "eval_type": sa.assertion_type})
+        results.append(
+            {
+                "step": step_obj,
+                "assertion": text,
+                "passed": passed,
+                "eval_type": sa.assertion_type,
+                **({"failed": True} if not passed else {}),
+            }
+        )
 
     # Batch evaluate remaining semantic assertions in a single vision call
     if semantic_batch:
@@ -1175,16 +1200,43 @@ async def _evaluate_assertions(page: "Page", deferred_asserts: list) -> list[dic
         try:
             vision_results = await assert_all_by_vision(page, texts)
             for (step_obj, _), passed in zip(semantic_batch, vision_results):
-                results.append({"step": step_obj, "passed": passed, "eval_type": "vision_batch"})
+                assertion = step_obj.value or step_obj.description
+                results.append(
+                    {
+                        "step": step_obj,
+                        "assertion": assertion,
+                        "passed": passed,
+                        "eval_type": "vision_batch",
+                        **({"failed": True} if not passed else {}),
+                    }
+                )
         except Exception as e:
             _e = str(e).lower()
             if "429" in _e or "quota" in _e or "resource_exhausted" in _e or "rate" in _e:
                 # Quota/rate-limit error — mark assertions as failed (not silently passed)
                 for step_obj, _ in semantic_batch:
-                    results.append({"step": step_obj, "passed": False, "eval_type": "quota_error"})
+                    assertion = step_obj.value or step_obj.description
+                    results.append(
+                        {
+                            "step": step_obj,
+                            "assertion": assertion,
+                            "passed": False,
+                            "eval_type": "quota_error",
+                            "failed": True,
+                        }
+                    )
             else:
                 for step_obj, _ in semantic_batch:
-                    results.append({"step": step_obj, "passed": False, "eval_type": "vision_batch"})
+                    assertion = step_obj.value or step_obj.description
+                    results.append(
+                        {
+                            "step": step_obj,
+                            "assertion": assertion,
+                            "passed": False,
+                            "eval_type": "vision_batch",
+                            "failed": True,
+                        }
+                    )
 
     return results
 
@@ -1245,12 +1297,20 @@ def _trace_to_failure_case(
 ) -> FailureCase:
     """Convert a ReplayTrace to a FailureCase."""
     assertion_failures = [r["assertion"] for r in trace.assertion_results if not r.get("passed", True)]
+    api_verification_failures = [
+        str(result.get("expectation", "api_expectation"))
+        for result in trace.api_verification_results
+        if not result.get("passed", True) and result.get("required", True)
+    ]
+    assertion_failures.extend([f"API expectation failed: {name}" for name in api_verification_failures])
     failed_steps = [r for r in trace.step_results if r.status == "fail"]
     failure_reason_codes = sorted({r.failure_reason for r in failed_steps if r.failure_reason})
+    if api_verification_failures:
+        failure_reason_codes = sorted(set([*failure_reason_codes, "api_expectation_failed"]))
 
     if trace.network_errors:
         status: str = "fail"
-    elif assertion_failures or failed_steps:
+    elif assertion_failures or failed_steps or api_verification_failures:
         status = "fail"
     else:
         status = "pass"
@@ -1334,6 +1394,8 @@ def _trace_to_failure_case(
         repro_steps=repro,
         console_errors=trace.console_errors[:20],
         network_errors=trace.network_errors[:20],
+        api_verification_results=trace.api_verification_results,
+        api_verification_failures=api_verification_failures,
         screenshots=trace.screenshots,
         raw_result=trace.raw_result,
         replay_mode=trace.run_mode,

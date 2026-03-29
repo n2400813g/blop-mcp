@@ -25,6 +25,8 @@ extras. Logging is disabled before other imports so stdio JSON-RPC stays clean.
 
 import logging
 import os
+import sqlite3
+import uuid
 from importlib import import_module
 from pathlib import Path
 from urllib.parse import unquote
@@ -36,6 +38,7 @@ os.environ.setdefault("BROWSER_USE_LOGGING_LEVEL", "CRITICAL")
 
 # blop logger bypasses logging.disable via explicit _logger.disabled = False
 from blop.engine.logger import get_logger as _get_blop_logger  # noqa: E402
+from blop.engine.logger import request_id_var  # noqa: E402
 
 _log = _get_blop_logger("server")
 
@@ -45,6 +48,14 @@ from mcp.server.fastmcp import FastMCP
 
 from blop import capabilities as capability_flags
 from blop.config import BLOP_DISCOVERY_MAX_PAGES
+from blop.engine.errors import (
+    BLOP_CAPABILITY_DISABLED,
+    BLOP_MCP_INTERNAL_TOOL_ERROR,
+    BLOP_RUN_NOT_FOUND,
+    BlopError,
+    blop_error_from_sqlite,
+    tool_error,
+)
 from blop.schemas import ReleaseReference, TelemetrySignalInput
 
 
@@ -116,6 +127,7 @@ resources_tools = _lazy_module("blop.tools.resources")
 triage_tools = _lazy_module("blop.tools.triage")
 prompts_tools = _lazy_module("blop.tools.prompts")
 process_insights_tools = _lazy_module("blop.tools.process_insights")
+qa_advisor_tools = _lazy_module("blop.tools.qa_advisor")
 
 mcp = FastMCP("blop")
 
@@ -123,48 +135,65 @@ mcp = FastMCP("blop")
 def _ensure_compat_enabled(tool_name: str) -> Optional[dict]:
     if capability_flags.is_tool_enabled(tool_name):
         return None
-    return {
-        "error": (
+    return tool_error(
+        (
             f"Tool '{tool_name}' is disabled by capabilities. "
             "Enable BLOP_CAPABILITIES=...,compat_browser to use Playwright-compatible browser_* tools."
-        )
-    }
+        ),
+        BLOP_CAPABILITY_DISABLED,
+        details={"tool": tool_name},
+    )
 
 
 async def _safe_call(handler, /, tool_name: Optional[str] = None, **kwargs) -> dict:
     """Standardized error envelope for MCP tool handlers."""
+    rid = uuid.uuid4().hex[:12]
+    token = request_id_var.set(rid)
     try:
-        return await handler(**kwargs)
-    except Exception as e:
-        _tool = tool_name or getattr(handler, "__qualname__", str(handler))
-        _log.error(
-            "tool_exception tool=%s error_type=%s",
-            _tool,
-            type(e).__name__,
-            extra={
-                "event": "tool_exception",
-                "tool": _tool,
-                "error_type": type(e).__name__,
-                "error": str(e),
-                "run_id": kwargs.get("run_id"),
-                "flow_id": kwargs.get("flow_id"),
-                "case_id": kwargs.get("case_id"),
-                "profile_name": kwargs.get("profile_name"),
-            },
-            exc_info=True,
-        )
-        payload = {
-            "error": (
-                f"Tool '{_tool}' encountered an internal error. Check the configured BLOP_DEBUG_LOG for details."
-            ),
-            "error_type": type(e).__name__,
-            "tool": _tool,
-        }
-        for key in ("run_id", "flow_id", "case_id"):
-            value = kwargs.get(key)
-            if isinstance(value, str) and value:
-                payload[key] = value
-        return payload
+        try:
+            result = await handler(**kwargs)
+        except BlopError as e:
+            result = e.to_merged_response()
+        except sqlite3.Error as e:
+            # aiosqlite.Error subclasses sqlite3.Error
+            result = blop_error_from_sqlite(e).to_merged_response()
+        except Exception as e:
+            _tool = tool_name or getattr(handler, "__qualname__", str(handler))
+            _log.error(
+                "tool_exception tool=%s error_type=%s",
+                _tool,
+                type(e).__name__,
+                extra={
+                    "event": "tool_exception",
+                    "tool": _tool,
+                    "error_type": type(e).__name__,
+                    "error": str(e),
+                    "run_id": kwargs.get("run_id"),
+                    "flow_id": kwargs.get("flow_id"),
+                    "case_id": kwargs.get("case_id"),
+                    "profile_name": kwargs.get("profile_name"),
+                },
+                exc_info=True,
+            )
+            payload = tool_error(
+                (f"Tool '{_tool}' encountered an internal error. Check the configured BLOP_DEBUG_LOG for details."),
+                BLOP_MCP_INTERNAL_TOOL_ERROR,
+                details={"error_type": type(e).__name__, "tool": _tool},
+                error_type=type(e).__name__,
+                tool=_tool,
+                request_id=rid,
+            )
+            for key in ("run_id", "flow_id", "case_id"):
+                value = kwargs.get(key)
+                if isinstance(value, str) and value:
+                    payload[key] = value
+            return payload
+        if isinstance(result, dict):
+            result = dict(result)
+            result.setdefault("request_id", rid)
+        return result
+    finally:
+        request_id_var.reset(token)
 
 
 async def _safe_compat_call(tool_name: str, handler, /, **kwargs) -> dict:
@@ -422,7 +451,7 @@ async def list_auth_profiles() -> dict:
         profiles = await sqlite.list_auth_profiles()
         return {"profiles": profiles, "total": len(profiles)}
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 @mcp.tool()
@@ -1142,7 +1171,7 @@ async def cancel_run(run_id: str) -> dict:
     async def _cancel_handler() -> dict:
         run = await sqlite.get_run(run_id)
         if not run:
-            return {"error": f"Run {run_id} not found"}
+            return tool_error(f"Run {run_id} not found", BLOP_RUN_NOT_FOUND, details={"run_id": run_id})
         prev_status = run.get("status", "unknown")
         if prev_status in ("completed", "failed", "cancelled"):
             return {
@@ -1293,7 +1322,7 @@ async def compare_visual_baseline(
 
         return await _compare(flow_id, step_index)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 @mcp.tool()
@@ -1374,7 +1403,7 @@ async def list_recorded_tests() -> dict:
         flows = await list_flows()
         return RecordedTestsResult(flows=flows, total=len(flows)).model_dump()
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 @mcp.tool()
@@ -1395,7 +1424,7 @@ async def debug_test_case(run_id: str, case_id: str) -> dict:
     try:
         return await debug.debug_test_case(run_id, case_id)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 @_if_legacy
@@ -1424,7 +1453,7 @@ async def validate_setup(
             check_mobile=check_mobile,
         )
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 # ---------------------------------------------------------------------------
@@ -1450,7 +1479,7 @@ async def verify_element_visible(
     try:
         return await assertions_tools.verify_element_visible(app_url, role, accessible_name, profile_name)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 @_if_compat
@@ -1469,7 +1498,7 @@ async def verify_text_visible(
     try:
         return await assertions_tools.verify_text_visible(app_url, text, profile_name)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 @_if_compat
@@ -1490,7 +1519,7 @@ async def verify_value(
     try:
         return await assertions_tools.verify_value(app_url, selector, expected_value, profile_name)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 @_if_compat
@@ -1509,7 +1538,32 @@ async def verify_visual_state(
     try:
         return await assertions_tools.verify_visual_state(app_url, description, profile_name)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
+
+
+@_if_compat
+async def verify_semantic_query(
+    app_url: str,
+    query: str,
+    expected: Optional[str] = None,
+    profile_name: Optional[str] = None,
+    target_selector: Optional[str] = None,
+    target_role: Optional[str] = None,
+    target_name: Optional[str] = None,
+) -> dict:
+    """Verify a semantic assertion against the current page using accessibility/DOM extraction first."""
+    try:
+        return await assertions_tools.verify_semantic_query(
+            app_url,
+            query,
+            expected,
+            profile_name,
+            target_selector,
+            target_role,
+            target_name,
+        )
+    except Exception as e:
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 @_if_compat
@@ -1531,7 +1585,7 @@ async def export_test_report(
 
         return await _export(run_id, format)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 # ---------------------------------------------------------------------------
@@ -1562,7 +1616,7 @@ async def security_scan(
     try:
         return await security_tools.security_scan(repo_path, scan_type, ruleset, severity_filter)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 @_if_compat
@@ -1584,7 +1638,7 @@ async def security_scan_url(
     try:
         return await security_tools.security_scan_url(app_url, scan_type)
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 # ---------------------------------------------------------------------------
@@ -2185,7 +2239,7 @@ async def blop_v2_archive_storage(
             result["telemetry"] = tel_result
         return result
     except Exception as e:
-        return {"error": str(e)}
+        return tool_error(str(e), BLOP_MCP_INTERNAL_TOOL_ERROR)
 
 
 # ---------------------------------------------------------------------------
@@ -2665,6 +2719,7 @@ async def get_mcp_capabilities() -> dict:
             "record_test_flow",
             "run_release_check",
             "triage_release_blocker",
+            "get_qa_recommendations",
         ],
         "context_tools": [
             "get_workspace_context",
@@ -2740,6 +2795,7 @@ async def run_release_check(
     release_id: Optional[str] = None,
     headless: bool = True,
     run_mode: str = "hybrid",
+    smoke_preflight: bool = False,
 ) -> dict:
     """Flagship release confidence tool: replay critical journeys and return a SHIP / INVESTIGATE / BLOCK decision.
 
@@ -2752,6 +2808,7 @@ async def run_release_check(
         criticality_filter: defaults to ["revenue", "activation"].
         release_id: optional caller-supplied release identifier (auto-generated if omitted).
         mode: "replay" (default, golden path for release gating) or "targeted" (one-shot eval).
+        smoke_preflight: Optional advisory smoke sweep before replay. Does not block the release on its own.
     """
     return await _safe_call(
         release_check_tools.run_release_check,
@@ -2765,6 +2822,7 @@ async def run_release_check(
         release_id=release_id,
         headless=headless,
         run_mode=run_mode,
+        smoke_preflight=smoke_preflight,
     )
 
 
@@ -2792,6 +2850,28 @@ async def triage_release_blocker(
         journey_id=journey_id,
         incident_cluster_id=incident_cluster_id,
         generate_remediation=generate_remediation,
+    )
+
+
+@mcp.tool()
+async def get_qa_recommendations(
+    app_url: str,
+    release_id: Optional[str] = None,
+    scope: Literal["full", "blockers_only", "coverage_gaps"] = "full",
+    lookback_runs: int = 10,
+) -> dict:
+    """QA-engineering view: test pyramid health, coverage gaps, flakiness signals, and prioritized recommendations.
+
+    Aggregates recorded journeys and recent run cases for app_url, then returns a RecommendationSet plus
+    embedded qa_context (risk matrix, defect mix, pyramid stats). Use scope to narrow the recommendation lists.
+    """
+    return await _safe_call(
+        qa_advisor_tools.get_qa_recommendations,
+        tool_name="get_qa_recommendations",
+        app_url=app_url,
+        release_id=release_id,
+        scope=scope,
+        lookback_runs=lookback_runs,
     )
 
 

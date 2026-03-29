@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from blop.schemas import FlowStep, IntentContract, RecordedFlow
+from blop.schemas import ApiExpectation, FlowStep, IntentContract, RecordedFlow, ReplayTrace
 
 
 def make_flow(flow_id: str = "flow1", goal: str = "Test the page") -> RecordedFlow:
@@ -242,10 +242,32 @@ async def test_run_flows_parallel():
                         run_id="run1",
                         storage_state=None,
                         headless=True,
+                        run_mode="goal_fallback",
                     )
 
     assert len(cases) == 3
     assert all(c.run_id == "run1" for c in cases)
+
+
+def test_trace_to_failure_case_marks_required_api_expectation_failures():
+    from blop.engine.regression import _trace_to_failure_case
+
+    flow = make_flow()
+    flow.api_expectations = [
+        ApiExpectation(name="checkout_api", url_contains="/api/checkout", required=True),
+        ApiExpectation(name="optional_save", url_contains="/api/save", required=False),
+    ]
+    trace = ReplayTrace(flow_id=flow.flow_id, flow_name=flow.flow_name, run_mode="strict_steps")
+    trace.api_verification_results = [
+        {"expectation": "checkout_api", "required": True, "passed": False},
+        {"expectation": "optional_save", "required": False, "passed": False},
+    ]
+
+    case = _trace_to_failure_case(trace, flow, "run1", "case1")
+
+    assert case.status == "fail"
+    assert case.api_verification_failures == ["checkout_api"]
+    assert "API expectation failed: checkout_api" in case.assertion_failures
 
 
 @pytest.mark.asyncio
@@ -293,6 +315,7 @@ async def test_run_flows_propagates_business_criticality():
                         run_id="run-rev",
                         storage_state=None,
                         headless=True,
+                        run_mode="goal_fallback",
                     )
 
     assert len(cases) == 1
@@ -333,6 +356,7 @@ async def test_run_flows_semaphore():
             run_id="run1",
             storage_state=None,
             headless=True,
+            run_mode="goal_fallback",
         )
 
     assert len(cases) == 10
@@ -372,6 +396,7 @@ async def test_run_flows_respects_replay_concurrency_override(monkeypatch):
             run_id="run1",
             storage_state=None,
             headless=True,
+            run_mode="goal_fallback",
         )
 
     assert len(cases) == 6
@@ -407,14 +432,12 @@ async def test_execute_recorded_flow_invalidates_cached_auth_on_blocked_result()
     mock_page.on = MagicMock()
     mock_page.screenshot = AsyncMock()
     mock_context = AsyncMock()
-    mock_context.new_page = AsyncMock(return_value=mock_page)
-    mock_browser = AsyncMock()
-    mock_browser.new_context = AsyncMock(return_value=mock_context)
-
-    mock_playwright = AsyncMock()
-    mock_playwright.__aenter__ = AsyncMock(return_value=mock_playwright)
-    mock_playwright.__aexit__ = AsyncMock(return_value=False)
-    mock_playwright.chromium.launch = AsyncMock(return_value=mock_browser)
+    mock_context.tracing.start = AsyncMock()
+    mock_context.tracing.stop = AsyncMock()
+    lease = MagicMock()
+    lease.context = mock_context
+    lease.page = mock_page
+    lease.close = AsyncMock()
 
     blocked_case = FailureCase(
         case_id="case-1",
@@ -424,17 +447,18 @@ async def test_execute_recorded_flow_invalidates_cached_auth_on_blocked_result()
         status="blocked",
     )
 
-    with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
+    with patch("blop.engine.regression.BROWSER_POOL.acquire", new_callable=AsyncMock, return_value=lease):
         with patch("blop.engine.browser.make_browser_profile"):
-            with patch("blop.engine.regression._trace_to_failure_case", return_value=blocked_case):
-                with patch("blop.engine.auth.invalidate_validated_session_cache") as invalidate_cache:
-                    result = await execute_recorded_flow(
-                        flow=flow,
-                        run_id="run-1",
-                        case_id="case-1",
-                        storage_state="/tmp/auth.json",
-                        headless=True,
-                    )
+            with patch("blop.tools.network.apply_routes_to_context", new_callable=AsyncMock):
+                with patch("blop.engine.regression._trace_to_failure_case", return_value=blocked_case):
+                    with patch("blop.engine.auth.invalidate_validated_session_cache") as invalidate_cache:
+                        result = await execute_recorded_flow(
+                            flow=flow,
+                            run_id="run-1",
+                            case_id="case-1",
+                            storage_state="/tmp/auth.json",
+                            headless=True,
+                        )
 
     assert result.status == "blocked"
     invalidate_cache.assert_called_once_with(storage_state_path="/tmp/auth.json")

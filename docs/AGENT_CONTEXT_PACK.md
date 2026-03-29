@@ -25,6 +25,11 @@ It also exposes integration points into the broader product thesis:
 - release resources and briefs,
 - governance and intelligence-oriented surfaces.
 
+Placement rule for new capabilities:
+- Keep execution primitives and local evidence generation in OSS.
+- Move shared state, collaboration, policy, and cross-run intelligence into hosted blop.
+- If a capability must still work when cloud services are unavailable, it should have an OSS-first runtime path.
+
 ## Canonical workflow
 
 Default release-confidence path:
