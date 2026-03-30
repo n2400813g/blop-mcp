@@ -66,3 +66,24 @@ class SyncClient:
         except Exception as exc:
             logger.warning("blop hosted sync failed (non-fatal): %s", exc)
             return False
+
+    async def push_artifacts(
+        self,
+        cloud_run_id: str,
+        artifacts: list[dict],
+    ) -> bool:
+        """Upload artifact references for a synced run. Never raises."""
+        if not self.hosted_url or not self.api_token:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    f"{self.hosted_url.rstrip('/')}/api/v1/sync/runs/{cloud_run_id}/artifacts",
+                    json={"artifacts": artifacts},
+                    headers={"Authorization": f"Bearer {self.api_token}"},
+                )
+                resp.raise_for_status()
+                return True
+        except Exception as exc:
+            logger.warning("blop hosted sync artifacts failed (non-fatal): %s", exc)
+            return False

@@ -58,3 +58,29 @@ async def test_probe_connection_validates_token(client):
     )
     ok = await client.probe_connection()
     assert ok is True
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_push_artifacts_uploads_artifact_list(client):
+    """push_artifacts posts evidence references to /api/v1/sync/runs/{id}/artifacts."""
+    run_id = "cloud-run-id-abc"
+    route = respx.post(f"{BASE}/api/v1/sync/runs/{run_id}/artifacts").mock(
+        return_value=httpx.Response(200, json={"stored": 2})
+    )
+    artifacts = [
+        {"artifact_key": "screenshot_step_001.png", "kind": "screenshot"},
+        {"artifact_key": "console.log", "kind": "console_log"},
+    ]
+    result = await client.push_artifacts(cloud_run_id=run_id, artifacts=artifacts)
+    assert result is True
+    assert route.called
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_push_artifacts_never_raises(client):
+    """push_artifacts is fire-and-forget; network errors must not raise."""
+    respx.post(f"{BASE}/api/v1/sync/runs/bad-id/artifacts").mock(side_effect=httpx.TimeoutException("timeout"))
+    result = await client.push_artifacts(cloud_run_id="bad-id", artifacts=[])
+    assert result is False
