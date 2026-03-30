@@ -134,6 +134,14 @@ def get_exploration_tuning() -> ExplorationTuning:
 def get_capture_policy() -> CapturePolicy:
     profile_name = os.getenv("BLOP_CAPTURE_PROFILE", "balanced").strip().lower()
     preset = _CAPTURE_PRESETS.get(profile_name, _CAPTURE_PRESETS["balanced"]).copy()
+    # A11y-first evidence: fewer automatic screenshots unless env explicitly sets capture flags.
+    if _env_bool("BLOP_A11Y_FIRST_EVIDENCE", False):
+        if os.getenv("BLOP_CAPTURE_NAV_SCREENSHOTS") is None:
+            preset["navigation_screenshots"] = False
+        if os.getenv("BLOP_CAPTURE_STEP_SCREENSHOTS") is None:
+            preset["step_screenshots"] = False
+        if os.getenv("BLOP_CAPTURE_PERIODIC_SCREENSHOTS") is None:
+            preset["periodic_screenshots"] = False
     preset["trace"] = _env_bool("BLOP_CAPTURE_TRACE", preset["trace"])
     preset["video"] = _env_bool("BLOP_CAPTURE_VIDEO", preset["video"])
     preset["periodic_screenshots"] = _env_bool(
@@ -261,8 +269,15 @@ BLOP_HOSTED_URL: str | None = os.getenv("BLOP_HOSTED_URL") or None  # e.g. https
 BLOP_API_TOKEN: str | None = os.getenv("BLOP_API_TOKEN") or None  # blop_sk_… workspace API token
 BLOP_PROJECT_ID: str | None = os.getenv("BLOP_PROJECT_ID") or None  # workspace project UUID
 
+# Runtime contract version sent with all sync payloads.
+# Must match SYNC_RUNTIME_CONTRACT_ALLOWED_VERSIONS on the cloud platform.
+BLOP_RUNTIME_CONTRACT_VERSION: str = os.getenv("BLOP_RUNTIME_CONTRACT_VERSION", "2026-03-29")
+
 # blop-http REST /v1 API (optional — same process as SSE server)
 BLOP_HTTP_API_KEY: str | None = os.getenv("BLOP_HTTP_API_KEY") or None
+# Optional workspace gate for hosted /v1 (requires matching headers on every request when token is set).
+BLOP_HTTP_WORKSPACE_ID: str = (os.getenv("BLOP_HTTP_WORKSPACE_ID") or "").strip()
+BLOP_HTTP_WORKSPACE_TOKEN: str = (os.getenv("BLOP_HTTP_WORKSPACE_TOKEN") or "").strip()
 # Optional public base URL for absolute links in JSON (e.g. https://blop.example.com). If unset, handlers use request.base_url.
 BLOP_HTTP_PUBLIC_BASE_URL: str = os.getenv("BLOP_HTTP_PUBLIC_BASE_URL", "").rstrip("/")
 
@@ -298,6 +313,23 @@ def hosted_sync_config_snapshot() -> dict:
         "project_id": BLOP_PROJECT_ID,
         "token_present": bool(BLOP_API_TOKEN),
     }
+
+
+def is_cloud_sync_configured() -> bool:
+    """Return True only when all three cloud sync vars are set."""
+    return bool(BLOP_HOSTED_URL and BLOP_API_TOKEN and BLOP_PROJECT_ID)
+
+
+def cloud_sync_missing_vars() -> list[str]:
+    """Return names of cloud sync vars that are unset."""
+    missing = []
+    if not BLOP_HOSTED_URL:
+        missing.append("BLOP_HOSTED_URL")
+    if not BLOP_API_TOKEN:
+        missing.append("BLOP_API_TOKEN")
+    if not BLOP_PROJECT_ID:
+        missing.append("BLOP_PROJECT_ID")
+    return missing
 
 
 def check_llm_api_key() -> tuple[bool, str]:

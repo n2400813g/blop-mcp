@@ -434,7 +434,7 @@ async def run_release_check(
                 blop_mcp_run_id=_run_id,
                 project_id=_project_id,
                 url=request.app_url,
-                runtime_contract_version=getattr(_config, "BLOP_RUNTIME_CONTRACT_VERSION", "2026-03-29"),
+                runtime_contract_version=_config.BLOP_RUNTIME_CONTRACT_VERSION,
                 blop_mcp_release_id=release_id,
                 environment=_config.BLOP_ENV if hasattr(_config, "BLOP_ENV") else "production",
                 run_cases=[

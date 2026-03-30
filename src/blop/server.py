@@ -456,8 +456,8 @@ async def list_auth_profiles() -> dict:
 
 @mcp.tool()
 async def evaluate_web_task(
-    app_url: str,
     task: str,
+    app_url: Optional[str] = None,
     profile_name: Optional[str] = None,
     headless: bool = False,
     max_steps: int = 25,
@@ -473,8 +473,8 @@ async def evaluate_web_task(
     to discover/record/replay first.
 
     Args:
-        app_url: The website URL to evaluate
         task: Natural-language description of what to test (e.g. "Try the signup flow and note UX issues")
+        app_url: The website URL to evaluate. Omitted when APP_BASE_URL is set in the server environment.
         profile_name: Optional auth profile name for authenticated pages
         headless: Run browser in headless mode (default: False — shows the browser)
         max_steps: Maximum agent steps (default: 25)
@@ -489,8 +489,8 @@ async def evaluate_web_task(
     """
     return await _safe_call(
         evaluate_tools.evaluate_web_task,
-        app_url=app_url,
         task=task,
+        app_url=app_url,
         profile_name=profile_name,
         headless=headless,
         max_steps=max_steps,
@@ -1195,9 +1195,9 @@ async def cancel_run(run_id: str) -> dict:
 
 @mcp.tool()
 async def record_test_flow(
-    app_url: str,
     flow_name: str,
     goal: str,
+    app_url: Optional[str] = None,
     profile_name: Optional[str] = None,
     command: Optional[str] = None,
     business_criticality: Optional[str] = "other",
@@ -1208,9 +1208,10 @@ async def record_test_flow(
     screenshots, and generates final assertion steps from a Gemini screenshot analysis.
 
     Args:
-        app_url: The website URL to test
         flow_name: Short name for this flow (used as identifier)
         goal: Plain-English description of what to accomplish
+        app_url: Website URL (or mobile package/bundle id when platform is ios/android).
+            May be omitted when APP_BASE_URL is set in the server environment (web only).
         profile_name: Optional auth profile name (from save_auth_profile)
         command: Optional natural language command for additional context
         business_criticality: "revenue" | "activation" | "retention" | "support" | "other"
@@ -1220,9 +1221,9 @@ async def record_test_flow(
     """
     return await _safe_call(
         record.record_test_flow,
-        app_url=app_url,
         flow_name=flow_name,
         goal=goal,
+        app_url=app_url,
         profile_name=profile_name,
         command=command,
         business_criticality=business_criticality or "other",
@@ -1231,9 +1232,9 @@ async def record_test_flow(
 
 @mcp.tool()
 async def package_authenticated_saas_baseline(
-    app_url: str,
     baseline_name: str,
     recipes: list[dict],
+    app_url: Optional[str] = None,
     profile_name: Optional[str] = None,
 ) -> dict:
     """Package reusable authenticated SaaS goldens into strict-step release-gate flows.
@@ -1253,9 +1254,9 @@ async def package_authenticated_saas_baseline(
     return await _safe_call(
         baselines_tools.package_authenticated_saas_baseline,
         tool_name="package_authenticated_saas_baseline",
-        app_url=app_url,
         baseline_name=baseline_name,
         recipes=recipes,
+        app_url=app_url,
         profile_name=profile_name,
     )
 
@@ -2303,6 +2304,12 @@ async def run_artifact_index_resource(run_id: str) -> dict:
     return await results.get_artifact_index_resource(run_id)
 
 
+@mcp.resource("blop://run/{run_id}/artifacts")
+async def run_artifacts_alias_resource(run_id: str) -> dict:
+    """Alias of blop://run/{run_id}/artifact-index for cloud/client parity."""
+    return await results.get_artifact_index_resource(run_id)
+
+
 @mcp.resource("blop://run/{run_id}/mobile_artifacts")
 async def run_mobile_artifacts_resource(run_id: str) -> dict:
     """Mobile replay evidence: screenshots, page_source paths, device logs (per run case)."""
@@ -2653,8 +2660,8 @@ def quick_web_eval() -> str:
 
 2. Evaluate the app with a natural-language task:
    evaluate_web_task(
-     app_url="https://your-app.com",
      task="Try the full signup flow and report any UX issues",
+     app_url="https://your-app.com",  # optional if APP_BASE_URL is set
      profile_name="myapp"  # optional
    )
 
@@ -2663,8 +2670,8 @@ def quick_web_eval() -> str:
 
 3. If the evaluation looks good, promote it to a regression test:
    evaluate_web_task(
-     app_url="https://your-app.com",
      task="Complete checkout with a test product",
+     app_url="https://your-app.com",
      save_as_recorded_flow=True,
      flow_name="checkout_flow"
    )
@@ -2755,7 +2762,7 @@ async def validate_release_setup(
 
 @mcp.tool()
 async def discover_critical_journeys(
-    app_url: str,
+    app_url: Optional[str] = None,
     profile_name: Optional[str] = None,
     business_goal: Optional[str] = None,
     max_depth: int = 2,
@@ -2769,6 +2776,8 @@ async def discover_critical_journeys(
     Returns CriticalJourney objects with why_it_matters and include_in_release_gating fields
     so you can immediately scope which journeys gate a release. Revenue and activation journeys
     are automatically flagged for release gating.
+
+    app_url may be omitted when APP_BASE_URL (or BLOP_APP_URL) is set in the server environment.
     """
     return await _safe_call(
         journeys_tools.discover_critical_journeys,
@@ -2786,7 +2795,7 @@ async def discover_critical_journeys(
 
 @mcp.tool()
 async def run_release_check(
-    app_url: str,
+    app_url: Optional[str] = None,
     journey_ids: Optional[list[str]] = None,
     flow_ids: Optional[list[str]] = None,
     profile_name: Optional[str] = None,
@@ -2803,6 +2812,7 @@ async def run_release_check(
     In targeted mode, runs a one-shot agent evaluation synchronously as a shortcut smoke check.
 
     Args:
+        app_url: Web URL or mobile package/bundle id. May be omitted when APP_BASE_URL is set (web only).
         journey_ids: deprecated alias for flow_ids.
         flow_ids: recorded flow IDs to replay. If omitted, uses all flows matching criticality_filter.
         criticality_filter: defaults to ["revenue", "activation"].
@@ -2855,7 +2865,7 @@ async def triage_release_blocker(
 
 @mcp.tool()
 async def get_qa_recommendations(
-    app_url: str,
+    app_url: Optional[str] = None,
     release_id: Optional[str] = None,
     scope: Literal["full", "blockers_only", "coverage_gaps"] = "full",
     lookback_runs: int = 10,
@@ -2864,6 +2874,8 @@ async def get_qa_recommendations(
 
     Aggregates recorded journeys and recent run cases for app_url, then returns a RecommendationSet plus
     embedded qa_context (risk matrix, defect mix, pyramid stats). Use scope to narrow the recommendation lists.
+
+    app_url may be omitted when APP_BASE_URL (or BLOP_APP_URL) is set in the server environment.
     """
     return await _safe_call(
         qa_advisor_tools.get_qa_recommendations,
@@ -2965,12 +2977,23 @@ async def navigate_to_journey(journey_id: str, profile_name: Optional[str] = Non
 
 @mcp.tool()
 async def get_page_snapshot(selector: Optional[str] = None, filename: Optional[str] = None) -> dict:
-    """Compact interactive DOM snapshot (ARIA-ish) for the current page."""
+    """Compact interactive listing from the Playwright accessibility tree (legacy name; prefer get_page_state)."""
     return await _safe_call(
         atomic_browser_tools.get_page_snapshot,
         tool_name="get_page_snapshot",
         selector=selector,
         filename=filename,
+    )
+
+
+@mcp.tool()
+async def get_page_state(include_markdown: bool = True, max_nodes: int = 250) -> dict:
+    """Structured a11y-first page state: roles, names, refs, optional markdown (primary observation surface)."""
+    return await _safe_call(
+        atomic_browser_tools.get_page_state,
+        tool_name="get_page_state",
+        include_markdown=include_markdown,
+        max_nodes=max_nodes,
     )
 
 
@@ -3061,7 +3084,16 @@ def run() -> int:
     import asyncio
     import signal
 
-    from blop.config import BLOP_DB_PATH, BLOP_DEBUG_LOG, check_llm_api_key, runtime_config_issues
+    from blop.config import (
+        BLOP_API_TOKEN,
+        BLOP_DB_PATH,
+        BLOP_DEBUG_LOG,
+        BLOP_HOSTED_URL,
+        BLOP_PROJECT_ID,
+        check_llm_api_key,
+        cloud_sync_missing_vars,
+        runtime_config_issues,
+    )
     from blop.storage import files as file_store
 
     def _check_writable(path: Path, *, as_file: bool = False) -> str | None:
@@ -3099,6 +3131,17 @@ def run() -> int:
         return 1
 
     asyncio.run(sqlite.init_db())
+
+    # Warn if cloud sync is partially configured (only some vars set)
+    _sync_vars_set = [v for v in [BLOP_HOSTED_URL, BLOP_API_TOKEN, BLOP_PROJECT_ID] if v]
+    if 0 < len(_sync_vars_set) < 3:
+        _log.warning(
+            "startup event=partial_cloud_sync_config "
+            "Partial cloud sync config detected. Runs will NOT sync to Blop Cloud. "
+            "Missing: %s",
+            cloud_sync_missing_vars(),
+        )
+
     try:
         resume_summary = asyncio.run(regression.resume_incomplete_runs())
         if resume_summary.get("resumed", 0):
