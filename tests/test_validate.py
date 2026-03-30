@@ -257,15 +257,7 @@ async def test_validate_reports_hosted_sync_connection_when_configured():
     mock_playwright.chromium.launch.return_value = mock_browser
 
     mock_sync_client = MagicMock()
-    mock_sync_client.probe_connection = AsyncMock(
-        return_value={
-            "status": "ok",
-            "workspace_id": "ws_123",
-            "token_scope": "project",
-            "requested_project_id": "proj_123",
-            "token_project_id": "proj_123",
-        }
-    )
+    mock_sync_client.probe_connection = AsyncMock(return_value=True)
 
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
         with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
@@ -283,11 +275,13 @@ async def test_validate_reports_hosted_sync_connection_when_configured():
                     },
                 ):
                     with patch("blop.sync.client.SyncClient", return_value=mock_sync_client):
-                        result = await validate_setup()
+                        with patch("blop.tools.validate.BLOP_PROJECT_ID", "proj_123"):
+                            result = await validate_setup()
 
     hosted_check = next(c for c in result["checks"] if c["name"] == "hosted_sync_connection")
     assert hosted_check["passed"] is True
-    assert "workspace" in hosted_check["message"]
+    assert "Blop Cloud" in hosted_check["message"]
+    assert "proj_123" in hosted_check["message"]
 
 
 @pytest.mark.asyncio
@@ -352,7 +346,11 @@ async def test_validate_release_setup_delegates_to_validate_setup():
     mock_playwright.__aexit__ = AsyncMock(return_value=False)
     mock_playwright.chromium.launch.return_value = mock_browser
 
-    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+    with patch.dict(
+        os.environ,
+        {"GOOGLE_API_KEY": "test_key", "APP_BASE_URL": "", "BLOP_APP_URL": ""},
+        clear=False,
+    ):
         with patch("playwright.async_api.async_playwright", return_value=mock_playwright):
             with patch("blop.storage.sqlite.init_db", new_callable=AsyncMock):
                 result_setup = await validate_setup()

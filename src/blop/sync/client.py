@@ -1,13 +1,39 @@
 """Fire-and-forget HTTP sync client for pushing blop-mcp run results to hosted blop."""
 
+from __future__ import annotations
+
 import dataclasses
 import logging
+from pathlib import Path
 
 import httpx
 
 from blop.sync.models import SyncRunPayload
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_artifact_upload(item: dict) -> dict[str, str]:
+    """Map a flexible artifact dict to hosted ``ArtifactUploadRequest`` fields."""
+    path = (item.get("path") or "").strip()
+    artifact_key = (item.get("artifact_key") or "").strip()
+    if not artifact_key:
+        artifact_key = Path(path).name if path else str(item.get("artifact_id") or "artifact")
+    artifact_type = str(item.get("artifact_type") or item.get("kind") or "artifact")
+    storage_url = (item.get("storage_url") or "").strip()
+    if not storage_url:
+        if path:
+            try:
+                storage_url = Path(path).expanduser().resolve().as_uri()
+            except OSError:
+                storage_url = path
+        else:
+            storage_url = f"blop-mcp-local://artifact/{artifact_key}"
+    return {
+        "artifact_type": artifact_type,
+        "artifact_key": artifact_key,
+        "storage_url": storage_url,
+    }
 
 
 class SyncClient:
@@ -47,13 +73,15 @@ class SyncClient:
             logger.warning("blop hosted sync probe failed (non-fatal): %s", exc)
             return False
 
-    async def push_run(self, payload: SyncRunPayload) -> bool:
+    async def push_run(self, payload: SyncRunPayload) -> str | None:
         """
         Push a run result to the hosted platform.
-        Returns True on success, False if not configured or on any error.
+
+        Returns the cloud ``test_run_id`` string on success, or ``None`` if sync is
+        not configured or the request fails.
         """
         if not self.hosted_url or not self.api_token:
-            return False
+            return None
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.post(
@@ -62,28 +90,35 @@ class SyncClient:
                     headers={"Authorization": f"Bearer {self.api_token}"},
                 )
                 resp.raise_for_status()
-                return True
+                body = resp.json()
+                tid = body.get("test_run_id")
+                return str(tid) if tid is not None else None
         except Exception as exc:
             logger.warning("blop hosted sync failed (non-fatal): %s", exc)
-            return False
+            return None
 
     async def push_artifacts(
         self,
         cloud_run_id: str,
         artifacts: list[dict],
     ) -> bool:
-        """Upload artifact references for a synced run. Never raises."""
+        """Upload artifact references for a synced run (one POST per item). Never raises."""
         if not self.hosted_url or not self.api_token:
             return False
+        if not artifacts:
+            return True
+        url_base = f"{self.hosted_url.rstrip('/')}/api/v1/sync/runs/{cloud_run_id}/artifacts"
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(
-                    f"{self.hosted_url.rstrip('/')}/api/v1/sync/runs/{cloud_run_id}/artifacts",
-                    json={"artifacts": artifacts},
-                    headers={"Authorization": f"Bearer {self.api_token}"},
-                )
-                resp.raise_for_status()
-                return True
+            async with httpx.AsyncClient(timeout=30) as client:
+                for raw in artifacts:
+                    body = _normalize_artifact_upload(raw)
+                    resp = await client.post(
+                        url_base,
+                        json=body,
+                        headers={"Authorization": f"Bearer {self.api_token}"},
+                    )
+                    resp.raise_for_status()
+            return True
         except Exception as exc:
             logger.warning("blop hosted sync artifacts failed (non-fatal): %s", exc)
             return False

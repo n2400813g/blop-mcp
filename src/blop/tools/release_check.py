@@ -451,7 +451,19 @@ async def run_release_check(
             )
             import asyncio as _asyncio
 
-            _asyncio.create_task(_sync_client.push_run(_sync_payload))
+            async def _sync_to_hosted() -> None:
+                try:
+                    cloud_run_id = await _sync_client.push_run(_sync_payload)
+                    if not cloud_run_id or not _run_id:
+                        return
+                    artifact_rows = await sqlite.list_artifacts_for_run(_run_id)
+                    if not artifact_rows:
+                        return
+                    await _sync_client.push_artifacts(cloud_run_id, artifact_rows)
+                except Exception as _sync_exc:
+                    _log.warning("Hosted artifact sync failed (non-fatal): %s", _sync_exc)
+
+            _asyncio.create_task(_sync_to_hosted())
     except Exception as _exc:
         _log.warning("Failed to schedule blop sync: %s", _exc)
 

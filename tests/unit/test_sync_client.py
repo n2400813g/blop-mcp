@@ -53,8 +53,7 @@ async def test_sync_posts_to_endpoint():
             )
         )
 
-    assert result is not None
-    assert result["status"] == "completed"
+    assert result == "uuid-123"
 
 
 async def test_sync_does_not_raise_on_http_error():
@@ -91,8 +90,7 @@ async def test_probe_connection_hits_connection_endpoint():
     with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=mock_response)):
         result = await client.probe_connection("proj_123")
 
-    assert result is not None
-    assert result["status"] == "ok"
+    assert result is True
 
 
 async def test_probe_connection_returns_none_on_failure():
@@ -102,4 +100,4 @@ async def test_probe_connection_returns_none_on_failure():
     with patch("httpx.AsyncClient.get", new=AsyncMock(side_effect=Exception("401"))):
         result = await client.probe_connection("proj_123")
 
-    assert result is None
+    assert result is False

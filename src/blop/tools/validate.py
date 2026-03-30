@@ -18,6 +18,7 @@ from blop.config import (
     runtime_posture_snapshot,
     validate_app_url,
 )
+from blop.mcp.tool_args import merge_app_url_from_env
 from blop.schemas import TelemetrySignal
 from blop.stability import build_validation_stability_readiness, classify_validation_issue
 
@@ -170,6 +171,7 @@ async def validate_setup(
     profile_name: Optional[str] = None,
     check_mobile: bool = False,
 ) -> dict:
+    app_url = merge_app_url_from_env(app_url)
     checks: list[dict] = []
     blockers: list[str] = []
     warnings: list[str] = []
@@ -408,17 +410,15 @@ async def validate_setup(
         try:
             from blop.sync.client import SyncClient
 
-            probe = await SyncClient(BLOP_HOSTED_URL, BLOP_API_TOKEN).probe_connection(BLOP_PROJECT_ID)
-            if probe:
-                detail = (
-                    f"Connected to workspace {probe.get('workspace_id')} "
-                    f"(scope={probe.get('token_scope')}, project={probe.get('requested_project_id') or probe.get('token_project_id')})"
-                )
+            ok = await SyncClient(BLOP_HOSTED_URL, BLOP_API_TOKEN).probe_connection(BLOP_PROJECT_ID)
+            if ok:
                 checks.append(
                     {
                         "name": "hosted_sync_connection",
                         "passed": True,
-                        "message": detail,
+                        "message": (
+                            f"Connected to Blop Cloud; API token validated for sync (project_id={BLOP_PROJECT_ID})."
+                        ),
                     }
                 )
             else:
@@ -504,7 +504,9 @@ async def validate_setup(
                     "If your app requires login: capture_auth_session(login_url='https://your-app.com/login', profile_name='default')"
                 )
             suggested_next_steps.append(f"Discover test flows: discover_test_flows(app_url='{app_url}')")
-            suggested_next_steps.append("Record a flow: record_test_flow(app_url='...', flow_name='...', goal='...')")
+            suggested_next_steps.append(
+                "Record a flow: record_test_flow(flow_name='...', goal='...', app_url='https://...')"
+            )
             suggested_next_steps.append("Run regression: run_regression_test(app_url='...', flow_ids=['...'])")
             suggested_next_steps.append("Get results: get_test_results(run_id='...')")
     # Mobile-specific guidance
@@ -590,7 +592,7 @@ async def validate_release_setup(
             canonical_steps.append(f"Discover critical journeys: discover_critical_journeys(app_url='{app_url}')")
             canonical_steps.append("Review recorded release-gating journeys: read blop://journeys")
             canonical_steps.append(
-                "If a release-gating journey is missing, record it with record_test_flow(app_url='...', flow_name='...', goal='...', business_criticality='revenue')"
+                "If a release-gating journey is missing, record it with record_test_flow(flow_name='...', goal='...', app_url='https://...', business_criticality='revenue')"
             )
             canonical_steps.append(
                 f"Run the release-confidence check: run_release_check(app_url='{app_url}', flow_ids=['...'], mode='replay')"

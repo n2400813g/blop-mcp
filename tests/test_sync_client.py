@@ -17,9 +17,9 @@ def client():
 @respx.mock
 @pytest.mark.asyncio
 async def test_push_run_success(client):
-    """push_run posts to /api/v1/sync/runs and returns True on 200."""
+    """push_run posts to /api/v1/sync/runs and returns cloud test_run_id on success."""
     route = respx.post(f"{BASE}/api/v1/sync/runs").mock(
-        return_value=httpx.Response(200, json={"status": "ok", "test_run_id": "run-1"})
+        return_value=httpx.Response(201, json={"status": "completed", "test_run_id": "run-1", "run_cases_stored": 0})
     )
     payload = SyncRunPayload(
         blop_mcp_run_id="mcp-run-1",
@@ -29,7 +29,7 @@ async def test_push_run_success(client):
         run_cases=[],
     )
     result = await client.push_run(payload)
-    assert result is True
+    assert result == "run-1"
     assert route.called
 
 
@@ -46,7 +46,7 @@ async def test_push_run_never_raises_on_network_error(client):
         run_cases=[],
     )
     result = await client.push_run(payload)  # must not raise
-    assert result is False
+    assert result is None
 
 
 @respx.mock
@@ -63,18 +63,18 @@ async def test_probe_connection_validates_token(client):
 @respx.mock
 @pytest.mark.asyncio
 async def test_push_artifacts_uploads_artifact_list(client):
-    """push_artifacts posts evidence references to /api/v1/sync/runs/{id}/artifacts."""
+    """push_artifacts POSTs one hosted payload per artifact (ArtifactUploadRequest shape)."""
     run_id = "cloud-run-id-abc"
     route = respx.post(f"{BASE}/api/v1/sync/runs/{run_id}/artifacts").mock(
-        return_value=httpx.Response(200, json={"stored": 2})
+        return_value=httpx.Response(201, json={"artifact_id": "a1", "test_run_id": run_id, "artifact_key": "k"})
     )
     artifacts = [
-        {"artifact_key": "screenshot_step_001.png", "kind": "screenshot"},
-        {"artifact_key": "console.log", "kind": "console_log"},
+        {"artifact_key": "screenshot_step_001.png", "kind": "screenshot", "storage_url": "https://example.com/a.png"},
+        {"artifact_key": "console.log", "kind": "console_log", "storage_url": "https://example.com/c.log"},
     ]
     result = await client.push_artifacts(cloud_run_id=run_id, artifacts=artifacts)
     assert result is True
-    assert route.called
+    assert route.call_count == 2
 
 
 @respx.mock
@@ -82,5 +82,8 @@ async def test_push_artifacts_uploads_artifact_list(client):
 async def test_push_artifacts_never_raises(client):
     """push_artifacts is fire-and-forget; network errors must not raise."""
     respx.post(f"{BASE}/api/v1/sync/runs/bad-id/artifacts").mock(side_effect=httpx.TimeoutException("timeout"))
-    result = await client.push_artifacts(cloud_run_id="bad-id", artifacts=[])
+    result = await client.push_artifacts(
+        cloud_run_id="bad-id",
+        artifacts=[{"artifact_key": "x.png", "storage_url": "https://example.com/x.png"}],
+    )
     assert result is False
