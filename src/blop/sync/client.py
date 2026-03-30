@@ -102,19 +102,21 @@ class SyncClient:
         cloud_run_id: str,
         artifacts: list[dict],
     ) -> bool:
-        """Upload artifact references for a synced run (one POST per item). Never raises."""
+        """Upload artifact references via hosted batch endpoint (chunks of 100). Never raises."""
         if not self.hosted_url or not self.api_token:
             return False
         if not artifacts:
             return True
-        url_base = f"{self.hosted_url.rstrip('/')}/api/v1/sync/runs/{cloud_run_id}/artifacts"
+        normalized = [_normalize_artifact_upload(raw) for raw in artifacts]
+        batch_url = f"{self.hosted_url.rstrip('/')}/api/v1/sync/runs/{cloud_run_id}/artifacts/batch"
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                for raw in artifacts:
-                    body = _normalize_artifact_upload(raw)
+            async with httpx.AsyncClient(timeout=120) as client:
+                chunk_size = 100
+                for i in range(0, len(normalized), chunk_size):
+                    chunk = normalized[i : i + chunk_size]
                     resp = await client.post(
-                        url_base,
-                        json=body,
+                        batch_url,
+                        json={"artifacts": chunk},
                         headers={"Authorization": f"Bearer {self.api_token}"},
                     )
                     resp.raise_for_status()
