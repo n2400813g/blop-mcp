@@ -17,6 +17,7 @@ from blop.engine.errors import (
 )
 from blop.engine.logger import get_logger
 from blop.engine.smoke import run_smoke_preflight
+from blop.mcp.tool_args import require_coalesced_app_identifier
 from blop.reporting.results import explain_run_status
 from blop.schemas import ReleaseCheckRequest
 from blop.stability import build_stability_gate_summary
@@ -321,7 +322,7 @@ async def _save_release_brief(release_check_result: dict, app_url: str) -> None:
 
 
 async def run_release_check(
-    app_url: str,
+    app_url: Optional[str] = None,
     journey_ids: Optional[list[str]] = None,
     flow_ids: Optional[list[str]] = None,
     profile_name: Optional[str] = None,
@@ -352,6 +353,10 @@ async def run_release_check(
         run_mode: Replay mode — "hybrid" (default), "strict_steps", or "goal_fallback".
         smoke_preflight: Optional advisory preflight over the app root and top flow entry URLs.
     """
+    resolved, res_err = require_coalesced_app_identifier(app_url, field_label="app_url")
+    if res_err:
+        return res_err
+    app_url = resolved
     try:
         request = ReleaseCheckRequest.model_validate(
             {
@@ -418,9 +423,7 @@ async def run_release_check(
         from blop.sync.models import RunCasePayload, SyncRunPayload
 
         _project_id = _config.BLOP_PROJECT_ID
-        if not _project_id:
-            pass  # No project configured, skip sync
-        else:
+        if _config.BLOP_API_TOKEN and _config.BLOP_HOSTED_URL and _config.BLOP_PROJECT_ID:
             _sync_client = SyncClient(
                 hosted_url=_config.BLOP_HOSTED_URL,
                 api_token=_config.BLOP_API_TOKEN,
@@ -431,6 +434,7 @@ async def run_release_check(
                 blop_mcp_run_id=_run_id,
                 project_id=_project_id,
                 url=request.app_url,
+                runtime_contract_version=getattr(_config, "BLOP_RUNTIME_CONTRACT_VERSION", "2026-03-29"),
                 blop_mcp_release_id=release_id,
                 environment=_config.BLOP_ENV if hasattr(_config, "BLOP_ENV") else "production",
                 run_cases=[
@@ -588,8 +592,8 @@ async def _run_targeted(
     max_steps = int(os.getenv("BLOP_TARGETED_MAX_STEPS", "40"))
 
     eval_result = await evaluate_web_task(
-        app_url=app_url,
         task=task,
+        app_url=app_url,
         profile_name=profile_name,
         headless=headless,
         max_steps=max_steps,

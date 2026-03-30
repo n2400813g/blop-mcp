@@ -20,6 +20,7 @@ class SyncRunPayload:
     blop_mcp_run_id: str
     project_id: str
     url: str
+    runtime_contract_version: str = "2026-03-29"
     run_cases: list[RunCasePayload] = field(default_factory=list)
     release_name: str | None = None
     release_version: str | None = None
