@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import mimetypes
 from pathlib import Path
 
 import httpx
@@ -97,19 +98,95 @@ class SyncClient:
             logger.warning("blop hosted sync failed (non-fatal): %s", exc)
             return None
 
+    async def _presign_local_artifacts(
+        self,
+        cloud_run_id: str,
+        local_items: list[tuple[int, dict]],
+    ) -> dict[str, dict]:
+        """Request presigned upload URLs from cloud for local file:// artifacts.
+
+        Returns mapping of artifact_key → {upload_url, public_url} (empty on error).
+        """
+        presign_url = f"{self.hosted_url.rstrip('/')}/api/v1/sync/runs/{cloud_run_id}/artifacts/presign-upload"
+        payload = [
+            {
+                "artifact_key": art["artifact_key"],
+                "content_type": mimetypes.guess_type(art["artifact_key"])[0] or "application/octet-stream",
+            }
+            for _, art in local_items
+        ]
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                presign_url,
+                json={"items": payload},
+                headers={"Authorization": f"Bearer {self.api_token}"},
+            )
+            resp.raise_for_status()
+        presigned = resp.json()  # [{artifact_key, upload_url, public_url}, ...]
+        return {p["artifact_key"]: p for p in presigned}
+
+    async def _upload_to_presigned_url(
+        self,
+        upload_url: str,
+        local_path: str,
+        content_type: str,
+    ) -> None:
+        """PUT binary content of local_path to a Supabase signed upload URL."""
+        path = Path(local_path)
+        if not path.exists():
+            logger.warning("Artifact not found at %s — skipping upload", local_path)
+            return
+        data = path.read_bytes()
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.put(
+                upload_url,
+                content=data,
+                headers={"Content-Type": content_type},
+            )
+            resp.raise_for_status()
+
     async def push_artifacts(
         self,
         cloud_run_id: str,
         artifacts: list[dict],
     ) -> bool:
-        """Upload artifact references via hosted batch endpoint (chunks of 100). Never raises."""
+        """Upload files to Supabase Storage (presign+PUT for local paths), then post batch metadata.
+
+        Steps:
+        1. Normalize artifact dicts.
+        2. For items with file:// storage_url: presign, upload, replace with cloud URL.
+        3. POST batch metadata with cloud URLs.
+        Never raises.
+        """
         if not self.hosted_url or not self.api_token:
             return False
         if not artifacts:
             return True
-        normalized = [_normalize_artifact_upload(raw) for raw in artifacts]
-        batch_url = f"{self.hosted_url.rstrip('/')}/api/v1/sync/runs/{cloud_run_id}/artifacts/batch"
         try:
+            normalized = [_normalize_artifact_upload(raw) for raw in artifacts]
+
+            # Identify local file:// artifacts
+            local_items: list[tuple[int, dict]] = [
+                (i, art) for i, art in enumerate(normalized) if art["storage_url"].startswith("file://")
+            ]
+
+            if local_items:
+                presign_map = await self._presign_local_artifacts(cloud_run_id, local_items)
+                for idx, art in local_items:
+                    key = art["artifact_key"]
+                    if key not in presign_map:
+                        continue
+                    local_path = art["storage_url"][len("file://") :]
+                    content_type = mimetypes.guess_type(key)[0] or "application/octet-stream"
+                    await self._upload_to_presigned_url(
+                        upload_url=presign_map[key]["upload_url"],
+                        local_path=local_path,
+                        content_type=content_type,
+                    )
+                    normalized[idx]["storage_url"] = presign_map[key]["public_url"]
+
+            # Post batch metadata with cloud URLs
+            batch_url = f"{self.hosted_url.rstrip('/')}/api/v1/sync/runs/{cloud_run_id}/artifacts/batch"
             async with httpx.AsyncClient(timeout=120) as client:
                 chunk_size = 100
                 for i in range(0, len(normalized), chunk_size):

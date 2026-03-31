@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 import respx
@@ -96,3 +98,95 @@ async def test_push_artifacts_never_raises(client):
         artifacts=[{"artifact_key": "x.png", "storage_url": "https://example.com/x.png"}],
     )
     assert result is False
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_push_artifacts_uploads_local_files_before_posting_batch(client, tmp_path):
+    """push_artifacts: for file:// URLs, presigns, uploads to Supabase, then posts with cloud URLs."""
+    run_id = "cloud-run-presign"
+
+    # Write a fake PNG
+    fake_png = tmp_path / "step_001.png"
+    fake_png.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    # Mock presign endpoint — returns upload_url + public_url
+    presign_route = respx.post(f"{BASE}/api/v1/sync/runs/{run_id}/artifacts/presign-upload").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "artifact_key": "step_001.png",
+                    "upload_url": "https://supabase.co/storage/v1/object/upload/sign/run-artifacts/runs/r/step_001.png?token=tok",
+                    "public_url": f"https://supabase.co/storage/v1/object/public/run-artifacts/runs/{run_id}/step_001.png",
+                }
+            ],
+        )
+    )
+
+    # Mock Supabase PUT upload
+    supabase_put = respx.put(
+        "https://supabase.co/storage/v1/object/upload/sign/run-artifacts/runs/r/step_001.png"
+    ).mock(return_value=httpx.Response(200, json={"Key": "run-artifacts/..."}))
+
+    # Mock batch post
+    batch_route = respx.post(f"{BASE}/api/v1/sync/runs/{run_id}/artifacts/batch").mock(
+        return_value=httpx.Response(
+            201,
+            json={
+                "stored": 1,
+                "results": [{"artifact_id": "a1", "test_run_id": run_id, "artifact_key": "step_001.png"}],
+            },
+        )
+    )
+
+    result = await client.push_artifacts(
+        cloud_run_id=run_id,
+        artifacts=[
+            {
+                "artifact_key": "step_001.png",
+                "artifact_type": "screenshot",
+                "path": str(fake_png),
+            }
+        ],
+    )
+
+    assert result is True
+    assert presign_route.called, "presign endpoint was not called"
+    assert supabase_put.called, "Supabase PUT was not called"
+    assert batch_route.called, "batch endpoint was not called"
+    # Batch should have received the cloud URL, not file://
+    batch_body = json.loads(batch_route.calls[0].request.content)
+    assert batch_body["artifacts"][0]["storage_url"].startswith("https://"), (
+        f"Expected https:// URL in batch, got: {batch_body['artifacts'][0]['storage_url']}"
+    )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_push_artifacts_skips_presign_for_already_cloud_url(client):
+    """push_artifacts: https:// artifacts skip presign and go straight to batch."""
+    run_id = "cloud-run-no-presign"
+
+    batch_route = respx.post(f"{BASE}/api/v1/sync/runs/{run_id}/artifacts/batch").mock(
+        return_value=httpx.Response(
+            201,
+            json={"stored": 1, "results": []},
+        )
+    )
+
+    result = await client.push_artifacts(
+        cloud_run_id=run_id,
+        artifacts=[
+            {
+                "artifact_key": "remote.png",
+                "artifact_type": "screenshot",
+                "storage_url": "https://cdn.example.com/remote.png",
+            }
+        ],
+    )
+
+    assert result is True
+    assert batch_route.called
+    batch_body = json.loads(batch_route.calls[0].request.content)
+    assert batch_body["artifacts"][0]["storage_url"] == "https://cdn.example.com/remote.png"
