@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -17,12 +18,16 @@ class RunContext:
     app_url: str
     flow_ids: list[str]
     profile_name: str | None
-    # Populated by stages:
+    # Populated by VALIDATE:
     validated_url: str | None = None
     browser_config: dict[str, Any] = field(default_factory=dict)
+    # Populated by AUTH:
     auth_state: str | None = None  # path to storage_state JSON or None
+    # Populated by EXECUTE:
     step_results: list[Any] = field(default_factory=list)
+    # Populated by CLASSIFY:
     classified_cases: list[Any] = field(default_factory=list)
+    # Populated by REPORT:
     report: dict[str, Any] | None = None
     # Event bus — created in __post_init__
     bus: EventBus = field(init=False)
@@ -33,6 +38,8 @@ class RunContext:
 
 @runtime_checkable
 class Stage(Protocol):
+    """A pipeline stage. Mutates ctx in place. Raises StageError on unrecoverable failure."""
+
     async def run(self, ctx: RunContext) -> None: ...
 
 
@@ -69,7 +76,7 @@ class RunPipeline:
                 ctx.bus.emit(
                     "PIPELINE",
                     "PIPELINE_ABORT",
-                    f"Pipeline aborted at {stage_name}: {exc.message}",
+                    f"Pipeline aborted at {exc.stage}: {exc.message}",
                     details={
                         "stage": exc.stage,
                         "code": exc.code,
@@ -100,7 +107,6 @@ def build_default_pipeline() -> RunPipeline:
 
 async def persist_bus_events(bus: EventBus) -> None:
     """Persist all events in the bus to the run_health_events table."""
-    import asyncio
 
     async def _save(ev: Any) -> None:
         try:
