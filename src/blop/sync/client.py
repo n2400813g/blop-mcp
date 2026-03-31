@@ -122,7 +122,7 @@ class SyncClient:
                 headers={"Authorization": f"Bearer {self.api_token}"},
             )
             resp.raise_for_status()
-        presigned = resp.json()  # [{artifact_key, upload_url, public_url}, ...]
+            presigned = resp.json()  # [{artifact_key, upload_url, public_url}, ...]
         return {p["artifact_key"]: p for p in presigned}
 
     async def _upload_to_presigned_url(
@@ -178,12 +178,15 @@ class SyncClient:
                         continue
                     local_path = art["storage_url"][len("file://") :]
                     content_type = mimetypes.guess_type(key)[0] or "application/octet-stream"
-                    await self._upload_to_presigned_url(
-                        upload_url=presign_map[key]["upload_url"],
-                        local_path=local_path,
-                        content_type=content_type,
-                    )
-                    normalized[idx]["storage_url"] = presign_map[key]["public_url"]
+                    try:
+                        await self._upload_to_presigned_url(
+                            upload_url=presign_map[key]["upload_url"],
+                            local_path=local_path,
+                            content_type=content_type,
+                        )
+                        normalized[idx]["storage_url"] = presign_map[key]["public_url"]
+                    except Exception as exc:
+                        logger.warning("Artifact upload failed for %s (non-fatal): %s", key, exc)
 
             # Post batch metadata with cloud URLs
             batch_url = f"{self.hosted_url.rstrip('/')}/api/v1/sync/runs/{cloud_run_id}/artifacts/batch"
