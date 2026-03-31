@@ -6,7 +6,9 @@ import os
 import time
 import traceback
 import uuid
-from typing import Optional
+from typing import Annotated, Literal, Optional
+
+from pydantic import Field
 
 from blop.config import BLOP_MAX_CONCURRENT_RUNS
 from blop.engine import auth as auth_engine
@@ -282,6 +284,24 @@ def cancel_run_task(run_id: str) -> bool:
     return True
 
 
+async def cancel_run_task_with_drain(run_id: str, timeout_secs: float = 30.0) -> bool:
+    """Cancel a task and wait up to ``timeout_secs`` for it to actually stop.
+
+    Playwright context/browser close can hang; this enforces a hard deadline so
+    the concurrency slot is released even if the underlying process gets stuck.
+    Returns True if a task was found and cancelled (regardless of drain outcome).
+    """
+    task = _RUN_TASKS.get(run_id)
+    if not task or task.done():
+        return False
+    task.cancel()
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=timeout_secs)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        pass
+    return True
+
+
 async def _ensure_terminal_run_status(run_id: str, fallback_status: str) -> None:
     run = await sqlite.get_run(run_id)
     if not run:
@@ -518,9 +538,31 @@ async def resume_incomplete_runs(limit_per_status: int = 50) -> dict:
 async def run_regression_test(
     app_url: str,
     flow_ids: list[str],
-    profile_name: Optional[str] = None,
+    profile_name: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description=(
+                "Name of a saved auth profile created with save_auth_profile. "
+                "Required for apps with login. Example: 'staging', 'prod_admin'."
+            ),
+            examples=["staging", "prod_admin"],
+        ),
+    ] = None,
     headless: bool = True,
-    run_mode: str = "hybrid",
+    run_mode: Annotated[
+        Literal["replay", "hybrid", "strict_steps", "goal_fallback"],
+        Field(
+            default="hybrid",
+            description=(
+                "replay: replays previously recorded steps deterministically. "
+                "hybrid: combines step replay with agent fallback on mismatch. "
+                "strict_steps: replay only, no agent fallback. "
+                "goal_fallback: agent-only re-execution from goal. "
+                "Use replay for release checks; use hybrid or goal_fallback after major UI changes."
+            ),
+        ),
+    ] = "hybrid",
     command: Optional[str] = None,
     auto_rerecord: bool = False,
 ) -> dict:
@@ -827,6 +869,8 @@ async def run_regression_test(
         status="queued",
         flow_count=len(flows),
         artifacts_dir=artifacts_dir,
+        replay_worker_count=(1 if mobile_only else regression_engine.compute_replay_worker_count(flows, run_mode)),
+        flow_ids=[f.flow_id for f in flows],
     ).model_dump()
     status_meta = explain_run_status("queued", run_id=run_id)
     started["execution_plan_summary"] = _execution_plan_summary(flows, run_mode, profile_name)
@@ -897,6 +941,10 @@ async def _run_and_persist(
             "run_mode": run_mode,
             "headless": headless,
             "mobile_only": mobile_only,
+            "replay_worker_count": 1
+            if mobile_only
+            else regression_engine.compute_replay_worker_count(remaining_flows, run_mode),
+            "isolated_browser_context_per_flow": True,
         },
     )
 

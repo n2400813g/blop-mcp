@@ -8,13 +8,13 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Optional, Tuple
+from typing import Annotated, Optional, Tuple
 
-from blop.config import validate_app_url
+from pydantic import Field
+
 from blop.engine import auth as auth_engine
 from blop.engine.errors import (
     BLOP_AUTH_PROFILE_NOT_FOUND,
-    BLOP_URL_VALIDATION_FAILED,
     BLOP_VALIDATION_FAILED,
     tool_error,
 )
@@ -24,14 +24,34 @@ from blop.engine.flow_builder import (
     build_steps_from_agent_actions,
 )
 from blop.engine.planner import build_execution_plan, build_intent_contract
+from blop.mcp.tool_args import require_resolved_app_url
 from blop.schemas import FailureCase, FlowStep
 from blop.storage import files as file_store
 from blop.storage import sqlite
 
 
 async def evaluate_web_task(
-    app_url: str,
-    task: str,
+    task: Annotated[
+        str,
+        Field(
+            description=(
+                "Natural language description of what to do and what to verify. "
+                "Be specific: include the action, the page state to reach, and assertions to check."
+            ),
+            examples=[
+                "Add the first product to cart and verify the cart badge shows '1'",
+                "Log in with test@example.com and verify the dashboard loads without errors",
+            ],
+        ),
+    ],
+    app_url: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Full URL of the page to evaluate. Must start with http:// or https://.",
+            examples=["https://app.example.com/checkout", "http://localhost:3000"],
+        ),
+    ] = None,
     profile_name: Optional[str] = None,
     headless: bool = False,
     max_steps: int = 25,
@@ -45,11 +65,12 @@ async def evaluate_web_task(
     Unlike record_test_flow, this does not require a flow_name or goal upfront and
     returns a complete report in a single call (no polling).
     """
-    url_err = validate_app_url(app_url)
-    if url_err:
-        return tool_error(url_err, BLOP_URL_VALIDATION_FAILED)
     if not task or not task.strip():
         return tool_error("task is required", BLOP_VALIDATION_FAILED, details={"field": "task"})
+    resolved, res_err = require_resolved_app_url(app_url, field_label="app_url")
+    if res_err:
+        return res_err
+    app_url = resolved
     if format not in {"markdown", "text", "json"}:
         return tool_error(
             f"Invalid format '{format}'. Must be one of: markdown, text, json",
@@ -319,27 +340,38 @@ async def _run_evaluation(
             ),
         )
 
-        # Set up evidence listeners on the page once context is available
-        _listeners_attached = False
+        # Attach console/network listeners to every open page as the context appears.
+        # IMPORTANT: do not gate this on periodic screenshots. Default capture profile
+        # (balanced) has periodic_screenshots=false; the old _poll_screenshots path
+        # returned immediately, so listeners were never installed and eval runs showed
+        # zero console/network evidence despite capture_flags requesting them.
+        _listener_page_ids: set[int] = set()
 
-        async def _attach_listeners():
-            nonlocal _listeners_attached
-            if _listeners_attached:
+        def _attach_listeners_to_page(page) -> None:
+            pid = id(page)
+            if pid in _listener_page_ids:
                 return
             try:
-                ctx = getattr(browser_session, "context", None)
-                if ctx and ctx.pages:
-                    page = ctx.pages[0]
-                    if evidence_policy.console:
-                        page.on("console", lambda msg: _on_console(msg, console_logs, console_errors))
-                    if evidence_policy.network:
-                        page.on("response", lambda resp: _on_response(resp, network_requests, network_failures))
-                        page.on("requestfailed", lambda req: _on_request_failed(req, network_failures))
-                    _listeners_attached = True
+                if evidence_policy.console:
+                    page.on("console", lambda msg: _on_console(msg, console_logs, console_errors))
+                if evidence_policy.network:
+                    page.on("response", lambda resp: _on_response(resp, network_requests, network_failures))
+                    page.on("requestfailed", lambda req: _on_request_failed(req, network_failures))
+                _listener_page_ids.add(pid)
             except Exception:
                 pass
 
-        # Screenshot polling + listener attachment
+        async def _attach_listeners_all_pages():
+            try:
+                ctx = getattr(browser_session, "context", None)
+                if not ctx or not ctx.pages:
+                    return
+                for page in ctx.pages:
+                    _attach_listeners_to_page(page)
+            except Exception:
+                pass
+
+        # Screenshot polling (optional) + listener attachment while the agent runs
         step_idx = [0]
 
         def _remember_screenshot(path: str) -> None:
@@ -347,27 +379,32 @@ async def _run_evaluation(
             if len(screenshots) > evidence_policy.max_screenshots:
                 del screenshots[: -evidence_policy.max_screenshots]
 
-        async def _poll_screenshots():
+        want_periodic = should_capture_screenshot(evidence_policy, "periodic")
+        want_listeners = evidence_policy.console or evidence_policy.network
+
+        async def _evidence_background_loop():
+            """Until cancelled: attach listeners to new pages; optionally take periodic screenshots."""
             while True:
                 try:
-                    if not should_capture_screenshot(evidence_policy, "periodic"):
+                    await _attach_listeners_all_pages()
+                    if want_periodic and step_idx[0] < evidence_policy.max_screenshots:
+                        await asyncio.sleep(evidence_policy.screenshot_interval_secs)
+                        ctx = getattr(browser_session, "context", None)
+                        if ctx and ctx.pages:
+                            shot_path = file_store.screenshot_path(run_id, "eval", step_idx[0])
+                            await ctx.pages[0].screenshot(path=shot_path)
+                            _remember_screenshot(shot_path)
+                            step_idx[0] += 1
+                    elif want_listeners:
+                        await asyncio.sleep(0.25)
+                    else:
                         return
-                    await asyncio.sleep(evidence_policy.screenshot_interval_secs)
-                    await _attach_listeners()
-                    if step_idx[0] >= evidence_policy.max_screenshots:
-                        break
-                    ctx = getattr(browser_session, "context", None)
-                    if ctx and ctx.pages:
-                        shot_path = file_store.screenshot_path(run_id, "eval", step_idx[0])
-                        await ctx.pages[0].screenshot(path=shot_path)
-                        _remember_screenshot(shot_path)
-                        step_idx[0] += 1
                 except asyncio.CancelledError:
                     break
                 except Exception:
-                    pass
+                    await asyncio.sleep(0.25 if want_listeners else evidence_policy.screenshot_interval_secs)
 
-        screenshot_task: asyncio.Task | None = None
+        evidence_task: asyncio.Task | None = None
 
         # Start tracing if requested
         tracing_started = False
@@ -380,8 +417,8 @@ async def _run_evaluation(
             except Exception:
                 pass
 
-        if should_capture_screenshot(evidence_policy, "periodic"):
-            screenshot_task = asyncio.create_task(_poll_screenshots())
+        if want_periodic or want_listeners:
+            evidence_task = asyncio.create_task(_evidence_background_loop())
 
         try:
             history = await agent.run(max_steps=max_steps)
@@ -450,10 +487,10 @@ async def _run_evaluation(
                 pass
 
         finally:
-            if screenshot_task:
-                screenshot_task.cancel()
+            if evidence_task:
+                evidence_task.cancel()
                 try:
-                    await screenshot_task
+                    await evidence_task
                 except asyncio.CancelledError:
                     pass
 
@@ -821,3 +858,8 @@ def _format_text(report: dict, task: str, app_url: str) -> str:
 
     lines.append(f"Run ID: {report.get('run_id', '?')}")
     return "\n".join(lines)
+
+
+# Canonical import: ``from blop.tools.results import get_test_results`` — re-exported here because
+# agents often guess this module when fetching results after evaluate_web_task or release runs.
+from blop.tools.results import get_test_results  # noqa: E402, F401

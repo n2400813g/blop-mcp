@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Optional
+from typing import Annotated, Literal, Optional
 
-from blop.config import BLOP_DISCOVERY_MAX_PAGES, validate_app_url
+from pydantic import Field
+
+from blop.config import BLOP_DISCOVERY_MAX_PAGES
 from blop.engine import discovery
-from blop.engine.errors import BLOP_URL_VALIDATION_FAILED, BLOP_VALIDATION_FAILED, tool_error
+from blop.engine.errors import BLOP_VALIDATION_FAILED, tool_error
+from blop.mcp.tool_args import require_resolved_app_url
 from blop.schemas import CriticalJourney
 from blop.storage import sqlite
 
@@ -32,9 +35,23 @@ def _clean_text(value: str | None, fallback: str) -> str:
 
 
 async def discover_critical_journeys(
-    app_url: str,
+    app_url: Optional[str] = None,
     profile_name: Optional[str] = None,
     business_goal: Optional[str] = None,
+    business_criticality: Annotated[
+        Optional[Literal["revenue", "activation", "retention", "support", "other"]],
+        Field(
+            default=None,
+            description=(
+                "Primary business category for flows. "
+                "revenue: checkout/billing/subscriptions. "
+                "activation: onboarding/first-run. "
+                "retention: core features users return for. "
+                "support: help/error recovery. "
+                "other: informational or low-stakes flows."
+            ),
+        ),
+    ] = None,
     max_depth: int = 2,
     max_pages: int = BLOP_DISCOVERY_MAX_PAGES,
     seed_urls: Optional[list[str]] = None,
@@ -47,9 +64,10 @@ async def discover_critical_journeys(
     Each journey includes a why_it_matters field and include_in_release_gating flag
     so you can immediately scope which journeys gate a release.
     """
-    url_err = validate_app_url(app_url)
-    if url_err:
-        return tool_error(url_err, BLOP_URL_VALIDATION_FAILED)
+    resolved, err = require_resolved_app_url(app_url, field_label="app_url")
+    if err:
+        return err
+    app_url = resolved
     for param_name, pattern in [
         ("include_url_pattern", include_url_pattern),
         ("exclude_url_pattern", exclude_url_pattern),
@@ -170,4 +188,8 @@ def _flow_dict_to_critical_journey(
         "journey_id": journey_id,
         "gating_reason": gating_reason,
         "execution_status": execution_status,
+        # Aliases for prompts / older integrations that expect discovery-shaped keys
+        "flow_name": journey_name,
+        "goal": goal,
+        "business_criticality": criticality,
     }

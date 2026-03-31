@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Annotated, Literal, Optional
 from urllib.parse import urlparse
 
-from blop.config import validate_app_url
+from pydantic import Field
+
 from blop.engine import auth as auth_engine
 from blop.engine import recording
-from blop.engine.errors import BLOP_URL_VALIDATION_FAILED, BLOP_VALIDATION_FAILED, tool_error
+from blop.engine.errors import BLOP_VALIDATION_FAILED, tool_error
 from blop.engine.flow_builder import build_recorded_flow
 from blop.engine.logger import get_logger
 from blop.engine.planner import build_execution_plan, build_intent_contract
+from blop.mcp.tool_args import require_coalesced_app_identifier, require_resolved_app_url
 from blop.reporting.results import describe_flow_staleness
 from blop.schemas import RecordedFlowResult
 from blop.storage import files as file_store
@@ -99,19 +101,49 @@ async def _find_refresh_candidate(app_url: str, flow_name: str) -> dict | None:
 
 
 async def record_test_flow(
-    app_url: str,
     flow_name: str,
-    goal: str,
+    goal: Annotated[
+        str,
+        Field(
+            description="What the flow should accomplish. Used to guide the recording agent.",
+            examples=[
+                "Complete a purchase with a credit card",
+                "Sign up for a new account and verify email confirmation is shown",
+            ],
+        ),
+    ],
+    app_url: Optional[str] = None,
     profile_name: Optional[str] = None,
     command: Optional[str] = None,
-    business_criticality: str = "other",
+    business_criticality: Annotated[
+        Literal["revenue", "activation", "retention", "support", "other"],
+        Field(
+            default="other",
+            description=(
+                "Primary business category for flows. "
+                "revenue: checkout/billing/subscriptions. "
+                "activation: onboarding/first-run. "
+                "retention: core features users return for. "
+                "support: help/error recovery. "
+                "other: informational or low-stakes flows."
+            ),
+        ),
+    ] = "other",
     platform: str = "web",
     mobile_target: Optional[dict] = None,
 ) -> dict:
+    if not flow_name or not flow_name.strip():
+        return tool_error("flow_name is required", BLOP_VALIDATION_FAILED, details={"field": "flow_name"})
+    if not goal or not goal.strip():
+        return tool_error("goal is required", BLOP_VALIDATION_FAILED, details={"field": "goal"})
+
     # Route mobile flows to the mobile engine
     if platform in ("ios", "android"):
+        resolved, rid_err = require_coalesced_app_identifier(app_url, field_label="app_url")
+        if rid_err:
+            return rid_err
         return await _record_mobile_flow(
-            app_id=app_url,
+            app_id=resolved,
             flow_name=flow_name,
             goal=goal,
             business_criticality=business_criticality,
@@ -119,13 +151,10 @@ async def record_test_flow(
             mobile_target=mobile_target or {},
         )
 
-    url_err = validate_app_url(app_url)
-    if url_err:
-        return tool_error(url_err, BLOP_URL_VALIDATION_FAILED)
-    if not flow_name or not flow_name.strip():
-        return tool_error("flow_name is required", BLOP_VALIDATION_FAILED, details={"field": "flow_name"})
-    if not goal or not goal.strip():
-        return tool_error("goal is required", BLOP_VALIDATION_FAILED, details={"field": "goal"})
+    resolved, url_res_err = require_resolved_app_url(app_url, field_label="app_url")
+    if url_res_err:
+        return url_res_err
+    app_url = resolved
 
     planning_source = "explicit_goal"
     # If command provided, parse for additional intent context
