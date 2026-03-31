@@ -66,7 +66,7 @@ class BlopError(Exception):
         super().__init__(message)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "error": {
                 "code": self.code,
                 "message": self.message,
@@ -74,6 +74,14 @@ class BlopError(Exception):
                 "details": self.details,
             }
         }
+        # Add diagnostic fields when set
+        if self.likely_cause:
+            out["error"]["likely_cause"] = self.likely_cause
+        if self.suggested_fix:
+            out["error"]["suggested_fix"] = self.suggested_fix
+        if self.retry_safe:
+            out["error"]["retry_safe"] = self.retry_safe
+        return out
 
     def to_merged_response(self, **extra: Any) -> dict[str, Any]:
         """Flat-ish MCP payload: top-level ``error`` string plus structured ``blop_error``."""
@@ -98,6 +106,10 @@ class StageError(BlopError):
         retry_safe: bool = False,
         details: dict[str, Any] | None = None,
     ) -> None:
+        # Inject stage into details
+        details = dict(details or {})
+        details.setdefault("stage", stage)
+
         super().__init__(
             code,
             message,
