@@ -199,7 +199,44 @@ async def main() -> int:
         storage = ar.get("storage_state_path") or ar.get("storage_path") or "cached"
         print(f"  storage_state  : {storage}")
 
-    # Steps 4-7 go here (added in subsequent tasks)
+    # ── Step 3: Quick eval ───────────────────────────────────────────────────
+    from blop.tools.evaluate import evaluate_web_task
+
+    EVAL_TASK = (
+        "Navigate to the homepage. Identify the primary value proposition headline, "
+        "list the main navigation sections, click the most prominent non-destructive CTA "
+        "(e.g. 'Get started', 'Try free', 'Sign up'), and report any console errors or "
+        "failed network requests observed."
+    )
+
+    with timed_step("evaluate") as r:
+        ev = await evaluate_web_task(
+            task=EVAL_TASK,
+            app_url=app_url,
+            profile_name=profile_name,
+            headless=True,
+            max_steps=18,
+            format="markdown",
+        )
+        r.data = ev
+        if ev.get("error") and not ev.get("ok", True):
+            lc = (ev.get("mcp_error") or {}).get("details", {}).get("likely_cause", "")
+            print(f"  error          : {ev['error']}")
+            if lc:
+                print(f"  likely_cause   : {lc}")
+            raise RuntimeError(ev["error"])
+        data = ev.get("data") or ev
+        decision = data.get("decision") or data.get("release_recommendation") or ev.get("release_recommendation", "N/A")
+        pass_fail = data.get("pass_fail") or ev.get("pass_fail", "N/A")
+        run_id = ev.get("run_id") or data.get("run_id", "N/A")
+        print(f"  run_id         : {run_id}")
+        print(f"  pass_fail      : {pass_fail}")
+        print(f"  decision       : {decision}")
+        if ev.get("formatted_report"):
+            snippet = ev["formatted_report"][:400].replace("\n", "\n  ")
+            print(f"\n  Report preview:\n  {snippet}...")
+
+    # Steps 5-7 go here (added in subsequent tasks)
 
     _print_report(app_url)
     failed = sum(1 for r in _results if not r.ok)
