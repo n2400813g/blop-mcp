@@ -131,6 +131,7 @@ async def record_test_flow(
     ] = "other",
     platform: str = "web",
     mobile_target: Optional[dict] = None,
+    headless: bool = False,
 ) -> dict:
     if not flow_name or not flow_name.strip():
         return tool_error("flow_name is required", BLOP_VALIDATION_FAILED, details={"field": "flow_name"})
@@ -199,7 +200,7 @@ async def record_test_flow(
         app_url=app_url,
         goal=goal,
         storage_state=storage_state,
-        headless=False,
+        headless=headless,
         run_id=run_id,
     )
     steps = _ensure_assertion_steps(steps, goal)

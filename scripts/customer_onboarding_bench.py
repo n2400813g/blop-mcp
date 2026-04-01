@@ -124,11 +124,12 @@ def _print_report(app_url: str) -> None:
     journey_count = len(discovery_step.data.get("journeys", [])) if discovery_step else 0
 
     results_step = next((r for r in _results if r.name == "results"), None)
-    decision = (
+    _raw_dec = (
         (results_step.data.get("decision") or results_step.data.get("release_recommendation") or "N/A")
         if results_step
         else "N/A"
     )
+    decision = _raw_dec.get("decision") if isinstance(_raw_dec, dict) else _raw_dec
 
     diag_pct = int(failures_with_diagnosis / total_failures * 100) if total_failures else 100
 
@@ -267,19 +268,38 @@ async def main() -> int:
         assert len(journeys) >= 1, f"Expected at least 1 journey, got {len(journeys)}"
 
     # ── Step 5: Record 2 flows ────────────────────────────────────────────────
+    # Use explicit high-value goals instead of the generic ones from discovery.
+    # Generic goals like "verify page loads" produce trivial 2-step recordings.
     from blop.tools.record import record_test_flow
 
-    flows_to_record = _select_flows_to_record(discovered_journeys)
+    _BENCH_FLOWS = [
+        {
+            "flow_name": "sensai_bench_auth_and_dashboard",
+            "goal": (
+                f"Navigate to {app_url}, log in with the test account credentials, "
+                "verify the dashboard or main app view loads after login, "
+                "and confirm the primary navigation is visible."
+            ),
+            "business_criticality": "activation",
+        },
+        {
+            "flow_name": "sensai_bench_core_feature",
+            "goal": (
+                f"Navigate to {app_url} and access the main product feature. "
+                "Explore the primary action available to a logged-in user "
+                "(e.g. create, start, or open a session/project/workspace). "
+                "Verify the feature view loads without errors."
+            ),
+            "business_criticality": "retention",
+        },
+    ]
     recorded_flow_ids: list[str] = []
 
-    for i, journey in enumerate(flows_to_record, 1):
+    for i, flow_spec in enumerate(_BENCH_FLOWS, 1):
         step_name = f"record_flow_{i}"
-        journey_name = journey.get("journey_name") or journey.get("name") or journey.get("flow_name") or f"flow_{i}"
-        goal = (
-            journey.get("goal") or journey.get("why_it_matters") or f"Complete the {journey_name} journey on {app_url}"
-        )
-        criticality = journey.get("business_criticality") or "other"
-        flow_name = f"sensai_bench_{journey_name.lower().replace(' ', '_')[:40]}"
+        flow_name = flow_spec["flow_name"]
+        goal = flow_spec["goal"]
+        criticality = flow_spec["business_criticality"]
 
         with timed_step(step_name) as r:
             print(f"  flow_name      : {flow_name}")
@@ -291,6 +311,7 @@ async def main() -> int:
                 app_url=app_url,
                 profile_name=profile_name,
                 business_criticality=criticality,
+                headless=True,
             )
             r.data = rf
             if rf.get("error"):
@@ -358,7 +379,9 @@ async def main() -> int:
         with timed_step("results") as r:
             tr = await get_test_results(run_id=regression_run_id)
             r.data = tr
-            decision = tr.get("decision") or tr.get("release_recommendation") or tr.get("status", "N/A")
+            _dec = tr.get("decision") or tr.get("release_recommendation") or tr.get("status", "N/A")
+            # decision may be a nested dict (release_decision object) — extract the string
+            decision = _dec.get("decision") if isinstance(_dec, dict) else _dec
             passed = tr.get("passed_cases", 0)
             failed_list = tr.get("failed_cases") or []
             failed_count = tr.get("failed_cases_count", 0) or len(failed_list)
