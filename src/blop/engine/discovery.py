@@ -173,6 +173,9 @@ def _choose_next_work_item(frontier: list[_CrawlWorkItem], area_page_counts: dic
 async def _create_crawl_context(browser, *, storage_state: str | None):
     ctx_kwargs: dict = {}
     if storage_state:
+        from blop.engine.browser_pool import _normalize_storage_state_file
+
+        _normalize_storage_state_file(storage_state)
         ctx_kwargs["storage_state"] = storage_state
     return await browser.new_context(**ctx_kwargs)
 

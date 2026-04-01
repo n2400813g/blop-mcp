@@ -1,12 +1,39 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 from dataclasses import dataclass
 from typing import Optional
 
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 
 from blop.engine.browser import make_browser_profile
+
+
+def _normalize_storage_state_file(path: str) -> None:
+    """Ensure every origin in a storage-state JSON has a ``localStorage`` array.
+
+    browser-use's CDP-based state capture omits ``localStorage`` when empty,
+    but Playwright 1.50+ requires it to be an explicit array on ``new_context``
+    read-back.  We patch the file in-place (idempotent) so subsequent
+    ``new_context(storage_state=path)`` calls succeed.
+    """
+    try:
+        if not os.path.isfile(path):
+            return
+        with open(path) as _f:
+            data = json.load(_f)
+        changed = False
+        for origin in data.get("origins", []):
+            if "localStorage" not in origin:
+                origin["localStorage"] = []
+                changed = True
+        if changed:
+            with open(path, "w") as _f:
+                json.dump(data, _f)
+    except Exception:
+        pass
 
 
 @dataclass
@@ -48,7 +75,16 @@ class BrowserPool:
                     "headless": headless,
                     "args": getattr(profile, "browser_args", []) or [],
                 }
-                browser = await self._pw.chromium.launch(**launch_kwargs)
+                try:
+                    browser = await self._pw.chromium.launch(**launch_kwargs)
+                except Exception:
+                    try:
+                        from blop.engine import metrics as blop_metrics
+
+                        blop_metrics.inc_browser_acquire_failure(where="pool_launch")
+                    except Exception:
+                        pass
+                    raise
                 self._browsers[key] = browser
             return browser, key
 
@@ -68,6 +104,7 @@ class BrowserPool:
             "ignore_https_errors": ignore_https_errors,
         }
         if storage_state:
+            _normalize_storage_state_file(storage_state)
             context_kwargs["storage_state"] = storage_state
         if record_video_dir:
             context_kwargs["record_video_dir"] = record_video_dir

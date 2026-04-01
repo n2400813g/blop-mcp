@@ -236,7 +236,37 @@ async def main() -> int:
             snippet = ev["formatted_report"][:400].replace("\n", "\n  ")
             print(f"\n  Report preview:\n  {snippet}...")
 
-    # Steps 5-7 go here (added in subsequent tasks)
+    # ── Step 4: Discover critical journeys ──────────────────────────────────
+    from blop.tools.journeys import discover_critical_journeys
+
+    discovered_journeys: list[dict] = []
+
+    with timed_step("discover") as r:
+        dj = await discover_critical_journeys(
+            app_url=app_url,
+            profile_name=profile_name,
+            max_depth=2,
+            max_pages=8,
+        )
+        r.data = dj
+        if dj.get("error"):
+            lc = (dj.get("mcp_error") or {}).get("details", {}).get("likely_cause", "")
+            print(f"  error          : {dj['error']}")
+            if lc:
+                print(f"  likely_cause   : {lc}")
+            raise RuntimeError(dj["error"])
+        journeys = dj.get("journeys") or dj.get("data", {}).get("journeys") or []
+        r.data["journeys"] = journeys
+        discovered_journeys = journeys  # noqa: F841 — used in subsequent tasks
+        print(f"  journeys found : {len(journeys)}")
+        for j in journeys:
+            name = j.get("journey_name") or j.get("name") or j.get("flow_name", "?")
+            crit = j.get("business_criticality", "other")
+            gating = "gate" if j.get("include_in_release_gating") else "info"
+            print(f"    [{gating}] {name}  ({crit})")
+        assert len(journeys) >= 1, f"Expected at least 1 journey, got {len(journeys)}"
+
+    # Steps 6-7 go here (added in subsequent tasks)
 
     _print_report(app_url)
     failed = sum(1 for r in _results if not r.ok)

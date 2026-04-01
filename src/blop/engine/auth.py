@@ -8,6 +8,7 @@ import os
 import time
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from blop.config import (
     APP_BASE_URL,
@@ -275,15 +276,86 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
                     working_pass_sel = await _try_fill(page, _pass_selectors, password)
                     await page.press(working_pass_sel, "Enter")
 
+                    # Many SPAs require a button click to submit; pressing Enter may do nothing.
+                    # After a short wait, if still on the login page, locate and click a
+                    # sign-in/submit button before falling through to the URL-polling loop.
+                    _submit_btn_selectors = [
+                        "button[type='submit']",
+                        "input[type='submit']",
+                        "button[aria-label*='sign in' i]",
+                        "button[aria-label*='log in' i]",
+                        "button[aria-label*='login' i]",
+                    ]
+                    _submit_btn_text_patterns = (
+                        "sign in",
+                        "log in",
+                        "login",
+                        "submit",
+                        "continue",
+                        "next",
+                        "entrar",
+                        "connexion",
+                    )
+
+                    async def _try_click_submit(pg) -> bool:
+                        """Return True if a submit button was found and clicked."""
+                        # Selector-based first
+                        for sel in _submit_btn_selectors:
+                            try:
+                                el = await pg.query_selector(sel)
+                                if el and await el.is_visible():
+                                    await el.click()
+                                    return True
+                            except Exception:
+                                continue
+                        # Text-based: find any visible button whose label matches
+                        try:
+                            buttons = await pg.query_selector_all("button")
+                            for btn in buttons:
+                                try:
+                                    if not await btn.is_visible():
+                                        continue
+                                    text = ((await btn.inner_text()) or "").strip().lower()
+                                    if any(pat in text for pat in _submit_btn_text_patterns):
+                                        await btn.click()
+                                        return True
+                                except Exception:
+                                    continue
+                        except Exception:
+                            pass
+                        return False
+
+                    # Brief pause to let any Enter-key handler resolve before checking URL
+                    await asyncio.sleep(0.6)
+                    _after_enter_path = urlparse(page.url).path.rstrip("/")
+                    _orig_login_path = urlparse(login_url).path.rstrip("/")
+                    if _after_enter_path == _orig_login_path:
+                        # Still on the login page — try explicit button click
+                        clicked = await _try_click_submit(page)
+                        _log.debug(
+                            "env_login_submit_btn profile=%s clicked=%s",
+                            cache_key,
+                            clicked,
+                        )
+
                     # Wait for navigation away from the login page.
                     # Using a URL-polling loop handles multi-step OAuth redirects
                     # (login → IdP → MFA → callback → app) that fool networkidle.
-                    _login_path_kws = ("login", "signin", "sign-in", "oauth", "auth/")
+                    # Poll continues while the current URL path matches the login page
+                    # OR matches common auth path keywords.  Using path comparison (not
+                    # substring on the full URL) avoids false-positives on paths like
+                    # /authenticate-callback that legitimately contain "auth".
+                    _login_path_norm = urlparse(login_url).path.rstrip("/")
+                    _login_path_kws = ("login", "signin", "sign-in", "oauth")
                     poll_interval_s = max(BLOP_AUTH_LOGIN_POLL_INTERVAL_MS, 50) / 1000.0
                     for _ in range(max(BLOP_AUTH_LOGIN_POLL_STEPS, 1)):
                         await asyncio.sleep(poll_interval_s)
-                        current_url = page.url.lower()
-                        if not any(kw in current_url for kw in _login_path_kws):
+                        _poll_url = page.url
+                        _poll_path = urlparse(_poll_url).path.rstrip("/")
+                        # Break once we've left the login page and no other auth keyword matches
+                        if _poll_path != _login_path_norm and not any(
+                            kw in _poll_url.lower() for kw in _login_path_kws
+                        ):
                             break
                     else:
                         # Fallback: just wait for network to settle
@@ -314,12 +386,27 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
                     )
                     page_has_error = any(kw in page_text for kw in _login_error_kws)
 
+                    # Compare path components only — avoids false positives on SPAs where the
+                    # post-login redirect stays on a path that contains "auth" (e.g. /auth/callback
+                    # → /app). Broad string matching on the full URL fires incorrectly for any app
+                    # whose URL contains the word "auth" after a successful login.
+                    from urllib.parse import urlparse as _urlparse
+
+                    _login_path = _urlparse(login_url).path.rstrip("/")
+                    _current_path = _urlparse(current_url).path.rstrip("/")
                     login_failed = (
-                        login_url.rstrip("/") in current_url.rstrip("/")
-                        or "login" in current_url.lower()
-                        or "auth" in current_url.lower()
-                        or "signin" in current_url.lower()
+                        _current_path == _login_path
+                        or "login" in _current_path.lower()
+                        or "signin" in _current_path.lower()
                         or page_has_error
+                    )
+                    _log.debug(
+                        "env_login_check profile=%s login_path=%s current_path=%s page_has_error=%s login_failed=%s",
+                        cache_key,
+                        _login_path,
+                        _current_path,
+                        page_has_error,
+                        login_failed,
                     )
                     if login_failed:
                         if os.path.exists(state_path):
@@ -327,6 +414,21 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
                         return None
 
                     await context.storage_state(path=state_path)
+                    # Normalize origins: Playwright may omit `localStorage` when empty,
+                    # but some versions require it to be an explicit array on read-back.
+                    try:
+                        with open(state_path) as _sf:
+                            _ss = json.load(_sf)
+                        _changed = False
+                        for _orig in _ss.get("origins", []):
+                            if "localStorage" not in _orig:
+                                _orig["localStorage"] = []
+                                _changed = True
+                        if _changed:
+                            with open(state_path, "w") as _sf:
+                                json.dump(_ss, _sf)
+                    except Exception:
+                        pass
                 finally:
                     try:
                         await context.close()
