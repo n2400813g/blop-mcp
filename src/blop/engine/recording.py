@@ -10,6 +10,7 @@ import json
 import os
 import re
 import uuid
+from collections import Counter
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -373,6 +374,62 @@ class BlopActions:
         return "no_modal"
 
 
+def _detect_action_loops(actions: list[dict]) -> dict | None:
+    """Detect repetitive action patterns in a browser-use agent history.
+
+    Scans a sliding window of actions for repeated ``(action_type, element_signal)``
+    pairs — the clearest signature of a stuck agent.  Returns a summary dict when a
+    loop is found, otherwise None.
+
+    Args:
+        actions: List of action dicts from ``history.model_actions()``.  Each dict
+            has one non-None key for the action type plus an optional
+            ``interacted_element`` key.
+
+    Returns:
+        dict with ``loop_detected=True`` and diagnostic fields, or None.
+    """
+    _WINDOW = 6
+    _THRESHOLD = 3
+
+    if len(actions) < _WINDOW:
+        return None
+
+    # Build a compact signature for each action: "action_type:element_name_or_url"
+    signatures: list[str] = []
+    for action in actions:
+        for key, val in action.items():
+            if key == "interacted_element" or val is None:
+                continue
+            element = action.get("interacted_element")
+            if isinstance(element, dict):
+                signal = element.get("name") or element.get("text") or element.get("xpath", "")[:60]
+            elif isinstance(val, dict):
+                # navigate / go_to_url
+                signal = str(val.get("url") or val.get("text") or "")[:80]
+            else:
+                signal = str(val)[:80]
+            signatures.append(f"{key}:{signal}")
+            break
+
+    # Slide a window across signatures looking for repeats
+    for i in range(len(signatures) - _WINDOW + 1):
+        window = signatures[i : i + _WINDOW]
+        counts = Counter(window)
+        top_sig, top_count = counts.most_common(1)[0]
+        if top_count >= _THRESHOLD:
+            return {
+                "loop_detected": True,
+                "repeated_action": top_sig,
+                "repeat_count": top_count,
+                "window_start_index": i,
+                "window_size": _WINDOW,
+                "total_actions": len(actions),
+            }
+
+    return None
+
+
 SPA_AGENT_RULES = (
     "IMPORTANT — SPA & web-component rules: "
     "(1) After clicking a project card or nav link, wait 3–5 seconds before asserting that content is visible — views load asynchronously in SPAs. "
@@ -386,7 +443,13 @@ SPA_AGENT_RULES = (
     "A dark or blank canvas is NOT a failure; it means the application is still initialising. "
     "(8) In canvas-based applications, only assert DOM chrome elements: toolbar buttons, menu bar items, top-level controls, or the canvas element itself. "
     "Do not attempt to interact with content rendered inside the canvas — it is not in the accessibility tree. "
-    "(9) The canvas application has loaded successfully when at least one actionable toolbar element (e.g. Export, Publish, File menu) is visible in the DOM."
+    "(9) The canvas application has loaded successfully when at least one actionable toolbar element (e.g. Export, Publish, File menu) is visible in the DOM. "
+    "(10) LOOP DETECTION — CRITICAL: If you have attempted the same action on the same element (same text, selector, or position) "
+    "TWO times without making observable progress (URL unchanged, no new visible content), STOP immediately. "
+    "Do NOT attempt a third time. Call done() and report: 'STUCK: unable to complete [action] on [element] after 2 attempts. "
+    "Current URL: [url]. Last visible content: [description].' Repeating a stuck action wastes time and never unblocks. "
+    "(11) PROGRESS CHECK: Every 5 actions, verify you are making real progress: has the URL changed, or has new meaningful content appeared? "
+    "If neither is true, the task is blocked — call done() with a clear stuck report rather than continuing to retry."
 )
 
 
@@ -493,6 +556,12 @@ async def record_flow(
                 _log.debug("poll screenshot capture", exc_info=True)
 
     try:
+        # Start the browser session before constructing the Agent.
+        # BrowserSession.start() launches the Playwright browser and creates the
+        # initial context; without it the Agent constructor has no page to attach to
+        # and silently fails to load.
+        await browser_session.start()
+
         agent_kwargs: dict = dict(
             task=task,
             llm=llm,
@@ -543,6 +612,22 @@ async def record_flow(
             _log.debug("get page reference from browser session", exc_info=True)
 
         all_actions = history.model_actions() if hasattr(history, "model_actions") else []
+
+        # Post-hoc loop detection: warn when the agent got stuck repeating actions.
+        # This never blocks recording — it only adds diagnostic context to the log
+        # and is surfaced in health events so operators can see which flows looped.
+        if all_actions:
+            loop_info = _detect_action_loops(all_actions)
+            if loop_info:
+                _log.warning(
+                    "agent_loop_detected run_id=%s repeated_action=%r repeat_count=%d total_actions=%d",
+                    run_id,
+                    loop_info["repeated_action"],
+                    loop_info["repeat_count"],
+                    loop_info["total_actions"],
+                    extra={"event": "agent_loop_detected", **loop_info, "run_id": run_id},
+                )
+
         if os.getenv("BLOP_DEBUG"):
             try:
                 with open("/tmp/blop_debug.log", "a") as _dbg:

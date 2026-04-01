@@ -266,7 +266,110 @@ async def main() -> int:
             print(f"    [{gating}] {name}  ({crit})")
         assert len(journeys) >= 1, f"Expected at least 1 journey, got {len(journeys)}"
 
-    # Steps 6-7 go here (added in subsequent tasks)
+    # ── Step 5: Record 2 flows ────────────────────────────────────────────────
+    from blop.tools.record import record_test_flow
+
+    flows_to_record = _select_flows_to_record(discovered_journeys)
+    recorded_flow_ids: list[str] = []
+
+    for i, journey in enumerate(flows_to_record, 1):
+        step_name = f"record_flow_{i}"
+        journey_name = journey.get("journey_name") or journey.get("name") or journey.get("flow_name") or f"flow_{i}"
+        goal = (
+            journey.get("goal") or journey.get("why_it_matters") or f"Complete the {journey_name} journey on {app_url}"
+        )
+        criticality = journey.get("business_criticality") or "other"
+        flow_name = f"sensai_bench_{journey_name.lower().replace(' ', '_')[:40]}"
+
+        with timed_step(step_name) as r:
+            print(f"  flow_name      : {flow_name}")
+            print(f"  goal           : {goal[:120]}")
+            print(f"  criticality    : {criticality}")
+            rf = await record_test_flow(
+                flow_name=flow_name,
+                goal=goal,
+                app_url=app_url,
+                profile_name=profile_name,
+                business_criticality=criticality,
+            )
+            r.data = rf
+            if rf.get("error"):
+                lc = (rf.get("mcp_error") or {}).get("details", {}).get("likely_cause", "")
+                print(f"  error          : {rf['error']}")
+                if lc:
+                    print(f"  likely_cause   : {lc}")
+                raise RuntimeError(rf["error"])
+            flow_id = rf.get("flow_id") or (rf.get("data") or {}).get("flow_id")
+            step_count = rf.get("step_count") or len(rf.get("steps") or [])
+            print(f"  flow_id        : {flow_id}")
+            print(f"  steps recorded : {step_count}")
+            assert flow_id, f"record_test_flow returned no flow_id: {rf}"
+            recorded_flow_ids.append(flow_id)
+
+    # ── Step 6: Regression test ──────────────────────────────────────────────
+    from blop.tools.regression import run_regression_test
+    from blop.tools.results import get_test_results
+
+    regression_run_id: str | None = None
+
+    if recorded_flow_ids:
+        with timed_step("regression") as r:
+            rc = await run_regression_test(
+                app_url=app_url,
+                flow_ids=recorded_flow_ids,
+                profile_name=profile_name,
+                headless=True,
+                run_mode="replay",
+            )
+            r.data = rc
+            if rc.get("error"):
+                lc = (rc.get("mcp_error") or {}).get("details", {}).get("likely_cause", "")
+                print(f"  error          : {rc['error']}")
+                if lc:
+                    print(f"  likely_cause   : {lc}")
+                raise RuntimeError(rc["error"])
+            run_id = rc.get("run_id") or (rc.get("data") or {}).get("run_id")
+            assert run_id, f"run_regression_test returned no run_id: {rc}"
+            regression_run_id = run_id
+            print(f"  run_id         : {run_id}")
+            print("  polling for completion (deadline 10 min)...")
+
+            deadline = time.monotonic() + 600.0
+            status = None
+            while time.monotonic() < deadline:
+                tr = await get_test_results(run_id=run_id)
+                status = tr.get("status")
+                passed = tr.get("passed_cases", 0)
+                failed = tr.get("failed_cases_count", 0) or len(tr.get("failed_cases", []))
+                print(f"  status={status}  passed={passed}  failed={failed}     ", end="\r")
+                if status in ("completed", "failed", "cancelled"):
+                    break
+                await asyncio.sleep(3.0)
+            print()
+            assert status in ("completed", "failed", "cancelled"), f"timeout polling {run_id}"
+            print(f"  final status   : {status}")
+            r.data["final_status"] = status
+            r.data["run_id"] = run_id
+    else:
+        print("\nSKIP regression: no flows were recorded")
+
+    # ── Step 7: Get results + decision ──────────────────────────────────────
+    if regression_run_id:
+        with timed_step("results") as r:
+            tr = await get_test_results(run_id=regression_run_id)
+            r.data = tr
+            decision = tr.get("decision") or tr.get("release_recommendation") or tr.get("status", "N/A")
+            passed = tr.get("passed_cases", 0)
+            failed_list = tr.get("failed_cases") or []
+            failed_count = tr.get("failed_cases_count", 0) or len(failed_list)
+            total_cases = passed + failed_count
+            print(f"  decision       : {decision}")
+            print(f"  cases          : {passed}/{total_cases} passed")
+            if failed_list:
+                for fc in failed_list[:3]:
+                    name = fc.get("flow_name") or fc.get("case_id", "?")
+                    severity = fc.get("severity", "")
+                    print(f"  FAIL case      : {name}  [{severity}]")
 
     _print_report(app_url)
     failed = sum(1 for r in _results if not r.ok)

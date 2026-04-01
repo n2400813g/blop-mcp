@@ -388,10 +388,30 @@ async def execute_recorded_flow(
                 )
             trace.step_results.append(step_result)
 
+            # Semantic readiness wait — applied after successful non-navigate actions.
+            # Replaces raw sleep with condition-based waits (visible selector, hidden
+            # spinner, or flow-level SpaHints fallback).  Never raises — a timeout is
+            # logged at debug level and execution continues.
+            if step_result.status == "pass" and step.action not in ("navigate", "assert", "wait"):
+                try:
+                    from blop.engine.interaction import wait_for_step_readiness
+
+                    await wait_for_step_readiness(
+                        page,
+                        wait_until_visible=getattr(step, "wait_until_visible", None),
+                        wait_until_hidden=getattr(step, "wait_until_hidden", None),
+                        timeout_ms=getattr(step, "wait_readiness_timeout_ms", 10000),
+                        spa_hints=spa_hints,
+                    )
+                except Exception:
+                    _log.debug("wait_for_step_readiness failed", exc_info=True)
+
             try:
+                from blop.engine.a11y_page_state import page_state_for_health_event
                 from blop.reporting.health_event_taxonomy import canonical_replay_step_activity
                 from blop.storage import sqlite as _sqlite_health
 
+                a11y_meta = await page_state_for_health_event(page, max_nodes=40)
                 await _sqlite_health.save_run_health_event(
                     run_id,
                     "replay_step_completed",
@@ -409,6 +429,7 @@ async def execute_recorded_flow(
                         "selector_entropy": step_result.selector_entropy,
                         "aria_consistency": step_result.aria_consistency,
                         "activity": canonical_replay_step_activity(step.action, step_result.status),
+                        **a11y_meta,
                     },
                 )
             except Exception:
@@ -915,6 +936,41 @@ async def _execute_single_step(
         except Exception:
             _log.debug("text lookup locator try failed", exc_info=True)
 
+    # Tier 5b: Semantic resolution against live a11y tree (before LLM repair)
+    if action in ("click", "fill", "upload", "drag", "select"):
+        try:
+            from blop.engine.a11y_resolve import resolve_interactive_target
+            from blop.engine.dom_utils import extract_interactive_nodes_flat as _semantic_a11y_nodes
+
+            snap = await page.accessibility.snapshot(interesting_only=True)
+            if isinstance(snap, dict):
+                flat_nodes = _semantic_a11y_nodes(snap, max_nodes=80)
+                cand = resolve_interactive_target(step, flat_nodes, action=action)
+                if cand:
+                    loc = page.get_by_role(cand["role"], name=cand["name"], exact=False)
+                    ok, reason, err, _ = await _try_locator(
+                        loc,
+                        "a11y_semantic",
+                        allow_ambiguous_override=True,
+                    )
+                    if ok:
+                        shot = await _take_step_screenshot(
+                            page, run_id, case_id, step_idx, evidence_policy=evidence_policy
+                        )
+                        return _result(
+                            status="pass",
+                            replay_mode="a11y_semantic",
+                            screenshot_path=shot,
+                            healed_locator_type="role",
+                            healed_role=cand["role"],
+                            healed_name=cand["name"],
+                            repair_confidence=float(cand.get("score", 0.7)),
+                        )
+                    if reason and reason != "locator_not_found":
+                        last_reason, last_error = reason, err
+        except Exception:
+            _log.debug("a11y semantic resolve failed", exc_info=True)
+
     # Tier 6: Hybrid repair via agent (ARIA-enhanced)
     if run_mode == "hybrid":
         trace.run_mode = "hybrid_repair"
@@ -1371,6 +1427,13 @@ def _trace_to_failure_case(
                 if s.step_id == r.step_id:
                     original_sel = s.selector
                     break
+            _strategy = (
+                "a11y_semantic_resolve"
+                if r.replay_mode == "a11y_semantic"
+                else "llm_repair"
+                if r.replay_mode in ("agent_repair", "hybrid_repair")
+                else "locator_update"
+            )
             healed_steps.append(
                 HealedStep(
                     step_id=r.step_id,
@@ -1380,6 +1443,8 @@ def _trace_to_failure_case(
                     healed_role=r.healed_role,
                     healed_name=r.healed_name,
                     repair_confidence=r.repair_confidence,
+                    heal_strategy=_strategy,
+                    heal_confidence=r.repair_confidence,
                 )
             )
 
@@ -1570,6 +1635,11 @@ async def _goal_fallback(
     final_url = ""
 
     try:
+        # Start the browser session before constructing the Agent.
+        # BrowserSession.start() launches Playwright + browser; without it the Agent
+        # has no page context and silently fails to initialize.
+        await browser_session.start()
+
         llm = make_agent_llm(role="agent")
         page_extraction_llm = make_planning_llm(temperature=0.0, max_output_tokens=256, role="summary")
         from blop.engine.auth_prompt import append_runtime_auth_guidance
@@ -1632,6 +1702,24 @@ async def _goal_fallback(
                         screenshots.append(final_path)
             except Exception:
                 _log.debug("goal fallback final screenshot failed", exc_info=True)
+
+            # Post-hoc loop detection for goal-fallback agent runs
+            try:
+                from blop.engine.recording import _detect_action_loops
+
+                _gf_actions = history.model_actions() if hasattr(history, "model_actions") else []
+                _loop_info = _detect_action_loops(_gf_actions) if _gf_actions else None
+                if _loop_info:
+                    _log.warning(
+                        "goal_fallback_loop_detected run_id=%s flow=%r repeated_action=%r repeat_count=%d",
+                        run_id,
+                        flow.flow_name,
+                        _loop_info["repeated_action"],
+                        _loop_info["repeat_count"],
+                        extra={"event": "goal_fallback_loop_detected", "run_id": run_id, **_loop_info},
+                    )
+            except Exception:
+                _log.debug("goal fallback loop detection failed", exc_info=True)
 
             # Prefer done-action text over final_result() which only returns ExtractAction content
             # model_dump() includes ALL action type keys (most None) — find the non-None one
@@ -1762,6 +1850,15 @@ async def _goal_fallback(
     )
 
 
+def compute_replay_worker_count(flows: list[RecordedFlow], run_mode: str) -> int:
+    """Bounded parallel workers for journey replay (shared logic for orchestration + MCP envelope)."""
+    if not flows:
+        return 0
+    _tracing_active = any((getattr(flow, "run_mode_override", None) or run_mode) != "goal_fallback" for flow in flows)
+    default_workers = 3 if _tracing_active else 5
+    return max(1, min(BLOP_REPLAY_CONCURRENCY or default_workers, len(flows)))
+
+
 async def run_flows(
     flows: list[RecordedFlow],
     app_url: str,
@@ -1781,11 +1878,12 @@ async def run_flows(
     if not flows:
         return []
 
-    # Playwright tracing with DOM snapshots is memory-intensive; reduce concurrency
-    # whenever at least one flow will execute in step-replay mode.
-    _tracing_active = any((getattr(flow, "run_mode_override", None) or run_mode) != "goal_fallback" for flow in flows)
-    default_workers = 3 if _tracing_active else 5
-    worker_count = max(1, min(BLOP_REPLAY_CONCURRENCY or default_workers, len(flows)))
+    worker_count = compute_replay_worker_count(flows, run_mode)
+    if execution_metadata is not None:
+        execution_metadata["_orchestration"] = {
+            "replay_worker_count": worker_count,
+            "isolated_browser_context_per_flow": True,
+        }
     ordered_flows = _interleave_flows_by_entry_area(flows)
     results: list[FailureCase | Exception | None] = [None] * len(flows)
     original_positions = {flow.flow_id: idx for idx, flow in enumerate(flows)}
