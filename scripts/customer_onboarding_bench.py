@@ -176,7 +176,30 @@ async def main() -> int:
             for w in vr.get("warnings", [])[:3]:
                 print(f"  warning  : {w}")
 
-    # Steps 3-7 go here (added in subsequent tasks)
+    # ── Step 2: Auth setup ───────────────────────────────────────────────────
+    from blop.tools.auth import save_auth_profile
+
+    with timed_step("auth_setup") as r:
+        ar = await save_auth_profile(
+            profile_name=profile_name,
+            auth_type="env_login",
+            login_url=login_url,
+            username_env="TEST_USERNAME",
+            password_env="TEST_PASSWORD",
+        )
+        r.data = ar
+        if ar.get("error"):
+            lc = (ar.get("mcp_error") or {}).get("details", {}).get("likely_cause", "")
+            print(f"  error          : {ar['error']}")
+            if lc:
+                print(f"  likely_cause   : {lc}")
+            raise RuntimeError(ar["error"])
+        print(f"  profile_name   : {ar.get('profile_name', profile_name)}")
+        print("  auth_type      : env_login")
+        storage = ar.get("storage_state_path") or ar.get("storage_path") or "cached"
+        print(f"  storage_state  : {storage}")
+
+    # Steps 4-7 go here (added in subsequent tasks)
 
     _print_report(app_url)
     failed = sum(1 for r in _results if not r.ok)
