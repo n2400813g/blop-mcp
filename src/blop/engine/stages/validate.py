@@ -7,10 +7,13 @@ from blop.engine.pipeline import RunContext
 
 
 def validate_app_url(url: str) -> str:
-    """Thin wrapper so tests can patch at this module's import path."""
+    """Validate url and return it normalized; raise ValueError on failure."""
     from blop.config import validate_app_url as _v
 
-    return _v(url)
+    error_msg = _v(url)
+    if error_msg is not None:
+        raise ValueError(error_msg)
+    return url.strip()
 
 
 class ValidateStage:
