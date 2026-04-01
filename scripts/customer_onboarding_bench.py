@@ -156,7 +156,27 @@ async def main() -> int:
     print(f"Target: {app_url}")
     print(f"Login:  {login_url}")
 
-    # Steps 1-7 go here (added in subsequent tasks)
+    # ── Step 1: Preflight ────────────────────────────────────────────────────
+    import blop.config  # noqa: F401 — loads env, suppresses logging
+    from blop.tools.validate import validate_release_setup
+
+    with timed_step("preflight") as r:
+        vr = await validate_release_setup(app_url=app_url)
+        r.data = vr
+        status = vr.get("status", "unknown")
+        print(f"  status   : {status}")
+        print(f"  headline : {vr.get('headline', '')}")
+        if status == "blocked":
+            r.ok = False
+            for blocker in vr.get("blockers", []):
+                print(f"  BLOCKER  : {blocker}")
+            _print_report(app_url)
+            return 1
+        if status == "warnings":
+            for w in vr.get("warnings", [])[:3]:
+                print(f"  warning  : {w}")
+
+    # Steps 3-7 go here (added in subsequent tasks)
 
     _print_report(app_url)
     failed = sum(1 for r in _results if not r.ok)
