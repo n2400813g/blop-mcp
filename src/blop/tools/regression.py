@@ -25,7 +25,7 @@ from blop.storage import sqlite
 _log = get_logger("tools.regression")
 _RUN_TASKS: dict[str, asyncio.Task] = {}
 _PENDING_DB_FINALIZERS: set[asyncio.Task] = set()
-_TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "waiting_auth"}
+_TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "interrupted", "waiting_auth"}
 _RUN_CHECKPOINT_KEY = "durable_checkpoint"
 
 

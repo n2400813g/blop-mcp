@@ -27,7 +27,7 @@ from blop.schemas import (
 
 _log = get_logger("sqlite")
 
-_TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
+_TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 
 _RUN_HEALTH_BUFFER_LIMIT = max(1, int(os.getenv("BLOP_RUN_HEALTH_BUFFER_LIMIT", "16")))
 _RUN_HEALTH_HARD_MAX = max(

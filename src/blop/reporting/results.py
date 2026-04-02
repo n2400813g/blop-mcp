@@ -115,6 +115,11 @@ def explain_run_status(status: str, *, run_id: str = "", top_failure_mode: str |
             "recommended_next_action": "Restart the run when you are ready to continue.",
             "is_terminal": True,
         },
+        "interrupted": {
+            "status_detail": "Run was interrupted because the MCP session disconnected or the server restarted.",
+            "recommended_next_action": "Restart the run when you are ready. The previous run ID is no longer active.",
+            "is_terminal": True,
+        },
     }
     result = guidance.get(
         status,
@@ -475,6 +480,7 @@ def _compute_release_recommendation(
         "decision": decision,
         "confidence": confidence,
         "rationale": rationale,
+        "summary": rationale,
         "blocker_count": len(blockers),
         "critical_journey_failures": critical_journey_failures_total,
         "critical_drifted_passes": len(critical_drifted_passes),
@@ -510,9 +516,69 @@ def _healing_confidence_label(repair_confidence: float) -> str:
     return "low"
 
 
+def _normalize_assertion_results_for_agent(assertion_results: list | None) -> list[dict]:
+    """Ensure each assertion dict has both assertion and description (agent-facing aliases)."""
+    out: list[dict] = []
+    for item in assertion_results or []:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        text = str(row.get("assertion") or row.get("description") or "").strip()
+        if text:
+            row.setdefault("assertion", text)
+            row.setdefault("description", text)
+        out.append(row)
+    return out
+
+
+def _failure_summary_for_case_dict(d: dict) -> str:
+    """Single human-readable line for agents (failure_summary); mirrors stored FailureCase fields."""
+    af = d.get("assertion_failures") or []
+    if af:
+        return "; ".join(str(x) for x in af if x)
+    failed_assertions: list[str] = []
+    for r in d.get("assertion_results") or []:
+        if isinstance(r, dict) and not r.get("passed", True):
+            t = str(r.get("assertion") or r.get("description") or "").strip()
+            if t:
+                failed_assertions.append(t)
+    if failed_assertions:
+        return "; ".join(failed_assertions)
+    rr = str(d.get("raw_result") or "").strip()
+    if rr:
+        return rr[:2000]
+    codes = d.get("failure_reason_codes") or []
+    if codes:
+        return "failure_reason_codes: " + ", ".join(str(c) for c in codes)
+    if d.get("status") in ("fail", "error", "blocked"):
+        sl = str(d.get("severity_label") or "").strip()
+        if sl and sl.upper() != "NONE":
+            return sl
+        fn = str(d.get("flow_name") or "").strip()
+        if fn:
+            return f"Failed journey: {fn}"
+    return ""
+
+
+def _error_detail_for_case_dict(d: dict) -> str:
+    """Console/network or raw excerpt for agents (error_detail)."""
+    ce = d.get("console_errors") or []
+    if ce:
+        return str(ce[0])[:2000]
+    ne = d.get("network_errors") or []
+    if ne:
+        return str(ne[0])[:2000]
+    if d.get("status") in ("fail", "error", "blocked"):
+        rr = str(d.get("raw_result") or "").strip()
+        if rr:
+            return rr[:2000]
+    return ""
+
+
 def _enrich_case(c: FailureCase) -> dict:
     """Return a case payload enriched with reporting metadata."""
     d = c.model_dump()
+    d["assertion_results"] = _normalize_assertion_results_for_agent(d.get("assertion_results"))
     d["artifact_paths"] = c.screenshots
     d["severity_label"] = _severity_label(c)
     d["healed_step_count"] = len(c.healed_steps or [])
@@ -526,6 +592,8 @@ def _enrich_case(c: FailureCase) -> dict:
             and _healing_confidence_label(getattr(c, "repair_confidence", 0.0)) == "low"
         )
     )
+    d["failure_summary"] = _failure_summary_for_case_dict(d)
+    d["error_detail"] = _error_detail_for_case_dict(d)
     return d
 
 
