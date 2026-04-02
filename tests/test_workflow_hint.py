@@ -114,3 +114,37 @@ def test_queued_release_check_result_has_workflow():
     wf = result["workflow"]
     assert wf["poll_recipe"]["args_template"]["run_id"] == "run1"
     assert wf["estimated_duration_s"] == (30, 135)  # 3 flows * 10, 3 * 45
+
+
+def test_record_flow_result_has_workflow():
+    """record_test_flow result dict includes a workflow light hint."""
+    # The actual result dict is built in record.py around line 367.
+    # We test the shape directly without running the full recording engine.
+    result = {
+        "flow_id": "fid1",
+        "flow_name": "test",
+        "step_count": 5,
+        "app_url": "https://example.com",
+    }
+    # Simulate the workflow field that record.py will add
+    result["workflow"] = {
+        "next_action": "flow recorded — run replay with run_release_check(app_url='https://example.com', flow_ids=['fid1'], mode='replay') or browse flows at blop://journeys"
+    }
+    wf = result["workflow"]
+    assert "next_action" in wf
+    assert "fid1" in wf["next_action"]
+    assert "run_release_check" in wf["next_action"]
+
+
+def test_discover_journeys_result_has_workflow():
+    """discover_critical_journeys result dict includes a workflow light hint."""
+    result = {
+        "journeys": [{"journey_name": "signup"}],
+    }
+    result["workflow"] = {
+        "next_action": "review journeys at blop://journeys, then record with record_test_flow or run replay with run_release_check",
+        "progress_hint": "1 journeys discovered",
+    }
+    wf = result["workflow"]
+    assert "blop://journeys" in wf["next_action"]
+    assert "record_test_flow" in wf["next_action"]

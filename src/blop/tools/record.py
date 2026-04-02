@@ -96,6 +96,58 @@ def _ensure_assertion_steps(steps, goal: str):
     return steps
 
 
+def _inject_start_url_assert_after_nav(steps: list, app_url: str, goal: str) -> list:
+    """Insert a url_contains assert for :func:`recording._recording_start_url` after leading navigates.
+
+    LLM screenshot assertions are often ``semantic`` and replay via vision (flaky). When the goal names a
+    deeper same-origin URL, a deterministic URL check should run first so authenticated replay can
+    fail clearly on redirects (e.g. expired session) instead of ``vision_batch: unknown``.
+    """
+    from urllib.parse import urlparse
+
+    from blop.engine.recording import _recording_start_url
+    from blop.schemas import FlowStep, StructuredAssertion
+
+    start_url = _recording_start_url(app_url, goal)
+    base_p, start_p = urlparse(app_url), urlparse(start_url)
+
+    def _sig(p) -> tuple[str, str]:
+        return ((p.path or "").rstrip("/"), p.query or "")
+
+    if _sig(base_p) == _sig(start_p):
+        return steps
+
+    expected = start_p.path or "/"
+    if start_p.query:
+        expected = f"{expected}?{start_p.query}"
+
+    for s in steps:
+        if getattr(s, "action", None) != "assert":
+            continue
+        sa = getattr(s, "structured_assertion", None)
+        if sa and sa.assertion_type == "url_contains" and (sa.expected or "") == expected:
+            return steps
+
+    nav_end = 0
+    while nav_end < len(steps) and steps[nav_end].action == "navigate":
+        nav_end += 1
+
+    desc = f"URL contains {expected}"
+    insert = FlowStep(
+        step_id=nav_end,
+        action="assert",
+        description=desc,
+        value=desc,
+        structured_assertion=StructuredAssertion(
+            assertion_type="url_contains",
+            expected=expected,
+            description=desc,
+        ),
+    )
+    out = list(steps[:nav_end]) + [insert] + list(steps[nav_end:])
+    return [s.model_copy(update={"step_id": i}) for i, s in enumerate(out)]
+
+
 async def _find_refresh_candidate(app_url: str, flow_name: str) -> dict | None:
     return await sqlite.find_flow_by_url_and_name(app_url, flow_name)
 
@@ -132,6 +184,7 @@ async def record_test_flow(
     platform: str = "web",
     mobile_target: Optional[dict] = None,
     headless: bool = False,
+    force_no_auth: bool = False,
 ) -> dict:
     if not flow_name or not flow_name.strip():
         return tool_error("flow_name is required", BLOP_VALIDATION_FAILED, details={"field": "flow_name"})
@@ -187,7 +240,7 @@ async def record_test_flow(
             return {
                 "error": (f"Auth profile '{profile_name}' could not be resolved. Run capture_auth_session to refresh.")
             }
-    if storage_state is None:
+    if storage_state is None and not force_no_auth:
         storage_state = await auth_engine.auto_storage_state_from_env()
 
     refresh_candidate = await _find_refresh_candidate(app_url, flow_name)
@@ -204,6 +257,7 @@ async def record_test_flow(
         run_id=run_id,
     )
     steps = _ensure_assertion_steps(steps, goal)
+    steps = _inject_start_url_assert_after_nav(steps, app_url, goal)
     entry_url = _select_entry_url(app_url, goal, steps)
 
     # Collect assertion texts from assert steps
@@ -308,12 +362,24 @@ async def record_test_flow(
             f"Flow '{flow_name}' was refreshed and supersedes {refresh_candidate.get('flow_id')}. "
             f"Next: use flow_ids=['{flow.flow_id}'] with run_release_check(app_url='{app_url}', mode='replay')."
         )
+        result["workflow"] = {
+            "next_action": (
+                f"flow refreshed — run replay with run_release_check(app_url='{app_url}', "
+                f"flow_ids=['{flow.flow_id}'], mode='replay') or browse flows at blop://journeys"
+            )
+        }
     else:
         result["refresh_summary"] = {"refresh_detected": False}
         result["workflow_hint"] = (
             f"Flow '{flow_name}' recorded ({len(steps)} steps). "
             f"Next: run_release_check(app_url='{app_url}', flow_ids=['{flow.flow_id}'], mode='replay')"
         )
+        result["workflow"] = {
+            "next_action": (
+                f"flow recorded — run replay with run_release_check(app_url='{app_url}', "
+                f"flow_ids=['{flow.flow_id}'], mode='replay') or browse flows at blop://journeys"
+            )
+        }
     return result
 
 

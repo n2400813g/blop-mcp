@@ -104,7 +104,7 @@ async def discover_critical_journeys(
 
     gated = [j for j in journeys if j["include_in_release_gating"]]
     recommended_flow_ids = [j["flow_id"] for j in gated if j.get("flow_id")]
-    return {
+    result = {
         "journeys": journeys,
         "journey_count": len(journeys),
         "release_gating_count": len(gated),
@@ -120,6 +120,14 @@ async def discover_critical_journeys(
             "Next: record any missing gated journeys, then call run_release_check(app_url=..., flow_ids=[...], mode='replay')."
         ),
     }
+    journeys_count = len(result.get("journeys") or [])
+    result["workflow"] = {
+        "next_action": (
+            "review journeys at blop://journeys, then record with record_test_flow or run replay with run_release_check"
+        ),
+        "progress_hint": f"{journeys_count} journey(s) discovered",
+    }
+    return result
 
 
 def _flow_dict_to_critical_journey(
