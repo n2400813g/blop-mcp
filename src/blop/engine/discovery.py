@@ -9,7 +9,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urljoin, urlparse
 
 from blop.config import (
@@ -25,6 +25,8 @@ from blop.engine.secrets import mask_text
 from blop.schemas import SiteInventory
 
 _log = get_logger("discovery")
+
+ProgressCallback = Callable[[int, int, str], Awaitable[None]] | None
 
 
 @dataclass(frozen=True)
@@ -864,6 +866,7 @@ async def inventory_site(
     seed_urls: Optional[list[str]] = None,
     include_url_pattern: Optional[str] = None,
     exclude_url_pattern: Optional[str] = None,
+    progress_callback: "ProgressCallback | None" = None,
 ) -> SiteInventory:
     """Parallel crawl up to depth max_depth; extract buttons, links, forms, headings, and signals."""
     base_origin = urlparse(app_url).netloc
@@ -991,6 +994,11 @@ async def inventory_site(
                 if result.error:
                     scheduled_pages = max(0, scheduled_pages - 1)
                 _absorb_result(result)
+                if progress_callback is not None:
+                    try:
+                        await progress_callback(crawled_pages, adaptive_max_pages, f"crawled {result.url}")
+                    except Exception:
+                        pass
         finally:
             try:
                 await bootstrap_lease.close()
@@ -1031,6 +1039,12 @@ async def inventory_site(
                                 scheduled_pages = max(crawled_pages, scheduled_pages - 1)
                             _absorb_result(result)
                             condition.notify_all()
+                            _pages_so_far = crawled_pages
+                        if progress_callback is not None and not result.error:
+                            try:
+                                await progress_callback(_pages_so_far, adaptive_max_pages, f"crawled {item.url}")
+                            except Exception:
+                                pass
                 finally:
                     try:
                         await page.close()
@@ -1243,6 +1257,7 @@ async def discover_flows(
     include_url_pattern: Optional[str] = None,
     exclude_url_pattern: Optional[str] = None,
     return_inventory: bool = False,
+    progress_callback: "ProgressCallback | None" = None,
 ) -> dict:
     """Crawl site, plan flows, quality-gate, return rich discovery result."""
     inventory = await inventory_site(
@@ -1253,6 +1268,7 @@ async def discover_flows(
         seed_urls=seed_urls,
         include_url_pattern=include_url_pattern,
         exclude_url_pattern=exclude_url_pattern,
+        progress_callback=progress_callback,
     )
     try:
         from blop.storage.sqlite import save_site_inventory

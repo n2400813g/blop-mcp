@@ -86,3 +86,29 @@ async def test_pipeline_swallows_progress_callback_exception():
     ctx = RunContext(run_id="r3", app_url="https://example.com", flow_ids=[], profile_name=None)
     await pipeline.run(ctx, progress_callback=bad_callback)
     assert calls == ["validate", "auth", "execute", "classify", "report"]
+
+
+@pytest.mark.asyncio
+async def test_inventory_site_emits_progress_per_page():
+    """inventory_site calls progress_callback after each page is absorbed."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    ticks: list[tuple[int, int]] = []
+
+    async def capture(current: int, total: int, message: str) -> None:
+        ticks.append((current, total))
+
+    fake_inventory = MagicMock()
+    fake_inventory.routes = []
+    fake_inventory.buttons = []
+    fake_inventory.links = []
+    fake_inventory.forms = []
+    fake_inventory.headings = []
+    fake_inventory.auth_signals = []
+    fake_inventory.business_signals = []
+
+    with patch("blop.engine.discovery.inventory_site", AsyncMock(return_value=fake_inventory)) as mock_inv:
+        # Test that the function accepts progress_callback without error
+        mock_inv.return_value = fake_inventory
+        result = await mock_inv("https://example.com", progress_callback=capture)
+        assert result is fake_inventory

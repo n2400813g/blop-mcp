@@ -6,6 +6,7 @@ import hashlib
 import re
 from typing import Annotated, Literal, Optional
 
+from mcp.server.fastmcp import Context
 from pydantic import Field
 
 from blop.config import BLOP_DISCOVERY_MAX_PAGES
@@ -57,6 +58,7 @@ async def discover_critical_journeys(
     seed_urls: Optional[list[str]] = None,
     include_url_pattern: Optional[str] = None,
     exclude_url_pattern: Optional[str] = None,
+    ctx: Context | None = None,
 ) -> dict:
     """Crawl app_url and plan 3-8 critical user journeys in business language.
 
@@ -78,6 +80,15 @@ async def discover_critical_journeys(
             except re.error as exc:
                 return tool_error(f"Invalid {param_name}: {exc}", BLOP_VALIDATION_FAILED, details={"param": param_name})
 
+    _progress_callback = None
+    if ctx is not None:
+
+        async def _progress_callback(current: int, total: int, message: str) -> None:
+            try:
+                await ctx.report_progress(current, total)
+            except Exception:
+                pass
+
     result = await discovery.discover_flows(
         app_url=app_url,
         profile_name=profile_name,
@@ -87,6 +98,7 @@ async def discover_critical_journeys(
         seed_urls=seed_urls,
         include_url_pattern=include_url_pattern,
         exclude_url_pattern=exclude_url_pattern,
+        progress_callback=_progress_callback,
     )
 
     if "error" in result:
