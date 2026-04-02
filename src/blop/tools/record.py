@@ -4,6 +4,7 @@ import re
 from typing import Annotated, Literal, Optional
 from urllib.parse import urlparse
 
+from mcp.server.fastmcp import Context
 from pydantic import Field
 
 from blop.engine import auth as auth_engine
@@ -185,6 +186,7 @@ async def record_test_flow(
     mobile_target: Optional[dict] = None,
     headless: bool = False,
     force_no_auth: bool = False,
+    ctx: Context | None = None,
 ) -> dict:
     if not flow_name or not flow_name.strip():
         return tool_error("flow_name is required", BLOP_VALIDATION_FAILED, details={"field": "flow_name"})
@@ -249,12 +251,22 @@ async def record_test_flow(
 
     run_id = uuid.uuid4().hex
 
+    _progress_callback = None
+    if ctx is not None:
+
+        async def _progress_callback(current: int, total: int, message: str) -> None:
+            try:
+                await ctx.report_progress(current, total)
+            except Exception:
+                pass
+
     steps = await recording.record_flow(
         app_url=app_url,
         goal=goal,
         storage_state=storage_state,
         headless=headless,
         run_id=run_id,
+        progress_callback=_progress_callback,
     )
     steps = _ensure_assertion_steps(steps, goal)
     steps = _inject_start_url_assert_after_nav(steps, app_url, goal)

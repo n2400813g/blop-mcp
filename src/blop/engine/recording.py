@@ -11,8 +11,10 @@ import os
 import re
 import uuid
 from collections import Counter
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 from urllib.parse import urlparse
+
+from browser_use import Agent, BrowserSession
 
 from blop.config import (
     BLOP_AGENT_MAX_ACTIONS_PER_STEP,
@@ -20,14 +22,18 @@ from blop.config import (
     BLOP_RECORDING_ENTRY_SETTLE_MS,
     BLOP_TEST_ID_ATTRIBUTE,
 )
+from blop.engine.browser import make_browser_profile
 from blop.engine.browser_pool import BROWSER_POOL
 from blop.engine.dom_utils import extract_interactive_nodes_flat
 from blop.engine.evidence_policy import cap_artifact_paths, resolve_evidence_policy, should_capture_screenshot
+from blop.engine.llm_factory import make_agent_llm, make_planning_llm
 from blop.engine.logger import get_logger
 from blop.engine.page_state import PageStateCache
 from blop.schemas import ApiExpectation, FlowStep, SemanticQuerySpec, StructuredAssertion
 
 _log = get_logger("recording")
+
+ProgressCallback = Callable[[int, int, str], Awaitable[None]] | None
 _LOW_SIGNAL_TARGET_TEXT = {
     "assert",
     "click",
@@ -121,6 +127,34 @@ def _extract_goal_urls(goal: str) -> list[str]:
     return urls
 
 
+def _recording_start_url(app_url: str, goal: str) -> str:
+    """Pick initial navigation URL: same host as app_url, but more specific path/query if the goal names one.
+
+    Without this, recording always tasks the agent with \"Navigate to {app_url}\" even when the goal
+    explicitly includes a full URL like ``.../analytics`` or ``.../auth``, so the agent often stops
+    at the marketing root and never reaches the intended surface.
+    """
+    base_p = urlparse(app_url)
+    base_host = (base_p.netloc or "").lower()
+    if not base_host:
+        return app_url
+
+    def _path_query_sig(p) -> tuple[str, str]:
+        path = (p.path or "").rstrip("/")
+        return (path, p.query or "")
+
+    base_sig = _path_query_sig(base_p)
+
+    for raw in _extract_goal_urls(goal):
+        cleaned = raw.rstrip(".,;:")
+        p = urlparse(cleaned)
+        if (p.netloc or "").lower() != base_host:
+            continue
+        if _path_query_sig(p) != base_sig:
+            return cleaned
+    return app_url
+
+
 def _extract_goal_text_expectations(goal: str) -> list[str]:
     expectations: list[str] = []
     patterns = (
@@ -204,6 +238,36 @@ def _build_public_page_assertions(
         seen.add(key)
         deduped.append((description, structured))
     return deduped[:3]
+
+
+_LLM_ASSERTION_TYPES = frozenset(
+    {
+        "text_present",
+        "element_visible",
+        "url_contains",
+        "page_title",
+        "count",
+        "semantic",
+        "semantic_query",
+        "visual_match",
+    }
+)
+
+
+def _normalize_llm_assertion_type(raw) -> str:
+    """Map LLM JSON ``type`` strings onto :class:`StructuredAssertion` literals."""
+    s = str(raw or "").strip().lower().replace("-", "_")
+    aliases = {
+        "url": "url_contains",
+        "uri": "url_contains",
+        "href": "url_contains",
+        "address": "url_contains",
+        "location": "url_contains",
+    }
+    s = aliases.get(s, s)
+    if s in _LLM_ASSERTION_TYPES:
+        return s
+    return "semantic"
 
 
 def _looks_like_public_page_assertion_target(goal: str, current_url: str) -> bool:
@@ -459,13 +523,10 @@ async def record_flow(
     storage_state: Optional[str],
     headless: bool = False,
     run_id: Optional[str] = None,
+    progress_callback: "ProgressCallback | None" = None,
 ) -> list[FlowStep]:
     """Run a Browser-Use agent for `goal`; capture each action with selector, target_text,
     dom_fingerprint, per-step screenshot, and final assertion steps."""
-    from browser_use import Agent, BrowserSession
-
-    from blop.engine.browser import make_browser_profile
-    from blop.engine.llm_factory import make_agent_llm, make_planning_llm
     from blop.storage import files as file_store
 
     evidence_policy = resolve_evidence_policy()
@@ -479,14 +540,16 @@ async def record_flow(
     step_counter = 0
     record_error: Exception | None = None
 
-    # Initial navigation step
+    start_url = _recording_start_url(app_url, goal)
+
+    # Initial navigation step (prefer a same-origin URL from the goal when it is deeper than app_url)
     steps.append(
         FlowStep(
             step_id=step_counter,
             action="navigate",
-            value=app_url,
-            description=f"Navigate to {app_url}",
-            url_after=app_url,
+            value=start_url,
+            description=f"Navigate to {start_url}",
+            url_after=start_url,
         )
     )
     step_counter += 1
@@ -525,7 +588,7 @@ async def record_flow(
         # Tell the agent to start from there — no need to navigate again.
         task = f"Navigate to {entry_url_hint} then: {goal}"
     else:
-        task = f"Navigate to {app_url} then: {goal}"
+        task = f"Navigate to {start_url} then: {goal}"
 
     # Provide runtime auth guidance without ever including raw credentials.
     from blop.engine.auth_prompt import append_runtime_auth_guidance
@@ -562,6 +625,27 @@ async def record_flow(
         # and silently fails to load.
         await browser_session.start()
 
+        gl = (goal or "").lower()
+        interaction_nudge = ""
+        if any(
+            k in gl
+            for k in (
+                "click ",
+                " press ",
+                "fill in",
+                "fill the",
+                "submit",
+                "select ",
+                "toggle",
+                "choose ",
+            )
+        ):
+            interaction_nudge = (
+                " INTERACTION CHECKLIST: The goal names concrete UI actions (click, fill, select, toggle). "
+                "Execute each with a real browser action in order. "
+                "Calling done before those actions are visibly complete is a recording failure."
+            )
+
         agent_kwargs: dict = dict(
             task=task,
             llm=llm,
@@ -577,6 +661,7 @@ async def record_flow(
                 "to complete every step described in the task. "
                 "Do NOT call 'done' until you have visually confirmed that each requested action has been performed. "
                 "After navigating to the URL, always look for and interact with the UI elements described. "
+                + interaction_nudge
                 + SPA_AGENT_RULES
             ),
         )
@@ -588,6 +673,11 @@ async def record_flow(
             ]
         except Exception:
             _log.debug("attach BlopActions to agent", exc_info=True)
+        if progress_callback is not None:
+            try:
+                await progress_callback(0, 50, "starting recording agent")
+            except Exception:
+                pass
         agent = Agent(**agent_kwargs)
         if should_capture_screenshot(evidence_policy, "periodic"):
             screenshot_task = asyncio.create_task(_poll_screenshots())
@@ -612,6 +702,12 @@ async def record_flow(
             _log.debug("get page reference from browser session", exc_info=True)
 
         all_actions = history.model_actions() if hasattr(history, "model_actions") else []
+
+        if progress_callback is not None:
+            try:
+                await progress_callback(50, 50, f"agent complete: {len(all_actions)} actions recorded")
+            except Exception:
+                pass
 
         # Post-hoc loop detection: warn when the agent got stuck repeating actions.
         # This never blocks recording — it only adds diagnostic context to the log
@@ -1002,7 +1098,8 @@ Example:
                     elif isinstance(item, dict):
                         desc = item.get("description") or item.get("expected") or str(item)
                         try:
-                            if item.get("type") == "semantic":
+                            atype = _normalize_llm_assertion_type(item.get("type"))
+                            if atype == "semantic":
                                 sa = _semantic_query_assertion(
                                     description=desc,
                                     query=desc,
@@ -1011,7 +1108,7 @@ Example:
                                 )
                             else:
                                 sa = StructuredAssertion(
-                                    assertion_type=item.get("type", "semantic"),
+                                    assertion_type=atype,
                                     target=item.get("target"),
                                     expected=item.get("expected"),
                                     description=desc,

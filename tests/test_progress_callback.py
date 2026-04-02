@@ -112,3 +112,54 @@ async def test_inventory_site_emits_progress_per_page():
         mock_inv.return_value = fake_inventory
         result = await mock_inv("https://example.com", progress_callback=capture)
         assert result is fake_inventory
+
+
+@pytest.mark.asyncio
+async def test_record_flow_emits_progress_milestones():
+    """record_flow emits start and completion progress ticks."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from blop.engine.recording import record_flow
+
+    ticks: list[tuple[int, int, str]] = []
+
+    async def capture(current: int, total: int, message: str) -> None:
+        ticks.append((current, total, message))
+
+    fake_history = MagicMock()
+    fake_history.model_actions = MagicMock(return_value=[{"action": "click"}])
+
+    with (
+        patch("blop.engine.recording.BrowserSession") as mock_bs_cls,
+        patch("blop.engine.recording.Agent") as mock_agent_cls,
+        patch("blop.engine.recording.make_browser_profile"),
+        patch("blop.engine.recording.make_agent_llm", return_value=MagicMock()),
+        patch("blop.engine.recording.make_planning_llm", return_value=MagicMock()),
+        patch("blop.engine.recording._recording_start_url", return_value="https://example.com"),
+        patch("blop.engine.recording._generate_assertions_from_screenshot", AsyncMock(return_value=[])),
+    ):
+        mock_bs = AsyncMock()
+        mock_bs_cls.return_value = mock_bs
+        mock_agent = MagicMock()
+        mock_agent.run = AsyncMock(return_value=fake_history)
+        mock_agent_cls.return_value = mock_agent
+        mock_bs.start = AsyncMock()
+        mock_bs.stop = AsyncMock()
+        mock_bs.context = MagicMock(pages=[])
+
+        await record_flow(
+            app_url="https://example.com",
+            goal="test goal",
+            storage_state=None,
+            headless=True,
+            progress_callback=capture,
+        )
+
+    # Must have emitted at least a start tick (0) and a completion tick
+    assert len(ticks) >= 2
+    # First tick should be (0, 50, ...) — "starting"
+    assert ticks[0][0] == 0
+    assert ticks[0][1] == 50
+    assert "start" in ticks[0][2].lower() or "record" in ticks[0][2].lower()
+    # Last tick should be >= 40/50
+    assert ticks[-1][0] >= 40
