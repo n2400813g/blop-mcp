@@ -17,6 +17,7 @@ from blop.engine.errors import (
 )
 from blop.engine.logger import get_logger
 from blop.engine.smoke import run_smoke_preflight
+from blop.mcp.envelope import build_poll_workflow_hint
 from blop.mcp.tool_args import require_coalesced_app_identifier
 from blop.reporting.results import explain_run_status
 from blop.schemas import ReleaseCheckRequest
@@ -24,6 +25,12 @@ from blop.stability import build_stability_gate_summary
 from blop.storage import sqlite
 
 _log = get_logger("tools.release_check")
+
+# Values that belong on run_mode, not mode (agents often swap the two).
+_REPLAY_ENGINE_MODE_ALIASES = frozenset({"hybrid", "strict_steps", "goal_fallback"})
+
+# Wider than ReleaseCheckRequest.mode so callers can pass replay-engine values by mistake.
+ReleaseCheckInvocationMode = Literal["replay", "targeted", "hybrid", "strict_steps", "goal_fallback"]
 
 
 async def _resolve_replay_selection(
@@ -172,6 +179,7 @@ def _queued_release_check_result(
             ],
             "release_blocked_by_stability": False,
         },
+        "workflow": build_poll_workflow_hint(run_id=run_id, flow_count=len(flow_ids)).model_dump(),
     }
 
 
@@ -326,7 +334,7 @@ async def run_release_check(
     journey_ids: Optional[list[str]] = None,
     flow_ids: Optional[list[str]] = None,
     profile_name: Optional[str] = None,
-    mode: Literal["replay", "targeted"] = "replay",
+    mode: ReleaseCheckInvocationMode = "replay",
     criticality_filter: Optional[list[str]] = None,
     release_id: Optional[str] = None,
     headless: bool = True,
@@ -344,19 +352,31 @@ async def run_release_check(
         flow_ids: Recorded flow IDs to replay. If None, uses all recorded flows filtered
             by criticality_filter (defaults to revenue + activation).
         profile_name: Auth profile for flows that require login.
-        mode: "replay" (default) uses the regression engine on recorded flows.
-              "targeted" uses the evaluation engine for one-shot checking.
+        mode: "replay" (default) vs "targeted" (one-shot eval). If you pass "hybrid",
+              "strict_steps", or "goal_fallback" here by mistake, it is treated as run_mode
+              and mode becomes "replay" (same normalization as the MCP tool).
         criticality_filter: Criticality classes to include when journey_ids is None.
             Defaults to ["revenue", "activation"].
         release_id: Optional caller-supplied release identifier (auto-generated if omitted).
         headless: Run browser headlessly (default True).
-        run_mode: Replay mode — "hybrid" (default), "strict_steps", or "goal_fallback".
+        run_mode: Replay engine style — "hybrid" (default), "strict_steps", or "goal_fallback".
+            Prefer this parameter for those values; do not confuse with mode.
         smoke_preflight: Optional advisory preflight over the app root and top flow entry URLs.
     """
     resolved, res_err = require_coalesced_app_identifier(app_url, field_label="app_url")
     if res_err:
         return res_err
     app_url = resolved
+    norm_mode = mode
+    norm_run_mode = run_mode
+    if isinstance(mode, str) and mode in _REPLAY_ENGINE_MODE_ALIASES:
+        norm_run_mode = mode
+        norm_mode = "replay"
+        _log.info(
+            "release_check_normalized_mode mistaken_replay_engine_in_mode=%s effective_run_mode=%s",
+            mode,
+            norm_run_mode,
+        )
     try:
         request = ReleaseCheckRequest.model_validate(
             {
@@ -364,11 +384,11 @@ async def run_release_check(
                 "journey_ids": journey_ids,
                 "flow_ids": flow_ids,
                 "profile_name": profile_name,
-                "mode": mode,
+                "mode": norm_mode,
                 "criticality_filter": criticality_filter or ["revenue", "activation"],
                 "release_id": release_id,
                 "headless": headless,
-                "run_mode": run_mode,
+                "run_mode": norm_run_mode,
                 "smoke_preflight": smoke_preflight,
             }
         )

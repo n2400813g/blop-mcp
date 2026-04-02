@@ -90,3 +90,27 @@ async def test_run_regression_test_response_has_workflow(tmp_path, monkeypatch):
     assert wf["poll_recipe"]["tool"] == "get_test_results"
     assert wf["poll_recipe"]["args_template"]["run_id"] == result["run_id"]
     assert "interrupted" in wf["poll_recipe"]["terminal_statuses"]
+
+
+def test_queued_release_check_result_has_workflow():
+    """_queued_release_check_result includes workflow with poll_recipe."""
+    import sys
+
+    sys.path.insert(0, "src")
+    from blop.tools.release_check import _queued_release_check_result
+
+    result = _queued_release_check_result(
+        release_id="rel1",
+        run_id="run1",
+        status="queued",
+        flow_ids=["f1", "f2", "f3"],
+        selected_flows=[],
+        profile_name=None,
+        run_mode="replay",
+        criticality_filter=["revenue"],
+        smoke_summary=None,
+    )
+    assert "workflow" in result, f"Missing 'workflow'. Keys: {list(result.keys())}"
+    wf = result["workflow"]
+    assert wf["poll_recipe"]["args_template"]["run_id"] == "run1"
+    assert wf["estimated_duration_s"] == (30, 135)  # 3 flows * 10, 3 * 45
