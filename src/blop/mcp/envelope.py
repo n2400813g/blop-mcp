@@ -31,6 +31,39 @@ class ToolError(BaseModel):
         return data
 
 
+class WorkflowHint(BaseModel):
+    next_action: str
+    poll_recipe: dict[str, Any] | None = None
+    estimated_duration_s: tuple[int, int] | None = None
+    progress_hint: str = ""
+
+
+def build_poll_workflow_hint(run_id: str, flow_count: int) -> WorkflowHint:
+    """Build a WorkflowHint for a queued async run."""
+    if flow_count <= 0:
+        min_s, max_s = 30, 300
+    else:
+        min_s = flow_count * 10
+        max_s = flow_count * 45
+    min_min = max(1, min_s // 60)
+    max_min = max_s // 60 + 1
+    return WorkflowHint(
+        next_action=(
+            f"call get_test_results(run_id='{run_id}') every 4s "
+            "until status is 'completed', 'failed', 'cancelled', or 'interrupted'"
+        ),
+        poll_recipe={
+            "tool": "get_test_results",
+            "args_template": {"run_id": run_id},
+            "terminal_statuses": ["completed", "failed", "cancelled", "interrupted"],
+            "interval_s": 4,
+            "timeout_s": 900,
+        },
+        estimated_duration_s=(min_s, max_s),
+        progress_hint=f"typically {min_min}–{max_min} min for {flow_count}-flow replay",
+    )
+
+
 class ToolResponse(BaseModel, Generic[T]):
     ok: bool
     data: T | None = None
