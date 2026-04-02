@@ -60,7 +60,11 @@ def build_poll_workflow_hint(run_id: str, flow_count: int) -> WorkflowHint:
             "timeout_s": 900,
         },
         estimated_duration_s=(min_s, max_s),
-        progress_hint=f"typically {min_min}–{max_min} min for {flow_count}-flow replay",
+        progress_hint=(
+            f"typically {min_min}–{max_min} min for {flow_count}-flow replay"
+            if flow_count > 0
+            else f"typically {min_min}–{max_min} min"
+        ),
     )
 
 

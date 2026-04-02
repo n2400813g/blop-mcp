@@ -11,7 +11,7 @@ from blop.mcp.dto import (
     UxTaxonomyDTO,
     WorkspaceContextDTO,
 )
-from blop.mcp.envelope import ToolError, ToolResponse, err_response, ok_response
+from blop.mcp.envelope import ToolError, ToolResponse, WorkflowHint, build_poll_workflow_hint, err_response, ok_response
 
 __all__ = [
     "CaptureArtifactResultDTO",
@@ -24,7 +24,9 @@ __all__ = [
     "ToolError",
     "ToolResponse",
     "UxTaxonomyDTO",
+    "WorkflowHint",
     "WorkspaceContextDTO",
+    "build_poll_workflow_hint",
     "err_response",
     "ok_response",
 ]
