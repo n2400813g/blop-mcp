@@ -16,6 +16,7 @@ from blop.engine import classifier
 from blop.engine import regression as regression_engine
 from blop.engine.errors import BLOP_REGRESSION_START_FAILED, BlopError
 from blop.engine.logger import get_logger
+from blop.mcp.envelope import build_poll_workflow_hint
 from blop.reporting.results import explain_run_status
 from blop.schemas import RunStartedResult
 from blop.storage import files as file_store
@@ -878,6 +879,7 @@ async def run_regression_test(
     started["recommended_next_action"] = status_meta["recommended_next_action"]
     started["is_terminal"] = status_meta["is_terminal"]
     started["workflow_hint"] = status_meta["recommended_next_action"]
+    started["workflow"] = build_poll_workflow_hint(run_id=run_id, flow_count=len(flows)).model_dump()
     return started
 
 
@@ -901,6 +903,7 @@ async def _run_and_persist(
     existing_cases = await sqlite.list_cases_for_runs([run_id]) if durability_mode != "exit" else []
     classified_by_flow = {case.flow_id: case for case in existing_cases if getattr(case, "flow_id", None)}
     remaining_flows = [flow for flow in flows if flow.flow_id not in classified_by_flow]
+    artifacts_dir = file_store.artifacts_dir(run_id)
 
     # Transition: queued → running
     await sqlite.update_run_status(run_id, "running")
@@ -992,46 +995,43 @@ async def _run_and_persist(
 
     try:
         from blop.config import BLOP_RUN_TIMEOUT_SECS
+        from blop.engine.pipeline import RunContext, build_default_pipeline, persist_bus_events
 
-        if mobile_only:
-            from blop.engine.mobile.regression import run_mobile_flows
+        pipe_ctx = RunContext(
+            run_id=run_id,
+            app_url=app_url,
+            flow_ids=all_flow_ids,
+            profile_name=profile_name,
+        )
+        pipe_ctx.flows = list(remaining_flows)
+        pipe_ctx.headless = headless
+        pipe_ctx.run_mode = run_mode
+        pipe_ctx.auto_rerecord = auto_rerecord
+        pipe_ctx.mobile_only = mobile_only
+        pipe_ctx.auth_state = storage_state
+        pipe_ctx.skip_auth_resolution = True
+        pipe_ctx.incremental_classify = not mobile_only
+        pipe_ctx.execution_metadata = execution_metadata
+        pipe_ctx.on_case_completed = None if mobile_only else _persist_case_progress
+        pipe_ctx.artifacts_dir = str(artifacts_dir)
 
-            run_coro = run_mobile_flows(remaining_flows, run_id=run_id, headless=headless)
-            if BLOP_RUN_TIMEOUT_SECS > 0:
-                cases = await asyncio.wait_for(run_coro, timeout=float(BLOP_RUN_TIMEOUT_SECS))
-            else:
-                cases = await run_coro
+        async def _run_pipeline() -> None:
+            pipeline = build_default_pipeline()
+            try:
+                await pipeline.run(pipe_ctx)
+            finally:
+                await persist_bus_events(pipe_ctx.bus)
+
+        if BLOP_RUN_TIMEOUT_SECS > 0:
+            await asyncio.wait_for(_run_pipeline(), timeout=float(BLOP_RUN_TIMEOUT_SECS))
         else:
-            run_coro = regression_engine.run_flows(
-                flows=remaining_flows,
-                app_url=app_url,
-                run_id=run_id,
-                storage_state=storage_state,
-                headless=headless,
-                run_mode=run_mode,
-                auto_rerecord=auto_rerecord,
-                profile_name=profile_name,
-                execution_metadata=execution_metadata,
-                on_case_completed=_persist_case_progress,
-            )
-            if BLOP_RUN_TIMEOUT_SECS > 0:
-                cases = await asyncio.wait_for(run_coro, timeout=float(BLOP_RUN_TIMEOUT_SECS))
-            else:
-                cases = await run_coro
+            await _run_pipeline()
 
-        if mobile_only:
-            for case in cases:
-                if case.flow_id not in classified_by_flow:
-                    await _persist_case_progress(case)
-        else:
-            for case in cases:
-                if case.flow_id not in classified_by_flow:
-                    await _persist_case_progress(case)
-
+        for case in pipe_ctx.classified_cases:
+            classified_by_flow[case.flow_id] = case
         classified = [classified_by_flow[flow_id] for flow_id in all_flow_ids if flow_id in classified_by_flow]
 
-        run_summary = await classifier.classify_run(classified, app_url)
-        next_actions = run_summary.get("next_actions", [])
+        next_actions = (pipe_ctx.run_summary or {}).get("next_actions", [])
 
         completed_at = datetime.now(timezone.utc).isoformat()
         await sqlite.update_run(run_id, "completed", classified, completed_at, next_actions)
