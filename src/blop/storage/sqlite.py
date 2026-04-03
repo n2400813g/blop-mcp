@@ -986,6 +986,40 @@ async def get_run(run_id: str) -> dict | None:
     return None
 
 
+async def get_run_summary(run_id: str) -> dict | None:
+    """Return a lightweight run summary with release_id for the blop://runs/{run_id} resource."""
+    async with _db_connect() as db:
+        async with db.execute(
+            """SELECT r.run_id, r.app_url, r.status, r.started_at, r.completed_at,
+                      r.flow_ids_json, r.run_mode,
+                      (SELECT rs.release_id FROM release_snapshots rs
+                       WHERE rs.run_id = r.run_id
+                       ORDER BY rs.created_at DESC LIMIT 1) AS release_id
+               FROM runs r
+               WHERE r.run_id = ?""",
+            (run_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            flow_ids: list[str] = []
+            if row[5]:
+                try:
+                    flow_ids = json.loads(row[5])
+                except Exception:
+                    pass
+            return {
+                "run_id": row[0],
+                "app_url": row[1],
+                "status": row[2],
+                "started_at": row[3],
+                "completed_at": row[4],
+                "flow_count": len(flow_ids),
+                "run_mode": row[6] or "hybrid",
+                "release_id": row[7],
+            }
+
+
 _VALID_STATUSES = {"queued", "running", "completed", "failed", "cancelled", "waiting_auth"}
 
 
