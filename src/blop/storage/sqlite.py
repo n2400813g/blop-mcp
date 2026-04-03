@@ -1020,7 +1020,7 @@ async def get_run_summary(run_id: str) -> dict | None:
             }
 
 
-_VALID_STATUSES = {"queued", "running", "completed", "failed", "cancelled", "waiting_auth"}
+_VALID_STATUSES = {"queued", "running", "completed", "failed", "cancelled", "interrupted", "waiting_auth"}
 
 
 async def list_runs(limit: int = 20, status: str | None = None) -> list[dict]:

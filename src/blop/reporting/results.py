@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from blop.schemas import DEFAULT_RELEASE_POLICY, FailureCase, PolicyGateResult, ReleasePolicy
 
-_TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "waiting_auth"}
+_TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "interrupted", "waiting_auth"}
 
 
 def _parse_iso_datetime(value: str | None) -> datetime | None:
@@ -443,7 +443,7 @@ def _compute_release_recommendation(
         rationale = "Failures detected. Do not ship until resolved."
 
     # Confidence calculation (unchanged)
-    terminal_statuses = {"completed", "failed", "cancelled"}
+    terminal_statuses = {"completed", "failed", "cancelled", "interrupted"}
     passed = [c for c in cases if c.status == "pass"]
     screenshot_case_count = sum(1 for c in cases if getattr(c, "screenshots", []) or [])
     trace_case_count = sum(1 for c in cases if getattr(c, "trace_path", None))
