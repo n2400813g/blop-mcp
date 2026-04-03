@@ -363,9 +363,11 @@ async def init_db() -> None:
         # Migrate existing tables to add new columns if missing
         await _migrate(db)
 
-        # Startup recovery: mark any runs orphaned in "running" state as "failed"
-        # (happens when the server process was killed mid-run)
-        await db.execute("UPDATE runs SET status = 'failed', completed_at = datetime('now') WHERE status = 'running'")
+        # Sweep runs left in non-terminal active state from a previous session (restart / crash).
+        try:
+            await db.execute("UPDATE runs SET status = 'interrupted' WHERE status IN ('running', 'queued')")
+        except Exception:
+            _log.debug("stale run sweep failed during init_db", exc_info=True)
         await db.commit()
 
 

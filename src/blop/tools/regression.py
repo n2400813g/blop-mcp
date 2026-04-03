@@ -262,7 +262,32 @@ def _register_run_task(run_id: str, task: asyncio.Task | asyncio.Future) -> None
 
     def _on_task_done(t) -> None:
         _RUN_TASKS.pop(run_id, None)
-        if not t.cancelled() and t.exception() is not None:
+
+        if t.cancelled():
+
+            async def _safe_mark_interrupted() -> None:
+                try:
+                    run = await sqlite.get_run(run_id)
+                    if run and run.get("status") not in _TERMINAL_RUN_STATUSES:
+                        await sqlite.update_run_status(run_id, "interrupted")
+                        await sqlite.save_run_health_event(
+                            run_id,
+                            "run_interrupted",
+                            {"reason": "task_cancelled", "previous_status": run.get("status")},
+                        )
+                except Exception as exc:
+                    _log.error(
+                        "task_done interrupted_mark_failed run_id=%s error=%s",
+                        run_id,
+                        exc,
+                        exc_info=True,
+                    )
+
+            pending = asyncio.create_task(_safe_mark_interrupted())
+            _PENDING_DB_FINALIZERS.add(pending)
+            pending.add_done_callback(lambda _: _PENDING_DB_FINALIZERS.discard(pending))
+
+        elif t.exception() is not None:
 
             async def _safe_mark_failed():
                 try:

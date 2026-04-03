@@ -14,6 +14,8 @@ from blop.schemas import CriticalJourney, ReleaseBrief
 from blop.storage import files as file_store
 from blop.storage import sqlite
 
+_RUN_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
+
 
 async def run_mobile_artifacts_resource(run_id: str) -> dict:
     """Index mobile replay artifacts: screenshots, page_source XML, device logs per case."""
@@ -247,4 +249,58 @@ async def release_incidents_resource(release_id: str) -> dict:
         "run_id": run_id,
         "incidents": linked,
         "total": len(linked),
+    }
+
+
+async def run_status_resource(run_id: str) -> dict:
+    """Current state of a run — use after reconnect to resume polling.
+
+    Returns status, flow_count, release_id, and a workflow hint.
+    If the run is still active, workflow includes a poll_recipe.
+    If the run is terminal, workflow points to the release brief.
+    Response time target: < 50ms (pure DB read, no engine).
+    """
+    rid = (run_id or "").strip()
+    if not rid:
+        return {"error": "run_id_required", "run_id": run_id}
+
+    run = await sqlite.get_run_summary(rid)
+    if run is None:
+        return {"error": "run_not_found", "run_id": rid}
+
+    status = run["status"] or "unknown"
+    release_id = run.get("release_id")
+
+    if status in _RUN_TERMINAL_STATUSES:
+        if release_id:
+            next_action = f"read blop://release/{release_id}/brief for the SHIP/INVESTIGATE/BLOCK decision"
+        else:
+            next_action = f"read get_test_results(run_id='{rid}') for the full report"
+        workflow: dict = {"next_action": next_action}
+    else:
+        workflow = {
+            "next_action": (
+                f"call get_test_results(run_id='{rid}') every 4s "
+                "until status is 'completed', 'failed', 'cancelled', or 'interrupted'"
+            ),
+            "poll_recipe": {
+                "tool": "get_test_results",
+                "args_template": {"run_id": rid},
+                "terminal_statuses": ["completed", "failed", "cancelled", "interrupted"],
+                "interval_s": 4,
+                "timeout_s": 900,
+            },
+            "progress_hint": "run is in progress",
+        }
+
+    return {
+        "run_id": rid,
+        "status": status,
+        "release_id": release_id,
+        "app_url": run.get("app_url"),
+        "flow_count": run.get("flow_count", 0),
+        "run_mode": run.get("run_mode", "hybrid"),
+        "started_at": run.get("started_at"),
+        "completed_at": run.get("completed_at"),
+        "workflow": workflow,
     }

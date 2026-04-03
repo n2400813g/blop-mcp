@@ -1173,7 +1173,7 @@ async def cancel_run(run_id: str) -> dict:
         if not run:
             return tool_error(f"Run {run_id} not found", BLOP_RUN_NOT_FOUND, details={"run_id": run_id})
         prev_status = run.get("status", "unknown")
-        if prev_status in ("completed", "failed", "cancelled"):
+        if prev_status in ("completed", "failed", "cancelled", "interrupted"):
             return {
                 "run_id": run_id,
                 "previous_status": prev_status,
@@ -1181,8 +1181,10 @@ async def cancel_run(run_id: str) -> dict:
                 "task_cancelled": False,
                 "note": "Run already terminated",
             }
-        task_cancelled = regression.cancel_run_task(run_id)
+        # Mark cancelled in the DB before cancelling the task so done-callbacks do not
+        # race and overwrite user cancel with "interrupted".
         await sqlite.update_run_status(run_id, "cancelled")
+        task_cancelled = regression.cancel_run_task(run_id)
         return {
             "run_id": run_id,
             "previous_status": prev_status,
@@ -2302,6 +2304,14 @@ async def context_graph_resource(app: str) -> dict:
 async def run_artifact_index_resource(run_id: str) -> dict:
     """Read-only artifact index for a run."""
     return await results.get_artifact_index_resource(run_id)
+
+
+@mcp.resource("blop://runs/{run_id}")
+async def run_status_resource_handler(run_id: str) -> dict:
+    """Current run state for reconnect recovery — status, flow_count, poll_recipe or brief link."""
+    from blop.tools import resources as _resources_mod
+
+    return await _resources_mod.run_status_resource(run_id)
 
 
 @mcp.resource("blop://run/{run_id}/artifacts")
