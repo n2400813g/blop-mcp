@@ -768,7 +768,7 @@ class RecordedFlowResult(BaseModel):
     artifacts_dir: str
 
 
-RunStatus = Literal["queued", "running", "waiting_auth", "completed", "failed", "cancelled"]
+RunStatus = Literal["queued", "running", "waiting_auth", "completed", "failed", "cancelled", "interrupted"]
 
 
 class RunStartedResult(BaseModel):

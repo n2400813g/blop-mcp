@@ -108,6 +108,35 @@ async def test_stream_run_empty_events_then_terminal():
 
 
 @pytest.mark.asyncio
+async def test_stream_run_interrupted_yields_terminal():
+    """Stream closes with terminal when run status is interrupted (orphan / disconnect)."""
+    from httpx import ASGITransport, AsyncClient
+
+    interrupted_run = {"run_id": "run_intr", "status": "interrupted"}
+    with patch("blop.storage.sqlite.get_run", new=AsyncMock(return_value=interrupted_run)):
+        with patch(
+            "blop.storage.sqlite.list_run_health_events",
+            new=AsyncMock(return_value=[]),
+        ):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.get("/runs/run_intr/stream")
+
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers.get("content-type", "")
+
+    chunks: list[str] = []
+    async for line in response.aiter_lines():
+        chunks.append(line)
+        if line.startswith("data:") and "interrupted" in line:
+            break
+        if len(chunks) > 20:
+            break
+
+    assert any("interrupted" in line for line in chunks)
+
+
+@pytest.mark.asyncio
 async def test_v1_post_projects(tmp_db):
     """POST /v1/projects creates a project row."""
     from blop import config

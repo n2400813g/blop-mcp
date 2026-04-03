@@ -79,7 +79,7 @@ if _HAS_DEPS:
                 if eid not in seen:
                     seen.add(eid)
                     yield {"event": event["event_type"], "data": str(event["payload"])}
-            if run and run.get("status") in ("completed", "failed", "cancelled"):
+            if run and run.get("status") in ("completed", "failed", "cancelled", "interrupted"):
                 yield {"event": "terminal", "data": run["status"]}
                 break
             await asyncio.sleep(1.0)

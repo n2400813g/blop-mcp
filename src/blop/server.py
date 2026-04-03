@@ -1375,7 +1375,9 @@ async def list_runs(limit: int = 20, status: Optional[str] = None) -> dict:
 
     Args:
         limit: Number of runs to return (default 20, max 200)
-        status: Optional status filter ("queued", "running", "waiting_auth", "completed", "failed", "cancelled")
+        status: Optional status filter (
+            "queued", "running", "waiting_auth", "completed", "failed", "cancelled", "interrupted"
+        )
     """
     return await _safe_call(results.list_runs, limit=limit, status=status)
 
