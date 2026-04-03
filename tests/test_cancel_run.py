@@ -27,10 +27,11 @@ async def test_cancel_run_transitions_active_run_to_cancelled(tmp_path, monkeypa
     await sqlite.update_run_status(run_id, "running")
 
     response = await server.cancel_run(run_id)
+    payload = response.get("data", response)
     run = await sqlite.get_run(run_id)
 
-    assert response["run_id"] == run_id
-    assert response["new_status"] == "cancelled"
+    assert payload["run_id"] == run_id
+    assert payload["new_status"] == "cancelled"
     assert run is not None
     assert run["status"] == "cancelled"
 
@@ -57,13 +58,46 @@ async def test_cancel_run_is_idempotent_for_terminal_status(tmp_path, monkeypatc
     await sqlite.update_run_status(run_id, "completed")
 
     response = await server.cancel_run(run_id)
+    payload = response.get("data", response)
     run = await sqlite.get_run(run_id)
 
-    assert response["run_id"] == run_id
-    assert response["previous_status"] == "completed"
-    assert "note" in response
+    assert payload["run_id"] == run_id
+    assert payload["previous_status"] == "completed"
+    assert "note" in payload
     assert run is not None
     assert run["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_is_idempotent_for_interrupted_status(tmp_path, monkeypatch):
+    from blop import server
+    from blop.storage import sqlite
+
+    db_path = str(tmp_path / "cancel_run_intr.db")
+    run_id = "run_cancel_intr"
+    monkeypatch.setenv("BLOP_DB_PATH", db_path)
+
+    await sqlite.init_db()
+    await sqlite.create_run(
+        run_id=run_id,
+        app_url="https://example.com",
+        profile_name=None,
+        flow_ids=[],
+        headless=True,
+        artifacts_dir="/tmp/artifacts",
+        run_mode="hybrid",
+    )
+    await sqlite.update_run_status(run_id, "interrupted")
+
+    response = await server.cancel_run(run_id)
+    payload = response.get("data", response)
+    run = await sqlite.get_run(run_id)
+
+    assert payload["run_id"] == run_id
+    assert payload["previous_status"] == "interrupted"
+    assert "note" in payload
+    assert run is not None
+    assert run["status"] == "interrupted"
 
 
 @pytest.mark.asyncio
@@ -92,15 +126,16 @@ async def test_cancel_run_cancels_live_task(tmp_path, monkeypatch):
     regression_tools._RUN_TASKS[run_id] = task
 
     response = await server.cancel_run(run_id)
+    payload = response.get("data", response)
     await asyncio.sleep(0)
     try:
         await task
     except asyncio.CancelledError:
         pass
 
-    assert response["run_id"] == run_id
-    assert response["new_status"] == "cancelled"
-    assert response["task_cancelled"] is True
+    assert payload["run_id"] == run_id
+    assert payload["new_status"] == "cancelled"
+    assert payload["task_cancelled"] is True
     assert task.cancelled()
 
 

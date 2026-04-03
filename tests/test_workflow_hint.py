@@ -1,5 +1,6 @@
 import pytest
 
+from blop.config import GET_TEST_RESULTS_POLL_TERMINAL_STATUSES
 from blop.mcp.envelope import WorkflowHint, build_poll_workflow_hint
 
 
@@ -16,6 +17,17 @@ def test_workflow_hint_fields():
     assert hint.progress_hint == "typically 1-3 min"
 
 
+def test_is_get_test_results_poll_terminal():
+    from blop.config import is_get_test_results_poll_terminal
+
+    assert is_get_test_results_poll_terminal("interrupted")
+    assert is_get_test_results_poll_terminal("waiting_auth")
+    assert is_get_test_results_poll_terminal("completed")
+    assert not is_get_test_results_poll_terminal("running")
+    assert not is_get_test_results_poll_terminal(None)
+    assert not is_get_test_results_poll_terminal("")
+
+
 def test_workflow_hint_optional_fields():
     hint = WorkflowHint(next_action="do something")
     assert hint.poll_recipe is None
@@ -28,7 +40,7 @@ def test_build_poll_workflow_hint_5_flows():
     assert "abc123" in hint.next_action
     assert hint.poll_recipe["tool"] == "get_test_results"
     assert hint.poll_recipe["args_template"] == {"run_id": "abc123"}
-    assert "interrupted" in hint.poll_recipe["terminal_statuses"]
+    assert set(hint.poll_recipe["terminal_statuses"]) == set(GET_TEST_RESULTS_POLL_TERMINAL_STATUSES)
     assert hint.poll_recipe["interval_s"] == 4
     assert hint.poll_recipe["timeout_s"] == 900
     assert hint.estimated_duration_s == (50, 225)  # 5 * 10, 5 * 45
@@ -64,18 +76,21 @@ async def test_run_regression_test_response_has_workflow(tmp_path, monkeypatch):
     fake_flow.platform = "web"
     fake_flow.run_mode_override = None
 
-    with (
-        patch("blop.tools.regression.sqlite") as mock_sqlite,
-        patch("blop.tools.regression._spawn_background_task", return_value=MagicMock(done=lambda: False)),
-        patch("blop.tools.regression._register_run_task"),
-        patch("blop.tools.regression.file_store.artifacts_dir", return_value="/tmp/artifacts"),
-        patch("blop.tools.regression.regression_engine.compute_replay_worker_count", return_value=1),
-    ):
-        mock_sqlite.get_flows = AsyncMock(return_value=[fake_flow])
-        mock_sqlite.get_auth_profile = AsyncMock(return_value=None)
-        mock_sqlite.create_run_with_initial_events = AsyncMock()
-        mock_sqlite.save_run_health_event = AsyncMock()
+    import blop.tools.regression as reg_mod
 
+    mock_sqlite = MagicMock()
+    mock_sqlite.get_flows = AsyncMock(return_value=[fake_flow])
+    mock_sqlite.get_auth_profile = AsyncMock(return_value=None)
+    mock_sqlite.create_run_with_initial_events = AsyncMock()
+    mock_sqlite.save_run_health_event = AsyncMock()
+
+    with (
+        patch.object(reg_mod, "sqlite", mock_sqlite),
+        patch.object(reg_mod, "_spawn_background_task", return_value=MagicMock(done=lambda: False)),
+        patch.object(reg_mod, "_register_run_task"),
+        patch.object(reg_mod.file_store, "artifacts_dir", return_value="/tmp/artifacts"),
+        patch.object(reg_mod.regression_engine, "compute_replay_worker_count", return_value=1),
+    ):
         from blop.tools.regression import run_regression_test
 
         result = await run_regression_test(
@@ -89,7 +104,7 @@ async def test_run_regression_test_response_has_workflow(tmp_path, monkeypatch):
     assert "poll_recipe" in wf
     assert wf["poll_recipe"]["tool"] == "get_test_results"
     assert wf["poll_recipe"]["args_template"]["run_id"] == result["run_id"]
-    assert "interrupted" in wf["poll_recipe"]["terminal_statuses"]
+    assert set(wf["poll_recipe"]["terminal_statuses"]) == set(GET_TEST_RESULTS_POLL_TERMINAL_STATUSES)
 
 
 def test_queued_release_check_result_has_workflow():

@@ -443,7 +443,7 @@ def _compute_release_recommendation(
         rationale = "Failures detected. Do not ship until resolved."
 
     # Confidence calculation (unchanged)
-    terminal_statuses = {"completed", "failed", "cancelled", "interrupted"}
+    terminal_statuses = {"completed", "failed", "cancelled", "interrupted", "waiting_auth"}
     passed = [c for c in cases if c.status == "pass"]
     screenshot_case_count = sum(1 for c in cases if getattr(c, "screenshots", []) or [])
     trace_case_count = sum(1 for c in cases if getattr(c, "trace_path", None))

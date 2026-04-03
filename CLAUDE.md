@@ -26,6 +26,11 @@ Required environment variable: `GOOGLE_API_KEY` (Google Gemini access), or set `
 
 See `.env.example` for all optional env vars.
 
+## In-process Python (`asyncio.run` / one-off scripts)
+
+- **`save_auth_profile`** is implemented in `blop.tools.auth`, not `journeys`. Prefer `from blop.tools.auth import save_auth_profile` or `from blop.tools import save_auth_profile`.
+- **`run_regression_test`** and **`run_release_check`** (replay mode) **return immediately** after queueing work via `asyncio.create_task`. If a script calls them under `asyncio.run()` and then returns, **the event loop exits** and the run can stay **`queued`** forever. In the same coroutine, **poll `get_test_results(run_id)`** until status is terminal (`completed`, `failed`, `cancelled`, `interrupted`, or `waiting_auth` — see `blop.config.GET_TEST_RESULTS_POLL_TERMINAL_STATUSES` and `scripts/production_mcp_smoke.py`).
+
 ## Dev: Test MCP Tools Interactively
 
 ```bash
@@ -145,7 +150,7 @@ Screenshots, traces, and console logs are in `runs/<type>/<run_id>/`. SQLite DB 
 - All logging is suppressed on `config.py` import to prevent JSON-RPC interference.
 - `make_browser_profile()` supports optional `user_data_dir` for persistent context; otherwise disables user data dir and browser security features.
 - Default LLM: `gemini-2.5-flash` for agents and planning. Configurable via `BLOP_LLM_PROVIDER` (google/anthropic/openai) and `BLOP_LLM_MODEL`.
-- `run_regression_test` fires an `asyncio.create_task` and returns immediately — caller must poll `get_test_results`. Run status: `queued` → `running` → `completed`/`failed`/`cancelled`; `waiting_auth` if auth profile cannot be resolved.
+- `run_regression_test` fires an `asyncio.create_task` and returns immediately — caller must poll `get_test_results`. Run status: `queued` → `running` → `completed`/`failed`/`cancelled`/`interrupted`; `waiting_auth` if auth profile cannot be resolved before flows run.
 - `business_criticality` (revenue, activation, retention, support, other) is stored on flows and cases; classifier and reporting use it for severity labels (e.g. "BLOCKER in revenue flow").
 - Exploration profile defaults are configurable via `BLOP_EXPLORATION_PROFILE` (`default`/`saas_marketing`) with override knobs for network idle, SPA settle, agent retries, and crawl page limits.
 - Structured errors: many handlers return top-level `error` (string) and `blop_error` (`code`, `message`, `retryable`, `details`); see `docs/DOC_CONTRACT.md` and `src/blop/engine/errors.py`.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from blop.config import GET_TEST_RESULTS_POLL_TERMINAL_STATUSES
 from blop.engine.context_graph import find_journey_summary, get_context_graph_summary
 from blop.engine.errors import (
     BLOP_RELEASE_NOT_FOUND,
@@ -14,7 +15,9 @@ from blop.schemas import CriticalJourney, ReleaseBrief
 from blop.storage import files as file_store
 from blop.storage import sqlite
 
-_RUN_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
+_RUN_TERMINAL_STATUSES = GET_TEST_RESULTS_POLL_TERMINAL_STATUSES
+_POLL_TERMINAL_LIST = sorted(GET_TEST_RESULTS_POLL_TERMINAL_STATUSES)
+_POLL_TERMINAL_STR = ", ".join(repr(s) for s in _POLL_TERMINAL_LIST)
 
 
 async def run_mobile_artifacts_resource(run_id: str) -> dict:
@@ -280,13 +283,12 @@ async def run_status_resource(run_id: str) -> dict:
     else:
         workflow = {
             "next_action": (
-                f"call get_test_results(run_id='{rid}') every 4s "
-                "until status is 'completed', 'failed', 'cancelled', or 'interrupted'"
+                f"call get_test_results(run_id='{rid}') every 4s until status is one of: {_POLL_TERMINAL_STR}"
             ),
             "poll_recipe": {
                 "tool": "get_test_results",
                 "args_template": {"run_id": rid},
-                "terminal_statuses": ["completed", "failed", "cancelled", "interrupted"],
+                "terminal_statuses": list(_POLL_TERMINAL_LIST),
                 "interval_s": 4,
                 "timeout_s": 900,
             },

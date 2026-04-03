@@ -151,6 +151,8 @@ async def main() -> int:
         return 2
 
     login_url = os.environ.get("LOGIN_URL") or f"{app_url}/auth"
+    test_username = os.environ.get("TEST_USERNAME", "")
+    test_password = os.environ.get("TEST_PASSWORD", "")
     profile_name = "sens_ai_bench"  # noqa: F841 – used in subsequent tasks
 
     print("blop MCP — Customer Onboarding Benchmark")
@@ -272,46 +274,70 @@ async def main() -> int:
     # Generic goals like "verify page loads" produce trivial 2-step recordings.
     from blop.tools.record import record_test_flow
 
+    # Flow 1: Login flow — start UNAUTHENTICATED so the agent must actually fill
+    # in the login form. Credentials are embedded in the goal since we control
+    # this local benchmark and need the agent to perform the real login steps.
+    # Flow 2: Core feature — start logged-in so the agent can explore features.
     _BENCH_FLOWS = [
         {
-            "flow_name": "sensai_bench_auth_and_dashboard",
+            "flow_name": "sensai_bench_login_flow",
             "goal": (
-                f"Navigate to {app_url}, log in with the test account credentials, "
-                "verify the dashboard or main app view loads after login, "
-                "and confirm the primary navigation is visible."
+                f"Navigate to {login_url}. "
+                f"Fill in the email or username field with '{test_username}' "
+                f"and the password field with '{test_password}'. "
+                "Click the login or sign-in button to submit. "
+                "Wait for the redirect to complete after login. "
+                "Verify that the dashboard or main app view is visible "
+                "and the primary navigation is present — confirm no error message is shown."
             ),
             "business_criticality": "activation",
+            "profile_name": None,  # MUST be unauthenticated — agent records the real login steps
+            "force_no_auth": True,  # skip auto_storage_state_from_env so browser starts fresh
         },
         {
-            "flow_name": "sensai_bench_core_feature",
+            "flow_name": "sensai_bench_analytics_view",
+            # Specific actionable goal using real routes/buttons found in site inventory.
+            # The analytics page has time-range buttons (24hrs, 1week, 1month, 1year).
             "goal": (
-                f"Navigate to {app_url} and access the main product feature. "
-                "Explore the primary action available to a logged-in user "
-                "(e.g. create, start, or open a session/project/workspace). "
-                "Verify the feature view loads without errors."
+                f"You are already logged in. Navigate to {app_url}/analytics. "
+                "Wait for the analytics dashboard to fully load. "
+                "Find the time-range filter buttons (e.g. '24 hrs', '1 week', '1 month', '1 year'). "
+                "Click the '1 week' button to filter the analytics to the past week. "
+                "Verify the dashboard updates and shows data for the selected range. "
+                "Then click '1 month' to compare. "
+                "Confirm no error banners or failed network requests appear."
             ),
             "business_criticality": "retention",
+            "profile_name": profile_name,  # start logged in
+            "force_no_auth": False,
         },
     ]
     recorded_flow_ids: list[str] = []
+    # Only the core authenticated flow is used for regression — the login flow
+    # requires unauthenticated replay which is a separate concern.
+    regression_flow_ids: list[str] = []
 
     for i, flow_spec in enumerate(_BENCH_FLOWS, 1):
         step_name = f"record_flow_{i}"
         flow_name = flow_spec["flow_name"]
         goal = flow_spec["goal"]
         criticality = flow_spec["business_criticality"]
+        flow_profile = flow_spec.get("profile_name")
+        no_auth = flow_spec.get("force_no_auth", False)
 
         with timed_step(step_name) as r:
             print(f"  flow_name      : {flow_name}")
             print(f"  goal           : {goal[:120]}")
             print(f"  criticality    : {criticality}")
+            print(f"  auth           : {'unauthenticated (force_no_auth)' if no_auth else flow_profile or 'default'}")
             rf = await record_test_flow(
                 flow_name=flow_name,
                 goal=goal,
                 app_url=app_url,
-                profile_name=profile_name,
+                profile_name=flow_profile,
                 business_criticality=criticality,
                 headless=True,
+                force_no_auth=no_auth,
             )
             r.data = rf
             if rf.get("error"):
@@ -326,18 +352,23 @@ async def main() -> int:
             print(f"  steps recorded : {step_count}")
             assert flow_id, f"record_test_flow returned no flow_id: {rf}"
             recorded_flow_ids.append(flow_id)
+            if not no_auth:
+                # Authenticated flows can be replayed with the stored auth profile
+                regression_flow_ids.append(flow_id)
 
     # ── Step 6: Regression test ──────────────────────────────────────────────
+    from blop.config import GET_TEST_RESULTS_POLL_TERMINAL_STATUSES
     from blop.tools.regression import run_regression_test
     from blop.tools.results import get_test_results
 
     regression_run_id: str | None = None
 
-    if recorded_flow_ids:
+    if regression_flow_ids:
         with timed_step("regression") as r:
+            print(f"  replaying {len(regression_flow_ids)} authenticated flow(s)")
             rc = await run_regression_test(
                 app_url=app_url,
-                flow_ids=recorded_flow_ids,
+                flow_ids=regression_flow_ids,
                 profile_name=profile_name,
                 headless=True,
                 run_mode="replay",
@@ -363,16 +394,16 @@ async def main() -> int:
                 passed = tr.get("passed_cases", 0)
                 failed = tr.get("failed_cases_count", 0) or len(tr.get("failed_cases", []))
                 print(f"  status={status}  passed={passed}  failed={failed}     ", end="\r")
-                if status in ("completed", "failed", "cancelled"):
+                if status in GET_TEST_RESULTS_POLL_TERMINAL_STATUSES:
                     break
                 await asyncio.sleep(3.0)
             print()
-            assert status in ("completed", "failed", "cancelled"), f"timeout polling {run_id}"
+            assert status in GET_TEST_RESULTS_POLL_TERMINAL_STATUSES, f"timeout polling {run_id}"
             print(f"  final status   : {status}")
             r.data["final_status"] = status
             r.data["run_id"] = run_id
     else:
-        print("\nSKIP regression: no flows were recorded")
+        print("\nSKIP regression: no authenticated flows were recorded")
 
     # ── Step 7: Get results + decision ──────────────────────────────────────
     if regression_run_id:

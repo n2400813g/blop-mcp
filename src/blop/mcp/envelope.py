@@ -6,7 +6,11 @@ from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, model_validator
 
+from blop.config import GET_TEST_RESULTS_POLL_TERMINAL_STATUSES
 from blop.mcp import errors as mcp_errors
+
+_POLL_TERMINAL_LIST = sorted(GET_TEST_RESULTS_POLL_TERMINAL_STATUSES)
+_POLL_TERMINAL_STR = ", ".join(repr(s) for s in _POLL_TERMINAL_LIST)
 
 T = TypeVar("T")
 
@@ -48,14 +52,11 @@ def build_poll_workflow_hint(run_id: str, flow_count: int) -> WorkflowHint:
     min_min = max(1, min_s // 60)
     max_min = max_s // 60 + 1
     return WorkflowHint(
-        next_action=(
-            f"call get_test_results(run_id='{run_id}') every 4s "
-            "until status is 'completed', 'failed', 'cancelled', or 'interrupted'"
-        ),
+        next_action=(f"call get_test_results(run_id='{run_id}') every 4s until status is one of: {_POLL_TERMINAL_STR}"),
         poll_recipe={
             "tool": "get_test_results",
             "args_template": {"run_id": run_id},
-            "terminal_statuses": ["completed", "failed", "cancelled", "interrupted"],
+            "terminal_statuses": list(_POLL_TERMINAL_LIST),
             "interval_s": 4,
             "timeout_s": 900,
         },

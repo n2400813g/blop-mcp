@@ -3,6 +3,8 @@ import json
 
 import pytest
 
+from blop.config import GET_TEST_RESULTS_POLL_TERMINAL_STATUSES
+
 
 @pytest.mark.asyncio
 async def test_get_run_summary_returns_none_for_unknown(tmp_path, monkeypatch):
@@ -89,7 +91,7 @@ async def test_run_status_resource_running_has_poll_recipe(tmp_path, monkeypatch
     wf = result["workflow"]
     assert "poll_recipe" in wf
     assert wf["poll_recipe"]["tool"] == "get_test_results"
-    assert "interrupted" in wf["poll_recipe"]["terminal_statuses"]
+    assert set(wf["poll_recipe"]["terminal_statuses"]) == set(GET_TEST_RESULTS_POLL_TERMINAL_STATUSES)
 
 
 @pytest.mark.asyncio
@@ -121,3 +123,29 @@ async def test_run_status_resource_completed_has_brief_link(tmp_path, monkeypatc
     wf = result["workflow"]
     assert "poll_recipe" not in wf  # terminal — no polling needed
     assert release_id in wf["next_action"]
+
+
+@pytest.mark.asyncio
+async def test_run_status_resource_waiting_auth_is_terminal(tmp_path, monkeypatch):
+    """waiting_auth runs do not offer poll_recipe — terminal reconnect hint."""
+    monkeypatch.setenv("BLOP_DB_PATH", str(tmp_path / "test.db"))
+    import aiosqlite
+
+    from blop.storage.sqlite import init_db
+    from blop.tools.resources import run_status_resource
+
+    await init_db()
+    run_id = "run-wa"
+    db_path = str(tmp_path / "test.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "INSERT INTO runs (run_id, app_url, status, flow_ids_json, run_mode) VALUES (?, ?, ?, ?, ?)",
+            (run_id, "https://example.com", "waiting_auth", json.dumps(["f1"]), "replay"),
+        )
+        await db.commit()
+
+    result = await run_status_resource(run_id)
+    assert result["status"] == "waiting_auth"
+    wf = result["workflow"]
+    assert "poll_recipe" not in wf
+    assert "get_test_results" in wf["next_action"]

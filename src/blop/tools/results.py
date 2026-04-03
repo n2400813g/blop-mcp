@@ -6,6 +6,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from urllib.parse import quote
 
+from blop.config import GET_TEST_RESULTS_POLL_TERMINAL_STATUSES
 from blop.engine.context_graph import get_context_graph_summary, get_next_checks_for_release_scope
 from blop.engine.defect_classifier import categorize_failure_reason as _categorize_failure_reason
 from blop.engine.errors import BLOP_FLOW_NOT_FOUND, BLOP_RUN_NOT_FOUND, tool_error
@@ -364,7 +365,7 @@ async def get_test_results(run_id: str) -> dict:
     ):
         report["recommended_next_action"] = report["replay_trust_summary"]["summary"]
         report["workflow_hint"] = report["replay_trust_summary"]["summary"]
-    elif report.get("bucket_next_action") and report.get("status") in ("failed", "completed", "waiting_auth"):
+    elif report.get("bucket_next_action") and report.get("status") in GET_TEST_RESULTS_POLL_TERMINAL_STATUSES:
         report["recommended_next_action"] = report["bucket_next_action"]
         report["workflow_hint"] = report["bucket_next_action"]
 

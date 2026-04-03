@@ -26,6 +26,11 @@ Required environment variable: `GOOGLE_API_KEY` (Google Gemini access), or set `
 
 See `.env.example` for all optional env vars.
 
+## In-process Python (`asyncio.run` / one-off scripts)
+
+- **`save_auth_profile`** is implemented in `blop.tools.auth`, not `journeys`. Prefer `from blop.tools.auth import save_auth_profile` or `from blop.tools import save_auth_profile`.
+- **`run_regression_test`** and **`run_release_check`** (replay mode) **return immediately** after queueing work via `asyncio.create_task`. If a script calls them under `asyncio.run()` and then returns, **the event loop exits** and the run can stay **`queued`** forever. In the same coroutine, **poll `get_test_results(run_id)`** until status is terminal (`completed`, `failed`, `cancelled`, `interrupted`, or `waiting_auth` — see `blop.config.GET_TEST_RESULTS_POLL_TERMINAL_STATUSES` and `scripts/production_mcp_smoke.py`).
+
 ## Dev: Test MCP Tools Interactively
 
 ```bash

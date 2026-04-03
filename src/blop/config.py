@@ -25,6 +25,18 @@ APP_BASE_URL: str = os.getenv("APP_BASE_URL", "")
 LOGIN_URL: str = os.getenv("LOGIN_URL", "")
 BLOP_ENV: str = os.getenv("BLOP_ENV", "development").strip().lower()
 
+# ``get_test_results().status`` values where callers should stop polling (replay finished or blocked).
+GET_TEST_RESULTS_POLL_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    ("completed", "failed", "cancelled", "interrupted", "waiting_auth")
+)
+
+
+def is_get_test_results_poll_terminal(status: str | None) -> bool:
+    """Return True when polling ``get_test_results`` should stop for this status."""
+    s = (status or "").strip()
+    return s in GET_TEST_RESULTS_POLL_TERMINAL_STATUSES
+
+
 TEST_USERNAME: str = os.getenv("TEST_USERNAME", "")
 TEST_PASSWORD: str = os.getenv("TEST_PASSWORD", "")
 STORAGE_STATE_PATH: str = os.getenv("STORAGE_STATE_PATH", "")
@@ -191,6 +203,7 @@ BLOP_MAX_STEPS: int = int(os.getenv("BLOP_MAX_STEPS", "50"))
 BLOP_DISCOVERY_CONCURRENCY: int = int(os.getenv("BLOP_DISCOVERY_CONCURRENCY", "0"))
 BLOP_REPLAY_CONCURRENCY: int = int(os.getenv("BLOP_REPLAY_CONCURRENCY", "0"))
 # Fire-and-forget regression / release-check runs
+# Concurrent replay workers: additional runs fail fast with BLOP_RUN_CONCURRENCY_EXCEEDED unless clients retry later.
 BLOP_MAX_CONCURRENT_RUNS: int = max(1, int(os.getenv("BLOP_MAX_CONCURRENT_RUNS", "3")))
 # LLM circuit breaker + bounded retries (used by ainvoke_llm)
 BLOP_LLM_CIRCUIT_FAILURE_THRESHOLD: int = max(1, int(os.getenv("BLOP_LLM_CIRCUIT_FAILURE_THRESHOLD", "3")))
@@ -210,6 +223,13 @@ OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
 # Extended thinking budget (0 = disabled)
 BLOP_THINKING_BUDGET: int = int(os.getenv("BLOP_THINKING_BUDGET", "0"))
+
+# OTEL tracing — workspace context + optional OTLP exporter
+# BLOP_WORKSPACE_ID: forwarded as blop.workspace_id span attribute (team/org identifier)
+BLOP_WORKSPACE_ID: str = os.getenv("BLOP_WORKSPACE_ID", "")
+# BLOP_OTEL_EXPORTER_OTLP_ENDPOINT: when set, adds BatchSpanProcessor → OTLPSpanExporter
+# e.g. "http://localhost:4317" for a local Langfuse / Tempo / Jaeger collector
+BLOP_OTEL_EXPORTER_OTLP_ENDPOINT: str = os.getenv("BLOP_OTEL_EXPORTER_OTLP_ENDPOINT", "")
 
 # Mobile / Appium
 BLOP_APPIUM_URL: str = os.getenv("BLOP_APPIUM_URL", "http://127.0.0.1:4723")
@@ -235,8 +255,12 @@ BLOP_ALLOW_INTERNAL_URLS: bool = _env_bool("BLOP_ALLOW_INTERNAL_URLS", False)
 BLOP_ALLOWED_HOSTS: tuple[str, ...] = tuple(
     h.strip().lower().lstrip(".") for h in os.getenv("BLOP_ALLOWED_HOSTS", "").split(",") if h.strip()
 )
-BLOP_RUN_TIMEOUT_SECS: int = int(os.getenv("BLOP_RUN_TIMEOUT_SECS", "0"))
-BLOP_STEP_TIMEOUT_SECS: int = int(os.getenv("BLOP_STEP_TIMEOUT_SECS", "45"))
+BLOP_DENIED_HOSTS: tuple[str, ...] = tuple(
+    h.strip().lower().lstrip(".") for h in os.getenv("BLOP_DENIED_HOSTS", "").split(",") if h.strip()
+)
+BLOP_RUN_TIMEOUT_SECS: int = int(os.getenv("BLOP_MCP_RUN_TIMEOUT") or os.getenv("BLOP_RUN_TIMEOUT_SECS", "0"))
+BLOP_STEP_TIMEOUT_SECS: int = int(os.getenv("BLOP_MCP_STEP_TIMEOUT") or os.getenv("BLOP_STEP_TIMEOUT_SECS", "45"))
+BLOP_HEALTH_BROWSER_PROBE: bool = _env_bool("BLOP_HEALTH_BROWSER_PROBE", False)
 
 # Playwright-MCP compatibility layer settings
 BLOP_COMPAT_OUTPUT_DIR: str = os.getenv("BLOP_COMPAT_OUTPUT_DIR", ".playwright-mcp")
@@ -346,7 +370,10 @@ def validate_app_url(url: str) -> str | None:
     """Return an error message if *url* is not a valid HTTP(S) URL, else None."""
     if not url or not url.strip():
         return "app_url is required"
-    parsed = urlparse(url.strip())
+    raw = url.strip()
+    if len(raw) > 2048:
+        return "app_url is too long (max 2048 characters)"
+    parsed = urlparse(raw)
     if parsed.scheme not in ("http", "https"):
         return f"app_url must use http or https scheme, got '{parsed.scheme or '(none)'}'"
     if not parsed.netloc:
@@ -363,6 +390,10 @@ def validate_app_url(url: str) -> str | None:
                 "app_url host is not in BLOP_ALLOWED_HOSTS allowlist. "
                 f"Got '{host}', allowlist={list(BLOP_ALLOWED_HOSTS)}"
             )
+    if BLOP_DENIED_HOSTS:
+        denied_hit = any(host == d or host.endswith(f".{d}") for d in BLOP_DENIED_HOSTS)
+        if denied_hit:
+            return f"app_url host is blocked by BLOP_DENIED_HOSTS. Got '{host}', denylist={list(BLOP_DENIED_HOSTS)}"
     if not BLOP_ALLOW_INTERNAL_URLS:
         if host in {"localhost", "host.docker.internal"} or host.endswith(".localhost"):
             return (

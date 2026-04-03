@@ -692,6 +692,17 @@ class HealedStep(BaseModel):
     repair_confidence: float = 0.0
 
 
+FailureTaxonomy = Literal[
+    "SELECTOR_DRIFT",
+    "TIMING",
+    "AUTH_EXPIRED",
+    "ENV_MISMATCH",
+    "GENUINE_REGRESSION",
+    "FLAKE",
+    "UNKNOWN",
+]
+
+
 class FailureCase(BaseModel):
     case_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     run_id: str
@@ -699,6 +710,7 @@ class FailureCase(BaseModel):
     flow_name: str
     status: Literal["pass", "fail", "error", "blocked"]
     severity: Literal["blocker", "high", "medium", "low", "none"] = "none"
+    failure_taxonomy: FailureTaxonomy | None = None
     failure_class: (
         Literal[
             "product_bug",

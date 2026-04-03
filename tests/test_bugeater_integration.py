@@ -383,7 +383,7 @@ class TestBugEaterIntegration:
         )
 
         assert start.get("run_id"), f"Replay start did not return run_id: {start}"
-        assert start.get("status") in {"queued", "running", "completed", "failed"}, (
+        assert start.get("status") in {"queued", "running", "completed", "failed", "waiting_auth"}, (
             f"Unexpected replay start status: {start}"
         )
 

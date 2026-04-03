@@ -33,13 +33,14 @@ import httpx
 
 async def _poll_run(run_id: str, timeout: int = 300) -> dict:
     """Poll get_test_results until run is terminal."""
+    from blop.config import GET_TEST_RESULTS_POLL_TERMINAL_STATUSES
     from blop.tools.results import get_test_results
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = await get_test_results(run_id=run_id)
         status = result.get("status")
-        if status in ("completed", "failed", "cancelled"):
+        if status in GET_TEST_RESULTS_POLL_TERMINAL_STATUSES:
             return result
         print(f"  run {run_id}: status={status} — waiting…")
         await asyncio.sleep(10)
@@ -86,7 +87,10 @@ async def smoke_test(
     decision = final.get("decision", "INVESTIGATE")
     cases = final.get("cases", [])
     print(f"   status={status}  decision={decision}  cases={len(cases)}")
-    assert status in ("completed", "failed"), f"Unexpected terminal status: {status}"
+    assert status in ("completed", "failed"), (
+        f"Smoke expects a finished replay (completed or failed); got {status!r}. "
+        "If you see cancelled, interrupted, or waiting_auth, fix the environment and re-run."
+    )
 
     # ── Step 4: Verify cloud is reachable ────────────────────────────────────
     print("4. Verifying cloud connection endpoint…")
