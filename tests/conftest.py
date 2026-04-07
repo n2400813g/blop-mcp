@@ -83,18 +83,30 @@ def tmp_db(tmp_path):
     Sets BLOP_DB_PATH to a temp file, initialises the schema, and restores
     the original value on teardown. Synchronous — uses asyncio.run for init.
     """
+    from blop.storage import sqlite as _sqlite_mod
     from blop.storage.sqlite import init_db
 
     db_file = tmp_path / "test_blop.db"
     original = os.environ.get("BLOP_DB_PATH")
     os.environ["BLOP_DB_PATH"] = str(db_file)
+
+    # Force-reset the shared connection so init_db opens a fresh connection
+    # to the temp DB (avoids cross-loop connection reuse between fixtures).
+    _sqlite_mod._shared_conn = None
+    _sqlite_mod._conn_path = None
+
     loop = asyncio.new_event_loop()
     loop.run_until_complete(init_db())
     loop.close()
 
     yield str(db_file)
 
-    # Teardown: restore original env var
+    # Teardown: forget the temp-DB connection so subsequent tests don't
+    # try to reuse a connection that was created in a now-closed event loop.
+    _sqlite_mod._shared_conn = None
+    _sqlite_mod._conn_path = None
+
+    # Restore original env var
     if original is None:
         os.environ.pop("BLOP_DB_PATH", None)
     else:

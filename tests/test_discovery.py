@@ -9,11 +9,12 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 
 from blop.schemas import SiteInventory
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def init_test_db():
     from blop.storage.sqlite import init_db
 

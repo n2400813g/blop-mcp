@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime, timezone
 
 import pytest
+import pytest_asyncio
 
 # Use a temporary DB file for each test so we don't collide with real data.
 _TMP_DIR = tempfile.mkdtemp()
@@ -31,7 +32,7 @@ from blop.schemas import (
 from blop.storage import sqlite
 
 
-@pytest.fixture(autouse=True)
+@pytest_asyncio.fixture(autouse=True)
 async def _init():
     await sqlite.init_db()
 
