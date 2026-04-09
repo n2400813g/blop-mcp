@@ -301,13 +301,17 @@ def hosted_sync_config_snapshot() -> dict:
 
 
 def check_llm_api_key() -> tuple[bool, str]:
-    """Return (has_key, key_name) based on the configured LLM provider."""
-    provider = BLOP_LLM_PROVIDER.lower()
+    """Return (has_key, key_name) based on the configured LLM provider.
+
+    Reads from os.environ at call time so that test patches and runtime
+    overrides (e.g. patch.dict) take effect without requiring re-import.
+    """
+    provider = os.getenv("BLOP_LLM_PROVIDER", BLOP_LLM_PROVIDER).lower()
     if provider == "anthropic":
-        return (bool(ANTHROPIC_API_KEY), "ANTHROPIC_API_KEY")
+        return (bool(os.getenv("ANTHROPIC_API_KEY", "")), "ANTHROPIC_API_KEY")
     if provider == "openai":
-        return (bool(OPENAI_API_KEY), "OPENAI_API_KEY")
-    return (bool(GOOGLE_API_KEY), "GOOGLE_API_KEY")
+        return (bool(os.getenv("OPENAI_API_KEY", "")), "OPENAI_API_KEY")
+    return (bool(os.getenv("GOOGLE_API_KEY", "")), "GOOGLE_API_KEY")
 
 
 def validate_app_url(url: str) -> str | None:
