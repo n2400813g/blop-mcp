@@ -83,7 +83,10 @@ _db_connect_depth: contextvars.ContextVar[int] = contextvars.ContextVar("blop_sq
 async def _close_shared_unlocked() -> None:
     global _shared_conn, _conn_path
     if _shared_conn is not None:
-        await _shared_conn.close()
+        try:
+            await _shared_conn.close()
+        except Exception:
+            pass
     _shared_conn = None
     _conn_path = None
 

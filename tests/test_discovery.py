@@ -15,8 +15,9 @@ from blop.schemas import SiteInventory
 
 @pytest.fixture
 async def init_test_db():
-    from blop.storage.sqlite import init_db
+    from blop.storage.sqlite import init_db, reset_db_connection
 
+    await reset_db_connection()
     await init_db()
 
 
