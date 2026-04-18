@@ -203,6 +203,20 @@ async def _safe_compat_call(tool_name: str, handler, /, **kwargs) -> dict:
     return await _safe_call(handler, tool_name=tool_name, **kwargs)
 
 
+async def _safe_resource_call(coro) -> dict:
+    """Wrap a resource coroutine with error handling, returning a JSON error envelope on failure."""
+    try:
+        return await coro
+    except BlopError as exc:
+        return {"ok": False, "error": {"code": exc.code, "message": exc.message}}
+    except sqlite3.Error as exc:
+        err = blop_error_from_sqlite(exc)
+        return {"ok": False, "error": {"code": err.code, "message": err.message}}
+    except Exception as exc:
+        _log.error("resource_exception error_type=%s", type(exc).__name__, exc_info=True)
+        return {"ok": False, "error": {"code": "BLOP_MCP_INTERNAL_RESOURCE_ERROR", "message": str(exc)}}
+
+
 def _add_deprecation_notice(
     payload: dict,
     *,
@@ -2256,51 +2270,55 @@ async def health_resource() -> dict:
     from blop.config import check_llm_api_key, runtime_posture_snapshot
     from blop.storage import files as file_store
 
-    has_key, _key_name = check_llm_api_key()
-    chromium_ok = bool(shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome"))
-    db_ok = False
     try:
-        await sqlite.list_runs(limit=1)
-        db_ok = True
-    except Exception:
-        pass
-    active_runs = sum(1 for t in regression._RUN_TASKS.values() if not t.done())
-    posture = runtime_posture_snapshot()
-    path_checks = {
-        "runs_dir_resolves_absolute": file_store._runs_dir().is_absolute(),
-        "debug_log_parent_configured": bool(posture["paths"]["debug_log"]),
-        "db_path_absolute": posture["paths"]["db_path_absolute"],
-    }
-    return {
-        "status": "ready" if (has_key and db_ok) else "degraded",
-        "db_reachable": db_ok,
-        "llm_key_present": has_key,
-        "chromium_found": chromium_ok,
-        "active_run_count": active_runs,
-        "runtime_posture": posture,
-        "path_checks": path_checks,
-        "ts": datetime.now(timezone.utc).isoformat(),
-    }
+        has_key, _key_name = check_llm_api_key()
+        chromium_ok = bool(shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome"))
+        db_ok = False
+        try:
+            await sqlite.list_runs(limit=1)
+            db_ok = True
+        except Exception:
+            pass
+        active_runs = sum(1 for t in regression._RUN_TASKS.values() if not t.done())
+        posture = runtime_posture_snapshot()
+        path_checks = {
+            "runs_dir_resolves_absolute": file_store._runs_dir().is_absolute(),
+            "debug_log_parent_configured": bool(posture["paths"]["debug_log"]),
+            "db_path_absolute": posture["paths"]["db_path_absolute"],
+        }
+        return {
+            "status": "ready" if (has_key and db_ok) else "degraded",
+            "db_reachable": db_ok,
+            "llm_key_present": has_key,
+            "chromium_found": chromium_ok,
+            "active_run_count": active_runs,
+            "runtime_posture": posture,
+            "path_checks": path_checks,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        _log.error("resource_exception resource=blop://health error_type=%s", type(exc).__name__, exc_info=True)
+        return {"ok": False, "error": {"code": "BLOP_MCP_INTERNAL_RESOURCE_ERROR", "message": str(exc)}}
 
 
 @mcp.resource("blop://inventory/{app}")
 async def inventory_resource(app: str) -> dict:
     """Latest crawl inventory for an app URL (URL-encoded in resource URI)."""
     app_url = unquote(app)
-    return await discover.get_inventory_resource(app_url)
+    return await _safe_resource_call(discover.get_inventory_resource(app_url))
 
 
 @mcp.resource("blop://context-graph/{app}")
 async def context_graph_resource(app: str) -> dict:
     """Latest context graph snapshot for an app URL (URL-encoded in resource URI)."""
     app_url = unquote(app)
-    return await discover.get_context_graph_resource(app_url)
+    return await _safe_resource_call(discover.get_context_graph_resource(app_url))
 
 
 @mcp.resource("blop://run/{run_id}/artifact-index")
 async def run_artifact_index_resource(run_id: str) -> dict:
     """Read-only artifact index for a run."""
-    return await results.get_artifact_index_resource(run_id)
+    return await _safe_resource_call(results.get_artifact_index_resource(run_id))
 
 
 @mcp.resource("blop://run/{run_id}/mobile_artifacts")
@@ -2308,19 +2326,19 @@ async def run_mobile_artifacts_resource(run_id: str) -> dict:
     """Mobile replay evidence: screenshots, page_source paths, device logs (per run case)."""
     from blop.tools import resources as _resources_mod
 
-    return await _resources_mod.run_mobile_artifacts_resource(run_id)
+    return await _safe_resource_call(_resources_mod.run_mobile_artifacts_resource(run_id))
 
 
 @mcp.resource("blop://run/{run_id}/recommendation")
 async def run_recommendation_resource(run_id: str) -> dict:
     """Release recommendation (SHIP / INVESTIGATE / BLOCK) for a completed run. Lightweight polling target — cheaper than get_test_results."""
-    return await results.get_run_recommendation_resource(run_id)
+    return await _safe_resource_call(results.get_run_recommendation_resource(run_id))
 
 
 @mcp.resource("blop://flow/{flow_id}/stability-profile")
 async def flow_stability_profile_resource(flow_id: str) -> dict:
     """Read-only stability profile for a recorded flow."""
-    return await results.get_flow_stability_profile_resource(flow_id)
+    return await _safe_resource_call(results.get_flow_stability_profile_resource(flow_id))
 
 
 @mcp.resource("blop://prompts/list")
@@ -2328,7 +2346,11 @@ async def prompts_list_resource() -> dict:
     """Debug/internal resource: list available prompt templates with previews."""
     from blop.prompts import list_available_prompts
 
-    return list_available_prompts()
+    try:
+        return list_available_prompts()
+    except Exception as exc:
+        _log.error("resource_exception resource=blop://prompts/list error_type=%s", type(exc).__name__, exc_info=True)
+        return {"ok": False, "error": {"code": "BLOP_MCP_INTERNAL_RESOURCE_ERROR", "message": str(exc)}}
 
 
 @mcp.resource("blop://prompts/{name}")
@@ -2336,28 +2358,32 @@ async def prompt_resource(name: str) -> dict:
     """Debug/internal resource: read a specific engine prompt template by name (discover, repair, remediation, next_actions)."""
     from blop.prompts import DISCOVER_PROMPT, NEXT_ACTIONS_PROMPT, REMEDIATION_PROMPT, REPAIR_STEP_PROMPT, get_prompt
 
-    defaults = {
-        "discover": DISCOVER_PROMPT,
-        "repair": REPAIR_STEP_PROMPT,
-        "remediation": REMEDIATION_PROMPT,
-        "next_actions": NEXT_ACTIONS_PROMPT,
-    }
-    default = defaults.get(name, "")
-    prompt = get_prompt(name, default)
-    return {"name": name, "prompt": prompt, "is_override": prompt != default}
+    try:
+        defaults = {
+            "discover": DISCOVER_PROMPT,
+            "repair": REPAIR_STEP_PROMPT,
+            "remediation": REMEDIATION_PROMPT,
+            "next_actions": NEXT_ACTIONS_PROMPT,
+        }
+        default = defaults.get(name, "")
+        prompt = get_prompt(name, default)
+        return {"name": name, "prompt": prompt, "is_override": prompt != default}
+    except Exception as exc:
+        _log.error("resource_exception resource=blop://prompts/%s error_type=%s", name, type(exc).__name__, exc_info=True)
+        return {"ok": False, "error": {"code": "BLOP_MCP_INTERNAL_RESOURCE_ERROR", "message": str(exc)}}
 
 
 @mcp.resource("blop://v2/contracts/tools")
 async def v2_contracts_resource() -> dict:
     """V2 MCP tool contracts: request/response schemas + examples."""
-    return await v2_surface.get_surface_contract()
+    return await _safe_resource_call(v2_surface.get_surface_contract())
 
 
 @mcp.resource("blop://v2/context/{app}/latest")
 async def v2_context_latest_resource(app: str) -> dict:
     """Latest v2 context graph summary for URL-encoded app URL."""
     app_url = unquote(app)
-    return await v2_surface.get_context_latest_resource(app_url)
+    return await _safe_resource_call(v2_surface.get_context_latest_resource(app_url))
 
 
 @mcp.resource("blop://v2/context/{app}/history/{limit}")
@@ -2369,24 +2395,26 @@ async def v2_context_history_resource(app: str, limit: str) -> dict:
         safe_limit = max(1, min(int(limit), 100))
     except Exception:
         pass
-    return await v2_surface.get_context_history_resource(app_url=app_url, limit=safe_limit)
+    return await _safe_resource_call(v2_surface.get_context_history_resource(app_url=app_url, limit=safe_limit))
 
 
 @mcp.resource("blop://v2/context/{app}/diff/{baseline_graph_id}/{candidate_graph_id}")
 async def v2_context_diff_resource(app: str, baseline_graph_id: str, candidate_graph_id: str) -> dict:
     """Context graph structural/business diff between two versions."""
     app_url = unquote(app)
-    return await v2_surface.get_context_diff_resource(
-        app_url=app_url,
-        baseline_graph_id=baseline_graph_id,
-        candidate_graph_id=candidate_graph_id,
+    return await _safe_resource_call(
+        v2_surface.get_context_diff_resource(
+            app_url=app_url,
+            baseline_graph_id=baseline_graph_id,
+            candidate_graph_id=candidate_graph_id,
+        )
     )
 
 
 @mcp.resource("blop://v2/release/{release_id}/risk-summary")
 async def v2_release_risk_resource(release_id: str) -> dict:
     """Release risk summary snapshot by release_id."""
-    return await v2_surface.get_release_risk_resource(release_id)
+    return await _safe_resource_call(v2_surface.get_release_risk_resource(release_id))
 
 
 @mcp.resource("blop://v2/journey/{app}/health/{window}")
@@ -2394,26 +2422,26 @@ async def v2_journey_health_resource(app: str, window: str) -> dict:
     """Journey health resource for URL-encoded app and time window."""
     app_url = unquote(app)
     safe_window = window if window in ("24h", "7d", "30d") else "7d"
-    return await v2_surface.get_journey_health_resource(app_url=app_url, window=safe_window)
+    return await _safe_resource_call(v2_surface.get_journey_health_resource(app_url=app_url, window=safe_window))
 
 
 @mcp.resource("blop://v2/incidents/{app}/open")
 async def v2_incidents_open_resource(app: str) -> dict:
     """Open incident clusters for URL-encoded app URL."""
     app_url = unquote(app)
-    return await v2_surface.get_incidents_open_resource(app_url=app_url)
+    return await _safe_resource_call(v2_surface.get_incidents_open_resource(app_url=app_url))
 
 
 @mcp.resource("blop://v2/incident/{cluster_id}")
 async def v2_incident_resource(cluster_id: str) -> dict:
     """Single incident cluster record."""
-    return await v2_surface.get_incident_resource(cluster_id=cluster_id)
+    return await _safe_resource_call(v2_surface.get_incident_resource(cluster_id=cluster_id))
 
 
 @mcp.resource("blop://v2/incident/{cluster_id}/remediation-draft")
 async def v2_incident_remediation_resource(cluster_id: str) -> dict:
     """Remediation draft for incident cluster."""
-    return await v2_surface.get_incident_remediation_resource(cluster_id=cluster_id)
+    return await _safe_resource_call(v2_surface.get_incident_remediation_resource(cluster_id=cluster_id))
 
 
 @mcp.resource("blop://v2/correlation/{app}/{window}")
@@ -2421,7 +2449,7 @@ async def v2_correlation_resource(app: str, window: str) -> dict:
     """Latest correlation report for URL-encoded app URL and window."""
     app_url = unquote(app)
     safe_window = window if window in ("24h", "7d", "30d") else "7d"
-    return await v2_surface.get_correlation_resource(app_url=app_url, window=safe_window)
+    return await _safe_resource_call(v2_surface.get_correlation_resource(app_url=app_url, window=safe_window))
 
 
 # ---------------------------------------------------------------------------
@@ -3017,25 +3045,25 @@ async def record_run_observation(
 @mcp.resource("blop://journeys")
 async def journeys_resource() -> dict:
     """All recorded journeys as CriticalJourney-shaped objects."""
-    return await resources_tools.journeys_resource()
+    return await _safe_resource_call(resources_tools.journeys_resource())
 
 
 @mcp.resource("blop://release/{release_id}/brief")
 async def release_brief_resource(release_id: str) -> dict:
     """Condensed release summary: decision, risk score, blocker count, top actions."""
-    return await resources_tools.release_brief_resource(release_id)
+    return await _safe_resource_call(resources_tools.release_brief_resource(release_id))
 
 
 @mcp.resource("blop://release/{release_id}/artifacts")
 async def release_artifacts_resource(release_id: str) -> dict:
     """Screenshots, traces, and console logs for a release run, grouped by type."""
-    return await resources_tools.release_artifacts_resource(release_id)
+    return await _safe_resource_call(resources_tools.release_artifacts_resource(release_id))
 
 
 @mcp.resource("blop://release/{release_id}/incidents")
 async def release_incidents_resource(release_id: str) -> dict:
     """Incident clusters linked to a release run."""
-    return await resources_tools.release_incidents_resource(release_id)
+    return await _safe_resource_call(resources_tools.release_incidents_resource(release_id))
 
 
 # ── MVP PROMPTS ───────────────────────────────────────────────────────────────

@@ -136,3 +136,9 @@ ignore = ["E501"]
 "tests/integration/test_mobile_sauce_android.py" = ["E402"]
 "tests/test_mobile_selector.py" = ["E402"]
 "tests/test_sqlite_integration.py" = ["E402"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+]
