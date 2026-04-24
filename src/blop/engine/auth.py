@@ -11,10 +11,16 @@ from typing import Optional
 
 from blop.config import (
     APP_BASE_URL,
+    BLOP_ALLOW_ABSOLUTE_AUTH_PATHS,
     BLOP_AUTH_LOGIN_POLL_INTERVAL_MS,
     BLOP_AUTH_LOGIN_POLL_STEPS,
     BLOP_AUTH_NETWORKIDLE_TIMEOUT_MS,
+    BLOP_AUTH_VALIDATION_CACHE_TTL_SECS,
     BLOP_VALIDATE_AUTH_CACHE,
+    COOKIE_JSON_PATH,
+    STORAGE_STATE_PATH,
+    TEST_PASSWORD_SELECTOR,
+    TEST_USERNAME_SELECTOR,
 )
 from blop.engine.logger import get_logger
 from blop.engine.path_safety import resolve_within_base, sanitize_component
@@ -31,10 +37,8 @@ _validated_session_cache: dict[tuple[str, str, int], dict[str, float | bool]] = 
 _login_locks: dict[str, asyncio.Lock] = {}
 _lock_creation_lock = asyncio.Lock()
 _log = get_logger("auth")
-_AUTH_VALIDATION_CACHE_TTL_SECS = float(os.getenv("BLOP_AUTH_VALIDATION_CACHE_TTL_SECS", "60"))
-
-# Set to True to allow absolute paths outside the repo root for auth files
-_ALLOW_ABSOLUTE_AUTH_PATHS: bool = os.getenv("BLOP_ALLOW_ABSOLUTE_AUTH_PATHS", "").lower() in ("1", "true", "yes")
+_AUTH_VALIDATION_CACHE_TTL_SECS = BLOP_AUTH_VALIDATION_CACHE_TTL_SECS
+_ALLOW_ABSOLUTE_AUTH_PATHS: bool = BLOP_ALLOW_ABSOLUTE_AUTH_PATHS
 
 
 async def _get_lock(key: str) -> asyncio.Lock:
@@ -155,8 +159,8 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
 
         from playwright.async_api import async_playwright
 
-        username_selector = os.getenv("TEST_USERNAME_SELECTOR", "")
-        password_selector = os.getenv("TEST_PASSWORD_SELECTOR", "")
+        username_selector = TEST_USERNAME_SELECTOR
+        password_selector = TEST_PASSWORD_SELECTOR
 
         _user_selectors = [s for s in [username_selector] if s] + [
             "input[name='username']",
@@ -357,7 +361,7 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
 
 
 def _storage_state(profile: AuthProfile) -> Optional[str]:
-    path = profile.storage_state_path or os.getenv("STORAGE_STATE_PATH")
+    path = profile.storage_state_path or STORAGE_STATE_PATH or None
     resolved = resolve_within_base(
         path or "",
         base_dir=_REPO_ROOT,
@@ -487,7 +491,7 @@ async def auto_storage_state_from_env() -> Optional[str]:
 
 
 async def _cookie_json(profile: AuthProfile) -> Optional[str]:
-    cookie_path = profile.cookie_json_path or os.getenv("COOKIE_JSON_PATH")
+    cookie_path = profile.cookie_json_path or COOKIE_JSON_PATH or None
     resolved_cookie_path = resolve_within_base(
         cookie_path or "",
         base_dir=_REPO_ROOT,
