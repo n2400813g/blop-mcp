@@ -249,7 +249,10 @@ async def test_discover_flows_returns_fallback_without_api_key(mock_playwright_s
     _, mock_browser, _, _ = mock_playwright_stack
     lease = await _make_fake_lease(mock_browser)
 
-    with patch.dict(os.environ, {}, clear=True):
+    # Preserve BLOP_DB_PATH so the shared DB connection isn't re-routed to the
+    # default path (which may lack tables) when all env vars are cleared.
+    _infra = {k: os.environ[k] for k in ("BLOP_DB_PATH",) if k in os.environ}
+    with patch.dict(os.environ, _infra, clear=True):
         with patch("blop.engine.discovery.BROWSER_POOL.acquire", new_callable=AsyncMock, return_value=lease):
             result = await discover_flows("https://example.com")
 
@@ -283,7 +286,8 @@ async def test_discover_flows_fallback_spreads_public_site_across_sections():
         crawled_pages=12,
     )
 
-    with patch.dict(os.environ, {}, clear=True):
+    _infra = {k: os.environ[k] for k in ("BLOP_DB_PATH",) if k in os.environ}
+    with patch.dict(os.environ, _infra, clear=True):
         with patch("blop.engine.discovery.inventory_site", new_callable=AsyncMock, return_value=inventory):
             result = await discover_flows("https://testpages.eviltester.com/")
 
