@@ -495,6 +495,8 @@ BLOP_BLOCK_ON_ANY_FAILURE: bool = _env_bool("BLOP_BLOCK_ON_ANY_FAILURE", False)
 
 # Recommendation staleness threshold (hours after run completion)
 BLOP_RECOMMENDATION_STALE_HOURS: int = int(os.getenv("BLOP_RECOMMENDATION_STALE_HOURS", "24"))
+# Flow staleness threshold (days since a flow was recorded)
+BLOP_FLOW_STALE_DAYS: int = int(os.getenv("BLOP_FLOW_STALE_DAYS", "14"))
 
 # v2 risk score thresholds (Phase 2)
 BLOP_RISK_THRESHOLD_BLOCKER: float = float(os.getenv("BLOP_RISK_THRESHOLD_BLOCKER", "80"))

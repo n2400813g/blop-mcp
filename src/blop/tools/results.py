@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import os
 import statistics
 from collections import defaultdict
 from datetime import datetime, timezone
 from urllib.parse import quote
+
+from blop.config import BLOP_RECOMMENDATION_STALE_HOURS
 
 from blop.engine.context_graph import get_context_graph_summary, get_next_checks_for_release_scope
 from blop.engine.defect_classifier import categorize_failure_reason as _categorize_failure_reason
@@ -191,7 +192,7 @@ def _annotate_staleness(rec: dict, completed_at: str | None, run_status: str) ->
     if run_status not in ("completed", "failed"):
         rec["stale"] = False
         return rec
-    stale_hours = int(os.getenv("BLOP_RECOMMENDATION_STALE_HOURS", "24"))
+    stale_hours = BLOP_RECOMMENDATION_STALE_HOURS
     stale = False
     if completed_at:
         try:
@@ -388,10 +389,7 @@ async def get_run_recommendation_resource(run_id: str) -> dict:
     rec = _compute_release_recommendation(cases, status)
 
     # Apply staleness check
-    import os
-    from datetime import datetime, timezone
-
-    stale_hours = int(os.getenv("BLOP_RECOMMENDATION_STALE_HOURS", "24"))
+    stale_hours = BLOP_RECOMMENDATION_STALE_HOURS
     stale = False
     completed_at = run.get("completed_at")
     if completed_at and status in ("completed", "failed"):

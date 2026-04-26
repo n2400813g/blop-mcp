@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 
+from blop.config import BLOP_FLOW_STALE_DAYS
 from blop.schemas import DEFAULT_RELEASE_POLICY, FailureCase, PolicyGateResult, ReleasePolicy
 
 _TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "waiting_auth"}
@@ -23,7 +23,7 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
 
 
 def describe_flow_staleness(created_at: str | None) -> dict:
-    threshold_days = int(os.getenv("BLOP_FLOW_STALE_DAYS", "14"))
+    threshold_days = BLOP_FLOW_STALE_DAYS
     created_dt = _parse_iso_datetime(created_at)
     if not created_dt:
         return {

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -13,6 +12,7 @@ from blop.config import (
     BLOP_DEBUG_LOG,
     BLOP_HOSTED_URL,
     BLOP_PROJECT_ID,
+    check_llm_api_key,
     hosted_sync_config_snapshot,
     runtime_config_issues,
     runtime_posture_snapshot,
@@ -198,20 +198,14 @@ async def validate_setup(
             return str(exc)
 
     # 1. LLM API key (provider-aware)
-    provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
-    if provider == "anthropic":
-        api_key = os.getenv("ANTHROPIC_API_KEY", "")
-        key_name = "ANTHROPIC_API_KEY"
-        key_hint = "Anthropic Claude agent and flow planning"
-    elif provider == "openai":
-        api_key = os.getenv("OPENAI_API_KEY", "")
-        key_name = "OPENAI_API_KEY"
-        key_hint = "OpenAI agent and flow planning"
-    else:
-        api_key = os.getenv("GOOGLE_API_KEY", "")
-        key_name = "GOOGLE_API_KEY"
-        key_hint = "Gemini agent and flow planning"
-    if api_key:
+    has_key, key_name = check_llm_api_key()
+    provider = key_name.removesuffix("_API_KEY").lower()
+    key_hints = {
+        "anthropic": "Anthropic Claude agent and flow planning",
+        "openai": "OpenAI agent and flow planning",
+    }
+    key_hint = key_hints.get(provider, "Gemini agent and flow planning")
+    if has_key:
         checks.append({"name": key_name, "passed": True, "message": f"Set and non-empty (provider: {provider})"})
     else:
         checks.append({"name": key_name, "passed": False, "message": f"Not set — required for {key_hint}"})
