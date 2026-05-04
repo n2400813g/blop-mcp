@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import re
 from typing import TYPE_CHECKING
 
+from blop.config import ANTHROPIC_API_KEY, BLOP_LLM_PROVIDER, GOOGLE_API_KEY, OPENAI_API_KEY
 from blop.engine.logger import get_logger
 
 if TYPE_CHECKING:
@@ -30,17 +30,17 @@ async def _screenshot_b64(page: "Page") -> str:
 
 def _check_llm_api_key() -> bool:
     """Return True if at least one supported LLM API key is configured."""
-    provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
+    provider = BLOP_LLM_PROVIDER.lower()
     if provider == "anthropic":
-        return bool(os.getenv("ANTHROPIC_API_KEY"))
+        return bool(ANTHROPIC_API_KEY)
     if provider == "openai":
-        return bool(os.getenv("OPENAI_API_KEY"))
-    return bool(os.getenv("GOOGLE_API_KEY"))
+        return bool(OPENAI_API_KEY)
+    return bool(GOOGLE_API_KEY)
 
 
 def _make_vision_message(text: str, image_b64: str):
     """Create a message with text + image appropriate for the configured provider."""
-    provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
+    provider = BLOP_LLM_PROVIDER.lower()
     if provider in ("anthropic", "openai"):
         from langchain_core.messages import HumanMessage
 

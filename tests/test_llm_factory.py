@@ -12,9 +12,12 @@ from blop.engine import llm_factory
 def test_planning_llm_google_default():
     """make_planning_llm with BLOP_LLM_PROVIDER=google calls ChatGoogle with model=gemini-2.5-flash."""
     mock_chat_google = MagicMock()
-    with patch.dict(os.environ, {"BLOP_LLM_PROVIDER": "google", "GOOGLE_API_KEY": "test-key"}):
-        with patch("browser_use.llm.ChatGoogle", mock_chat_google):
-            llm_factory.make_planning_llm(temperature=0.3, max_output_tokens=2000)
+    with (
+        patch.object(llm_factory, "BLOP_LLM_PROVIDER", "google"),
+        patch.object(llm_factory, "GOOGLE_API_KEY", "test-key"),
+        patch("browser_use.llm.ChatGoogle", mock_chat_google),
+    ):
+        llm_factory.make_planning_llm(temperature=0.3, max_output_tokens=2000)
     mock_chat_google.assert_called_once()
     call_kwargs = mock_chat_google.call_args[1]
     assert call_kwargs["model"] == "gemini-2.5-flash"
@@ -27,9 +30,11 @@ def test_planning_llm_anthropic():
     mock_chat_anthropic = MagicMock()
     mock_anthropic_mod = MagicMock()
     mock_anthropic_mod.ChatAnthropic = mock_chat_anthropic
-    with patch.dict(os.environ, {"BLOP_LLM_PROVIDER": "anthropic"}):
-        with patch.dict(sys.modules, {"langchain_anthropic": mock_anthropic_mod}):
-            llm_factory.make_planning_llm(temperature=0.3, max_output_tokens=2000)
+    with (
+        patch.object(llm_factory, "BLOP_LLM_PROVIDER", "anthropic"),
+        patch.dict(sys.modules, {"langchain_anthropic": mock_anthropic_mod}),
+    ):
+        llm_factory.make_planning_llm(temperature=0.3, max_output_tokens=2000)
     mock_chat_anthropic.assert_called_once()
     call_kwargs = mock_chat_anthropic.call_args[1]
     assert call_kwargs["model"] == "claude-3-5-haiku-20241022"
@@ -42,9 +47,11 @@ def test_planning_llm_openai():
     mock_chat_openai = MagicMock()
     mock_openai_mod = MagicMock()
     mock_openai_mod.ChatOpenAI = mock_chat_openai
-    with patch.dict(os.environ, {"BLOP_LLM_PROVIDER": "openai"}):
-        with patch.dict(sys.modules, {"langchain_openai": mock_openai_mod}):
-            llm_factory.make_planning_llm(temperature=0.3, max_output_tokens=2000)
+    with (
+        patch.object(llm_factory, "BLOP_LLM_PROVIDER", "openai"),
+        patch.dict(sys.modules, {"langchain_openai": mock_openai_mod}),
+    ):
+        llm_factory.make_planning_llm(temperature=0.3, max_output_tokens=2000)
     mock_chat_openai.assert_called_once()
     call_kwargs = mock_chat_openai.call_args[1]
     assert call_kwargs["model"] == "gpt-4o-mini"
@@ -54,11 +61,13 @@ def test_planning_llm_openai():
 def test_planning_llm_model_override():
     """make_planning_llm uses BLOP_LLM_MODEL override when set."""
     mock_chat_google = MagicMock()
-    with patch.dict(
-        os.environ, {"BLOP_LLM_PROVIDER": "google", "BLOP_LLM_MODEL": "custom-model", "GOOGLE_API_KEY": "key"}
+    with (
+        patch.object(llm_factory, "BLOP_LLM_PROVIDER", "google"),
+        patch.object(llm_factory, "BLOP_LLM_MODEL", "custom-model"),
+        patch.object(llm_factory, "GOOGLE_API_KEY", "key"),
+        patch("browser_use.llm.ChatGoogle", mock_chat_google),
     ):
-        with patch("browser_use.llm.ChatGoogle", mock_chat_google):
-            llm_factory.make_planning_llm(temperature=0.3, max_output_tokens=2000)
+        llm_factory.make_planning_llm(temperature=0.3, max_output_tokens=2000)
     call_kwargs = mock_chat_google.call_args[1]
     assert call_kwargs["model"] == "custom-model"
 
@@ -66,9 +75,12 @@ def test_planning_llm_model_override():
 def test_agent_llm_google():
     """make_agent_llm returns Google model by default."""
     mock_chat_google = MagicMock()
-    with patch.dict(os.environ, {"BLOP_LLM_PROVIDER": "google", "GOOGLE_API_KEY": "key"}):
-        with patch("browser_use.llm.ChatGoogle", mock_chat_google):
-            llm_factory.make_agent_llm()
+    with (
+        patch.object(llm_factory, "BLOP_LLM_PROVIDER", "google"),
+        patch.object(llm_factory, "GOOGLE_API_KEY", "key"),
+        patch("browser_use.llm.ChatGoogle", mock_chat_google),
+    ):
+        llm_factory.make_agent_llm()
     mock_chat_google.assert_called_once()
     call_kwargs = mock_chat_google.call_args[1]
     assert call_kwargs["model"] == "gemini-2.5-flash"
@@ -77,17 +89,14 @@ def test_agent_llm_google():
 def test_planning_llm_role_specific_override():
     """Role-specific overrides win over the generic BLOP_LLM_MODEL fallback."""
     mock_chat_google = MagicMock()
-    with patch.dict(
-        os.environ,
-        {
-            "BLOP_LLM_PROVIDER": "google",
-            "GOOGLE_API_KEY": "key",
-            "BLOP_LLM_MODEL": "generic-model",
-            "BLOP_PLANNER_LLM_MODEL": "planner-model",
-        },
+    with (
+        patch.object(llm_factory, "BLOP_LLM_PROVIDER", "google"),
+        patch.object(llm_factory, "GOOGLE_API_KEY", "key"),
+        patch.object(llm_factory, "BLOP_LLM_MODEL", "generic-model"),
+        patch.dict(os.environ, {"BLOP_PLANNER_LLM_MODEL": "planner-model"}),
+        patch("browser_use.llm.ChatGoogle", mock_chat_google),
     ):
-        with patch("browser_use.llm.ChatGoogle", mock_chat_google):
-            llm_factory.make_planning_llm(role="planner", temperature=0.1, max_output_tokens=256)
+        llm_factory.make_planning_llm(role="planner", temperature=0.1, max_output_tokens=256)
     call_kwargs = mock_chat_google.call_args[1]
     assert call_kwargs["model"] == "planner-model"
 
@@ -95,35 +104,36 @@ def test_planning_llm_role_specific_override():
 def test_agent_llm_role_specific_override():
     """Agent role override is respected without affecting other roles."""
     mock_chat_google = MagicMock()
-    with patch.dict(
-        os.environ,
-        {
-            "BLOP_LLM_PROVIDER": "google",
-            "GOOGLE_API_KEY": "key",
-            "BLOP_AGENT_LLM_MODEL": "agent-model",
-        },
+    with (
+        patch.object(llm_factory, "BLOP_LLM_PROVIDER", "google"),
+        patch.object(llm_factory, "GOOGLE_API_KEY", "key"),
+        patch.dict(os.environ, {"BLOP_AGENT_LLM_MODEL": "agent-model"}),
+        patch("browser_use.llm.ChatGoogle", mock_chat_google),
     ):
-        with patch("browser_use.llm.ChatGoogle", mock_chat_google):
-            llm_factory.make_agent_llm(role="agent")
+        llm_factory.make_agent_llm(role="agent")
     call_kwargs = mock_chat_google.call_args[1]
     assert call_kwargs["model"] == "agent-model"
 
 
 def test_make_message_google():
     """make_message returns UserMessage for google provider."""
-    with patch.dict(os.environ, {"BLOP_LLM_PROVIDER": "google"}):
-        mock_user_message = MagicMock()
-        with patch("browser_use.llm.messages.UserMessage", mock_user_message):
-            msg = llm_factory.make_message("hello")
+    mock_user_message = MagicMock()
+    with (
+        patch.object(llm_factory, "BLOP_LLM_PROVIDER", "google"),
+        patch("browser_use.llm.messages.UserMessage", mock_user_message),
+    ):
+        msg = llm_factory.make_message("hello")
     mock_user_message.assert_called_once_with(content="hello")
     assert msg is mock_user_message.return_value
 
 
 def test_make_message_anthropic():
     """make_message returns HumanMessage for anthropic provider."""
-    with patch.dict(os.environ, {"BLOP_LLM_PROVIDER": "anthropic"}):
-        mock_human_message = MagicMock()
-        with patch("langchain_core.messages.HumanMessage", mock_human_message):
-            msg = llm_factory.make_message("hello")
+    mock_human_message = MagicMock()
+    with (
+        patch.object(llm_factory, "BLOP_LLM_PROVIDER", "anthropic"),
+        patch("langchain_core.messages.HumanMessage", mock_human_message),
+    ):
+        msg = llm_factory.make_message("hello")
     mock_human_message.assert_called_once_with(content="hello")
     assert msg is mock_human_message.return_value

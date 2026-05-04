@@ -16,6 +16,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from blop.config import ANTHROPIC_API_KEY, BLOP_LLM_MODEL, BLOP_LLM_PROVIDER, GOOGLE_API_KEY, OPENAI_API_KEY
+
 _ROLE_ENV_MAP = {
     "agent": "BLOP_AGENT_LLM_MODEL",
     "planner": "BLOP_PLANNER_LLM_MODEL",
@@ -58,13 +60,13 @@ _DEFAULT_MODELS = {
 
 
 def resolve_llm_model(role: str, provider: str | None = None) -> str:
-    provider_name = (provider or os.getenv("BLOP_LLM_PROVIDER", "google")).lower()
+    provider_name = (provider or BLOP_LLM_PROVIDER).lower()
     role_name = (role or "planner").strip().lower()
     env_name = _ROLE_ENV_MAP.get(role_name)
     if env_name and os.getenv(env_name):
         return os.getenv(env_name, "")
-    if os.getenv("BLOP_LLM_MODEL"):
-        return os.getenv("BLOP_LLM_MODEL", "")
+    if BLOP_LLM_MODEL:
+        return BLOP_LLM_MODEL
     return _DEFAULT_MODELS.get(provider_name, _DEFAULT_MODELS["google"]).get(
         role_name,
         _DEFAULT_MODELS.get(provider_name, _DEFAULT_MODELS["google"])["planner"],
@@ -77,13 +79,13 @@ def _make_chat_model(
     temperature: float,
     max_output_tokens: int | None = None,
 ) -> Any:
-    provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
+    provider = BLOP_LLM_PROVIDER.lower()
     model = resolve_llm_model(role, provider)
 
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic  # type: ignore[import-untyped]
 
-        api_key = os.getenv("ANTHROPIC_API_KEY", "") or None
+        api_key = ANTHROPIC_API_KEY or None
         kwargs = {"model": model, "api_key": api_key, "temperature": temperature}
         if max_output_tokens is not None:
             kwargs["max_tokens"] = max_output_tokens
@@ -92,7 +94,7 @@ def _make_chat_model(
     if provider == "openai":
         from langchain_openai import ChatOpenAI  # type: ignore[import-untyped]
 
-        api_key = os.getenv("OPENAI_API_KEY", "") or None
+        api_key = OPENAI_API_KEY or None
         kwargs = {"model": model, "api_key": api_key, "temperature": temperature}
         if max_output_tokens is not None:
             kwargs["max_tokens"] = max_output_tokens
@@ -101,7 +103,7 @@ def _make_chat_model(
     # Default: Google Gemini via browser_use
     from browser_use.llm import ChatGoogle
 
-    api_key = os.getenv("GOOGLE_API_KEY", "")
+    api_key = GOOGLE_API_KEY
     kwargs = {"model": model, "api_key": api_key, "temperature": temperature}
     if max_output_tokens is not None:
         kwargs["max_output_tokens"] = max_output_tokens
@@ -184,7 +186,7 @@ def make_message(prompt: str) -> Any:
     Google/browser_use uses UserMessage; anthropic/openai use HumanMessage.
     Falls back to UserMessage so existing google paths stay unchanged.
     """
-    provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
+    provider = BLOP_LLM_PROVIDER.lower()
     if provider in ("anthropic", "openai"):
         from langchain_core.messages import HumanMessage
 
