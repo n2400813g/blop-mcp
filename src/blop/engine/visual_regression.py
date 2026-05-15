@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from blop.config import BLOP_ALLOW_SCREENSHOT_LLM
+from blop.config import BLOP_ALLOW_SCREENSHOT_LLM, BLOP_LLM_PROVIDER
 from blop.engine.errors import BLOP_VISUAL_BASELINE_NOT_FOUND, tool_error
 
 if TYPE_CHECKING:
@@ -148,7 +148,7 @@ async def _vision_triage(baseline_path: str, current_path: str, diff_ratio: floa
 
         llm = _llm(max_output_tokens=128)
 
-        provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
+        provider = BLOP_LLM_PROVIDER.lower()
         if provider in ("anthropic", "openai"):
             from langchain_core.messages import HumanMessage
 

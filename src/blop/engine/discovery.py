@@ -13,9 +13,14 @@ from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
 
 from blop.config import (
+    ANTHROPIC_API_KEY,
     BLOP_DISCOVERY_CONCURRENCY,
     BLOP_DISCOVERY_MAX_PAGES,
+    BLOP_LLM_PROVIDER,
     BLOP_SPA_SETTLE_MS,
+    BLOP_THINKING_BUDGET,
+    GOOGLE_API_KEY,
+    OPENAI_API_KEY,
 )
 from blop.engine.auth import resolve_storage_state_for_profile
 from blop.engine.browser_pool import BROWSER_POOL
@@ -1114,7 +1119,7 @@ async def plan_flows_from_inventory(
     from blop.engine.llm_factory import make_message, make_planning_llm
     from blop.prompts import DISCOVER_PROMPT
 
-    provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
+    provider = BLOP_LLM_PROVIDER.lower()
     fallback_meta = {"planning_fallback": False, "planning_error": None}
     heuristic_flows = _heuristic_flows_from_inventory(inventory)
     if inventory.crawled_pages <= 6 and len(inventory.routes) <= 4 and len(heuristic_flows) >= 3:
@@ -1123,21 +1128,21 @@ async def plan_flows_from_inventory(
             "planning_error": "Used heuristic CTA planner for shallow inventory",
         }
         return (heuristic_flows, fallback_meta) if include_meta else heuristic_flows
-    if provider == "google" and not os.getenv("GOOGLE_API_KEY"):
+    if provider == "google" and not GOOGLE_API_KEY:
         fallback_meta = {
             "planning_fallback": True,
             "planning_error": "GOOGLE_API_KEY is not set",
         }
         flows = _fallback_flows(inventory.app_url, inventory=inventory)
         return (flows, fallback_meta) if include_meta else flows
-    if provider == "anthropic" and not os.getenv("ANTHROPIC_API_KEY"):
+    if provider == "anthropic" and not ANTHROPIC_API_KEY:
         fallback_meta = {
             "planning_fallback": True,
             "planning_error": "ANTHROPIC_API_KEY is not set",
         }
         flows = _fallback_flows(inventory.app_url, inventory=inventory)
         return (flows, fallback_meta) if include_meta else flows
-    if provider == "openai" and not os.getenv("OPENAI_API_KEY"):
+    if provider == "openai" and not OPENAI_API_KEY:
         fallback_meta = {
             "planning_fallback": True,
             "planning_error": "OPENAI_API_KEY is not set",
@@ -1147,7 +1152,7 @@ async def plan_flows_from_inventory(
 
     llm_kwargs: dict = {"temperature": 0.7, "max_output_tokens": 2000}
     # Extended thinking: enable for complex apps or when budget set
-    thinking_budget = int(os.getenv("BLOP_THINKING_BUDGET", "0"))
+    thinking_budget = BLOP_THINKING_BUDGET
     if thinking_budget > 0 and provider == "google":
         archetype_str = ""
         try:
@@ -1391,11 +1396,11 @@ async def _flows_from_repo(
 
     from blop.engine.llm_factory import make_message, make_planning_llm
 
-    provider = os.getenv("BLOP_LLM_PROVIDER", "google").lower()
+    provider = BLOP_LLM_PROVIDER.lower()
     has_key = (
-        (provider == "google" and os.getenv("GOOGLE_API_KEY"))
-        or (provider == "anthropic" and os.getenv("ANTHROPIC_API_KEY"))
-        or (provider == "openai" and os.getenv("OPENAI_API_KEY"))
+        (provider == "google" and GOOGLE_API_KEY)
+        or (provider == "anthropic" and ANTHROPIC_API_KEY)
+        or (provider == "openai" and OPENAI_API_KEY)
     )
     if not files or not has_key:
         return await plan_flows_from_inventory(inventory, business_goal=business_goal)
