@@ -34,6 +34,7 @@ from blop.engine.context_graph import (
     list_journey_summaries,
     summarize_release_scope,
 )
+from blop.config import GOOGLE_API_KEY
 from blop.engine.errors import BLOP_CLUSTER_NOT_FOUND, BLOP_RESOURCE_NOT_FOUND, BLOP_VALIDATION_FAILED, tool_error
 from blop.engine.secrets import mask_text
 from blop.schemas import (
@@ -992,7 +993,7 @@ async def generate_remediation(
             fix_hypotheses.append(f"Add or refresh recorded release-gating coverage for {journey_label}.")
 
     # Try Gemini for richer fix hypotheses and owner hints
-    if (include_owner_hints or include_fix_hypotheses) and os.getenv("GOOGLE_API_KEY"):
+    if (include_owner_hints or include_fix_hypotheses) and GOOGLE_API_KEY:
         try:
             from blop.engine.llm_factory import make_message, make_planning_llm
             from blop.prompts import REMEDIATION_PROMPT

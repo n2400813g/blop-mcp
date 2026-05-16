@@ -331,7 +331,7 @@ async def test_discover_flows_with_gemini_response(mock_playwright_stack):
     _, mock_browser, _, _ = mock_playwright_stack
     lease = await _make_fake_lease(mock_browser)
 
-    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+    with patch("blop.engine.discovery.GOOGLE_API_KEY", "test_key"):
         with patch("blop.engine.discovery.BROWSER_POOL.acquire", new_callable=AsyncMock, return_value=lease):
             with patch("browser_use.llm.ChatGoogle", return_value=mock_llm):
                 result = await discover_flows("https://example.com")
@@ -360,7 +360,7 @@ async def test_discover_flows_count_clamped(mock_playwright_stack):
     _, mock_browser, _, _ = mock_playwright_stack
     lease = await _make_fake_lease(mock_browser)
 
-    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+    with patch("blop.engine.discovery.GOOGLE_API_KEY", "test_key"):
         with patch("blop.engine.discovery.BROWSER_POOL.acquire", new_callable=AsyncMock, return_value=lease):
             with patch("browser_use.llm.ChatGoogle", return_value=mock_llm):
                 result = await discover_flows("https://example.com")
@@ -406,7 +406,7 @@ async def test_discover_flows_includes_business_criticality(mock_playwright_stac
     _, mock_browser, _, _ = mock_playwright_stack
     lease = await _make_fake_lease(mock_browser)
 
-    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+    with patch("blop.engine.discovery.GOOGLE_API_KEY", "test_key"):
         with patch("blop.engine.discovery.BROWSER_POOL.acquire", new_callable=AsyncMock, return_value=lease):
             with patch("browser_use.llm.ChatGoogle", return_value=mock_llm):
                 result = await discover_flows("https://example.com")
@@ -446,7 +446,7 @@ async def test_discover_flows_with_repo_path(tmp_path, mock_playwright_stack):
     _, mock_browser, _, _ = mock_playwright_stack
     lease = await _make_fake_lease(mock_browser)
 
-    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+    with patch("blop.engine.discovery.GOOGLE_API_KEY", "test_key"):
         with patch("blop.engine.discovery.BROWSER_POOL.acquire", new_callable=AsyncMock, return_value=lease):
             with patch("browser_use.llm.ChatGoogle", return_value=mock_llm):
                 result = await discover_flows("https://example.com", repo_path=str(tmp_path))
@@ -733,7 +733,7 @@ async def test_discover_flows_enriches_storefront_gating_when_llm_returns_generi
     mock_llm = AsyncMock()
     mock_llm.ainvoke.return_value = mock_response
 
-    with patch.dict(os.environ, {"GOOGLE_API_KEY": "test_key"}):
+    with patch("blop.engine.discovery.GOOGLE_API_KEY", "test_key"):
         with patch("blop.engine.discovery.inventory_site", new_callable=AsyncMock, return_value=inventory):
             with patch("browser_use.llm.ChatGoogle", return_value=mock_llm):
                 result = await discover_flows("https://www.demoblaze.com")
