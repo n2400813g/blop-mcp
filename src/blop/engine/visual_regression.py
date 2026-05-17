@@ -103,7 +103,7 @@ async def compare_screenshots(
         "is_regression": False,
     }
 
-    threshold = float(os.getenv("BLOP_VISUAL_DIFF_THRESHOLD", str(VISUAL_DIFF_THRESHOLD)))
+    threshold = VISUAL_DIFF_THRESHOLD
     if size_mismatch:
         # Size mismatch is always considered a meaningful visual regression signal.
         result["is_regression"] = True
@@ -224,7 +224,7 @@ async def compare_visual_baseline(flow_id: str, step_index: int | None = None) -
                 "size_mismatch": size_mismatch,
                 "is_regression": False,
             }
-            threshold = float(os.getenv("BLOP_VISUAL_DIFF_THRESHOLD", str(VISUAL_DIFF_THRESHOLD)))
+            threshold = VISUAL_DIFF_THRESHOLD
             if size_mismatch:
                 result["is_regression"] = True
             elif diff_ratio > threshold:
@@ -254,7 +254,7 @@ async def compare_visual_baseline(flow_id: str, step_index: int | None = None) -
             entry["diff_ratio"] = diff_ratio
             entry["diff_path"] = diff_path
             entry["size_mismatch"] = size_mismatch
-            threshold = float(os.getenv("BLOP_VISUAL_DIFF_THRESHOLD", str(VISUAL_DIFF_THRESHOLD)))
+            threshold = VISUAL_DIFF_THRESHOLD
             entry["is_regression"] = False
             if size_mismatch:
                 entry["is_regression"] = True
