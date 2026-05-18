@@ -17,7 +17,6 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from contextlib import asynccontextmanager
 
@@ -113,9 +112,9 @@ def run() -> int:
     if not _HAS_DEPS:
         print("fastapi, uvicorn, and sse-starlette are required.\nInstall with: pip install blop-mcp[server]")
         return 1
-    host = os.getenv("BLOP_HTTP_HOST", "0.0.0.0")
-    port = int(os.getenv("BLOP_HTTP_PORT", "8765"))
-    uvicorn.run(app, host=host, port=port)
+    from blop.config import BLOP_HTTP_HOST, BLOP_HTTP_PORT
+
+    uvicorn.run(app, host=BLOP_HTTP_HOST, port=BLOP_HTTP_PORT)
     return 0
 
 

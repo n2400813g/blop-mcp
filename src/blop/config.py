@@ -265,6 +265,11 @@ BLOP_PROJECT_ID: str | None = os.getenv("BLOP_PROJECT_ID") or None  # workspace 
 BLOP_HTTP_API_KEY: str | None = os.getenv("BLOP_HTTP_API_KEY") or None
 # Optional public base URL for absolute links in JSON (e.g. https://blop.example.com). If unset, handlers use request.base_url.
 BLOP_HTTP_PUBLIC_BASE_URL: str = os.getenv("BLOP_HTTP_PUBLIC_BASE_URL", "").rstrip("/")
+BLOP_HTTP_HOST: str = os.getenv("BLOP_HTTP_HOST", "0.0.0.0")
+BLOP_HTTP_PORT: int = int(os.getenv("BLOP_HTTP_PORT", "8765"))
+
+# Visual regression pixel diff threshold (0.0–1.0, default 2 %)
+BLOP_VISUAL_DIFF_THRESHOLD: float = float(os.getenv("BLOP_VISUAL_DIFF_THRESHOLD", "0.02"))
 
 
 def hosted_sync_config_snapshot() -> dict:
