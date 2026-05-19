@@ -7,7 +7,6 @@ import asyncio
 import base64
 import hashlib
 import json
-import os
 import re
 import uuid
 from typing import Optional
@@ -16,6 +15,7 @@ from urllib.parse import urlparse
 from blop.config import (
     BLOP_AGENT_MAX_ACTIONS_PER_STEP,
     BLOP_AGENT_MAX_FAILURES,
+    BLOP_DEBUG,
     BLOP_RECORDING_ENTRY_SETTLE_MS,
     BLOP_TEST_ID_ATTRIBUTE,
 )
@@ -543,7 +543,7 @@ async def record_flow(
             _log.debug("get page reference from browser session", exc_info=True)
 
         all_actions = history.model_actions() if hasattr(history, "model_actions") else []
-        if os.getenv("BLOP_DEBUG"):
+        if BLOP_DEBUG:
             try:
                 with open("/tmp/blop_debug.log", "a") as _dbg:
                     _dbg.write(

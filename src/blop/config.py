@@ -265,6 +265,15 @@ BLOP_PROJECT_ID: str | None = os.getenv("BLOP_PROJECT_ID") or None  # workspace 
 BLOP_HTTP_API_KEY: str | None = os.getenv("BLOP_HTTP_API_KEY") or None
 # Optional public base URL for absolute links in JSON (e.g. https://blop.example.com). If unset, handlers use request.base_url.
 BLOP_HTTP_PUBLIC_BASE_URL: str = os.getenv("BLOP_HTTP_PUBLIC_BASE_URL", "").rstrip("/")
+# blop-http server bind address and port
+BLOP_HTTP_HOST: str = os.getenv("BLOP_HTTP_HOST", "0.0.0.0")
+BLOP_HTTP_PORT: int = int(os.getenv("BLOP_HTTP_PORT", "8765"))
+
+# Debug mode — enables verbose traceback in run_failed events and debug file logging
+BLOP_DEBUG: bool = _env_bool("BLOP_DEBUG", False)
+
+# Exploration profile name (preset key for get_exploration_tuning)
+BLOP_EXPLORATION_PROFILE: str = os.getenv("BLOP_EXPLORATION_PROFILE", "default").strip().lower()
 
 
 def hosted_sync_config_snapshot() -> dict:

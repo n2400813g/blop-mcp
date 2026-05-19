@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import os
 import time
 from importlib import import_module
 from typing import Optional
 
-from blop.config import BLOP_API_TOKEN, BLOP_ENV, BLOP_HOSTED_URL, BLOP_PROJECT_ID
+from blop.config import BLOP_API_TOKEN, BLOP_ENV, BLOP_EXPLORATION_PROFILE, BLOP_HOSTED_URL, BLOP_PROJECT_ID
 from blop.mcp.dto import (
     JourneyListDTO,
     PrdSummaryDTO,
@@ -78,7 +77,7 @@ async def get_workspace_context(use_cache: bool = True) -> dict:
     dto = WorkspaceContextDTO(
         workspace_id=workspace_id,
         environment=BLOP_ENV,
-        exploration_profile=str(os.environ.get("BLOP_EXPLORATION_PROFILE", "default")),
+        exploration_profile=BLOP_EXPLORATION_PROFILE,
         resource_uris={
             "journeys": "blop://journeys",
             "health": "blop://health",

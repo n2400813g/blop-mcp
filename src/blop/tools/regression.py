@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import os
 import time
 import traceback
 import uuid
 from typing import Optional
 
-from blop.config import BLOP_MAX_CONCURRENT_RUNS
+from blop.config import BLOP_DEBUG, BLOP_MAX_CONCURRENT_RUNS
 from blop.engine import auth as auth_engine
 from blop.engine import classifier
 from blop.engine import regression as regression_engine
@@ -1178,7 +1177,7 @@ async def _run_and_persist(
             "error_type": type(e).__name__,
             "error_message": str(e)[:500],
         }
-        if os.getenv("BLOP_DEBUG", "0").lower() not in ("0", "false", "no", "off"):
+        if BLOP_DEBUG:
             event_payload["traceback"] = traceback.format_exc(limit=20)[:4000]
         _log.debug("run_failed event=%s run_id=%s", event_payload, run_id)
         await sqlite.save_run_health_event(
