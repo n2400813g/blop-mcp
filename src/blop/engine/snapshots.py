@@ -13,8 +13,6 @@ import json
 import os
 from typing import Optional
 
-_SNAPSHOT_MODE = os.getenv("BLOP_SNAPSHOT_MODE", "full").lower()
-
 
 def get_snapshot_mode() -> str:
     return os.getenv("BLOP_SNAPSHOT_MODE", "full").lower()

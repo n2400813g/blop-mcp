@@ -314,7 +314,7 @@ async def test_run_release_check_targeted_uses_expanded_budget_and_stored_report
         "is_terminal": True,
     }
 
-    with patch.dict(os.environ, {"BLOP_TARGETED_MAX_STEPS": "41"}):
+    with patch("blop.tools.release_check.BLOP_TARGETED_MAX_STEPS", 41):
         with patch(
             "blop.tools.evaluate.evaluate_web_task", new_callable=AsyncMock, return_value=eval_result
         ) as eval_mock:

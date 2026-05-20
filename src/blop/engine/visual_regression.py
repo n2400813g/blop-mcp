@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from blop.config import BLOP_ALLOW_SCREENSHOT_LLM, BLOP_LLM_PROVIDER
+from blop.config import BLOP_ALLOW_SCREENSHOT_LLM, BLOP_LLM_PROVIDER, BLOP_VISUAL_DIFF_THRESHOLD
 from blop.engine.errors import BLOP_VISUAL_BASELINE_NOT_FOUND, tool_error
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
 
 
-VISUAL_DIFF_THRESHOLD = float(os.getenv("BLOP_VISUAL_DIFF_THRESHOLD", "0.02"))
+VISUAL_DIFF_THRESHOLD = BLOP_VISUAL_DIFF_THRESHOLD
 _log = logging.getLogger(__name__)
 
 

@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import os
 import uuid
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
-from blop.config import validate_app_url, validate_mobile_replay_app_url
+from blop.config import BLOP_TARGETED_MAX_STEPS, validate_app_url, validate_mobile_replay_app_url
 from blop.engine.errors import (
     BLOP_RESOURCE_NOT_FOUND,
     BLOP_URL_VALIDATION_FAILED,
@@ -585,7 +584,7 @@ async def _run_targeted(
         tasks = ["Navigate the app, check that critical user flows work end-to-end, and report any errors."]
 
     task = " Then: ".join(tasks[:3])  # Combine up to 3 goals
-    max_steps = int(os.getenv("BLOP_TARGETED_MAX_STEPS", "40"))
+    max_steps = BLOP_TARGETED_MAX_STEPS
 
     eval_result = await evaluate_web_task(
         app_url=app_url,

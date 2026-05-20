@@ -44,6 +44,8 @@ from __future__ import annotations
 
 import os
 
+from blop.config import BLOP_ENV as _BLOP_ENV
+
 # Names gated by BLOP_ENABLE_LEGACY_MCP_TOOLS in server.py (documentation / tooling).
 LEGACY_MCP_TOOL_NAMES: frozenset[str] = frozenset(
     {
@@ -149,7 +151,7 @@ _DEFAULT_CAPS_BY_ENV = {
     "default": "core,auth,debug",
 }
 DEFAULT_CAPABILITIES = _DEFAULT_CAPS_BY_ENV.get(
-    os.getenv("BLOP_ENV", "development").strip().lower(),
+    _BLOP_ENV,
     _DEFAULT_CAPS_BY_ENV["default"],
 )
 CAPABILITY_PROFILES: dict[str, str] = {

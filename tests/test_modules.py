@@ -21,11 +21,11 @@ class TestSecretsMasking:
     def test_mask_text_with_secrets(self, tmp_path):
         secrets_file = tmp_path / "secrets.env"
         secrets_file.write_text("DB_PASSWORD=SuperSecret123\nAPI_KEY=abc-xyz-999\n")
-        os.environ["BLOP_SECRETS_FILE"] = str(secrets_file)
 
         import blop.engine.secrets as s
 
         s._secrets_cache = None
+        s._BLOP_SECRETS_FILE = str(secrets_file)
 
         result = s.mask_text("The password is SuperSecret123 and key is abc-xyz-999")
         assert "SuperSecret123" not in result
@@ -35,11 +35,11 @@ class TestSecretsMasking:
     def test_mask_text_no_secrets(self, tmp_path):
         secrets_file = tmp_path / "secrets.env"
         secrets_file.write_text("")
-        os.environ["BLOP_SECRETS_FILE"] = str(secrets_file)
 
         import blop.engine.secrets as s
 
         s._secrets_cache = None
+        s._BLOP_SECRETS_FILE = str(secrets_file)
 
         result = s.mask_text("nothing to redact here")
         assert result == "nothing to redact here"
@@ -47,11 +47,11 @@ class TestSecretsMasking:
     def test_mask_dict(self, tmp_path):
         secrets_file = tmp_path / "secrets.env"
         secrets_file.write_text("TOKEN=mytoken123\n")
-        os.environ["BLOP_SECRETS_FILE"] = str(secrets_file)
 
         import blop.engine.secrets as s
 
         s._secrets_cache = None
+        s._BLOP_SECRETS_FILE = str(secrets_file)
 
         data = {"key": "contains mytoken123 value", "nested": {"inner": "also mytoken123"}}
         result = s.mask_dict(data)
@@ -61,28 +61,27 @@ class TestSecretsMasking:
     def test_has_secrets(self, tmp_path):
         secrets_file = tmp_path / "secrets.env"
         secrets_file.write_text("SECRET=value\n")
-        os.environ["BLOP_SECRETS_FILE"] = str(secrets_file)
 
         import blop.engine.secrets as s
 
         s._secrets_cache = None
+        s._BLOP_SECRETS_FILE = str(secrets_file)
         assert s.has_secrets() is True
 
     def test_reload_secrets(self, tmp_path):
         secrets_file = tmp_path / "secrets.env"
         secrets_file.write_text("A=first\n")
-        os.environ["BLOP_SECRETS_FILE"] = str(secrets_file)
 
         import blop.engine.secrets as s
 
         s._secrets_cache = None
+        s._BLOP_SECRETS_FILE = str(secrets_file)
         assert s.reload_secrets() == 1
 
         secrets_file.write_text("A=first\nB=second\n")
         assert s.reload_secrets() == 2
 
     def teardown_method(self):
-        os.environ.pop("BLOP_SECRETS_FILE", None)
         import blop.engine.secrets as s
 
         s._secrets_cache = None

@@ -7,8 +7,9 @@ secret values are replaced with [REDACTED].
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
+
+from blop.config import BLOP_SECRETS_FILE as _BLOP_SECRETS_FILE
 
 _secrets_cache: list[str] | None = None
 
@@ -19,7 +20,7 @@ def _load_secrets() -> list[str]:
     if _secrets_cache is not None:
         return _secrets_cache
 
-    secrets_file = os.getenv("BLOP_SECRETS_FILE", "")
+    secrets_file = _BLOP_SECRETS_FILE
     if not secrets_file:
         repo_root = Path(__file__).parent.parent.parent
         secrets_file = str(repo_root / ".blop" / "secrets.env")

@@ -548,3 +548,20 @@ BLOP_CAPTURE_FINAL_SCREENSHOT: bool = _CAPTURE_POLICY["final_screenshot"]
 BLOP_SCREENSHOT_INTERVAL_SECS: float = _CAPTURE_POLICY["screenshot_interval_secs"]
 BLOP_MAX_SCREENSHOTS: int = _CAPTURE_POLICY["max_screenshots"]
 BLOP_MAX_EVIDENCE_ARTIFACTS: int = _CAPTURE_POLICY["artifact_cap"]
+
+# Storage event buffer limits
+BLOP_RUN_HEALTH_BUFFER_LIMIT: int = max(1, int(os.getenv("BLOP_RUN_HEALTH_BUFFER_LIMIT", "16")))
+BLOP_EVENT_BUFFER_MAX: int = max(1, int(os.getenv("BLOP_EVENT_BUFFER_MAX", "64")))
+BLOP_ARTIFACT_BUFFER_LIMIT: int = max(1, int(os.getenv("BLOP_ARTIFACT_BUFFER_LIMIT", "24")))
+
+# Engine snapshot mode ("full" / "incremental" / "none")
+BLOP_SNAPSHOT_MODE: str = os.getenv("BLOP_SNAPSHOT_MODE", "full").lower()
+
+# Visual diff threshold (fraction of differing pixels)
+BLOP_VISUAL_DIFF_THRESHOLD: float = float(os.getenv("BLOP_VISUAL_DIFF_THRESHOLD", "0.02"))
+
+# Max steps for targeted evaluate_web_task runs
+BLOP_TARGETED_MAX_STEPS: int = int(os.getenv("BLOP_TARGETED_MAX_STEPS", "40"))
+
+# Path to the secrets masking file (defaults to .blop/secrets.env)
+BLOP_SECRETS_FILE: str = os.getenv("BLOP_SECRETS_FILE", "")
