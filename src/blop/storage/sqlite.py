@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
-from blop.config import BLOP_DB_PATH
+from blop.config import BLOP_ARTIFACT_BUFFER_LIMIT, BLOP_DB_PATH, BLOP_EVENT_BUFFER_MAX, BLOP_RUN_HEALTH_BUFFER_LIMIT
 from blop.engine.errors import BLOP_STORAGE_DB_OPEN_FAILED, BLOP_STORAGE_MIGRATION_FAILED, BlopError
 from blop.engine.logger import get_logger
 from blop.schemas import (
@@ -29,12 +29,9 @@ _log = get_logger("sqlite")
 
 _TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
-_RUN_HEALTH_BUFFER_LIMIT = max(1, int(os.getenv("BLOP_RUN_HEALTH_BUFFER_LIMIT", "16")))
-_RUN_HEALTH_HARD_MAX = max(
-    _RUN_HEALTH_BUFFER_LIMIT,
-    max(1, int(os.getenv("BLOP_EVENT_BUFFER_MAX", "64"))),
-)
-_ARTIFACT_BUFFER_LIMIT = max(1, int(os.getenv("BLOP_ARTIFACT_BUFFER_LIMIT", "24")))
+_RUN_HEALTH_BUFFER_LIMIT = BLOP_RUN_HEALTH_BUFFER_LIMIT
+_RUN_HEALTH_HARD_MAX = max(BLOP_RUN_HEALTH_BUFFER_LIMIT, BLOP_EVENT_BUFFER_MAX)
+_ARTIFACT_BUFFER_LIMIT = BLOP_ARTIFACT_BUFFER_LIMIT
 _RUN_HEALTH_FLUSH_EVENTS = {
     "case_completed",
     "run_completed",

@@ -272,6 +272,17 @@ BLOP_HTTP_PORT: int = int(os.getenv("BLOP_HTTP_PORT", "8765"))
 # Debug mode — enables verbose traceback in run_failed events and debug file logging
 BLOP_DEBUG: bool = _env_bool("BLOP_DEBUG", False)
 
+# Targeted evaluation max agent steps
+BLOP_TARGETED_MAX_STEPS: int = int(os.getenv("BLOP_TARGETED_MAX_STEPS", "40"))
+
+# SQLite write buffer limits
+BLOP_RUN_HEALTH_BUFFER_LIMIT: int = max(1, int(os.getenv("BLOP_RUN_HEALTH_BUFFER_LIMIT", "16")))
+BLOP_EVENT_BUFFER_MAX: int = max(
+    1,
+    int(os.getenv("BLOP_EVENT_BUFFER_MAX", "64")),
+)
+BLOP_ARTIFACT_BUFFER_LIMIT: int = max(1, int(os.getenv("BLOP_ARTIFACT_BUFFER_LIMIT", "24")))
+
 # Exploration profile name (preset key for get_exploration_tuning)
 BLOP_EXPLORATION_PROFILE: str = os.getenv("BLOP_EXPLORATION_PROFILE", "default").strip().lower()
 
