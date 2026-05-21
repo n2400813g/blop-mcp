@@ -185,30 +185,36 @@ async def test_run_persist_case_completed_event_includes_worker_metadata():
     mock_save_events = AsyncMock()
 
     with patch("blop.storage.sqlite.update_run_status", new_callable=AsyncMock):
-        with patch("blop.storage.sqlite.save_run_health_events", mock_save_events):
-            with patch("blop.storage.sqlite.save_cases", new_callable=AsyncMock):
-                with patch("blop.storage.sqlite.update_run", new_callable=AsyncMock):
-                    with patch("blop.storage.sqlite.save_risk_calibration_record", new_callable=AsyncMock):
-                        with patch(
-                            "blop.tools.regression.classifier.classify_case",
-                            new_callable=AsyncMock,
-                            side_effect=lambda current_case, _app_url: current_case,
-                        ):
+        with patch("blop.storage.sqlite.save_run_health_event", new_callable=AsyncMock):
+            with patch("blop.storage.sqlite.save_run_health_events", mock_save_events):
+                with patch("blop.storage.sqlite.save_cases", new_callable=AsyncMock):
+                    with patch("blop.storage.sqlite.update_run", new_callable=AsyncMock):
+                        with patch("blop.storage.sqlite.save_risk_calibration_record", new_callable=AsyncMock):
                             with patch(
-                                "blop.tools.regression.classifier.classify_run",
+                                "blop.tools.regression.classifier.classify_case",
                                 new_callable=AsyncMock,
-                                return_value={"next_actions": []},
+                                side_effect=lambda current_case, _app_url: current_case,
                             ):
                                 with patch(
-                                    "blop.tools.regression.regression_engine.run_flows", side_effect=fake_run_flows
+                                    "blop.tools.regression.classifier.classify_run",
+                                    new_callable=AsyncMock,
+                                    return_value={"next_actions": []},
                                 ):
-                                    await _run_and_persist(
-                                        run_id="run-1",
-                                        flows=[flow],
-                                        app_url="https://example.com",
-                                        storage_state=None,
-                                        headless=True,
-                                    )
+                                    with patch(
+                                        "blop.tools.regression.regression_engine.run_flows",
+                                        side_effect=fake_run_flows,
+                                    ):
+                                        with patch(
+                                            "blop.tools.regression._refresh_linked_release_brief",
+                                            new_callable=AsyncMock,
+                                        ):
+                                            await _run_and_persist(
+                                                run_id="run-1",
+                                                flows=[flow],
+                                                app_url="https://example.com",
+                                                storage_state=None,
+                                                headless=True,
+                                            )
 
     case_events = [
         event["payload"]
@@ -396,7 +402,9 @@ async def test_run_and_persist_transitions_to_completed():
         stack.enter_context(patch("blop.storage.sqlite.save_cases", new_callable=AsyncMock))
         stack.enter_context(patch("blop.storage.sqlite.update_run", new_callable=AsyncMock))
         stack.enter_context(patch("blop.storage.sqlite.update_run_status", side_effect=capture_update_status))
+        stack.enter_context(patch("blop.storage.sqlite.save_run_health_event", new_callable=AsyncMock))
         stack.enter_context(patch("blop.storage.sqlite.save_run_health_events", new_callable=AsyncMock))
+        stack.enter_context(patch("blop.tools.regression._refresh_linked_release_brief", new_callable=AsyncMock))
         await _run_and_persist(
             run_id="run1",
             flows=[flow],
@@ -419,14 +427,16 @@ async def test_run_and_persist_exception_transitions_to_failed():
     with patch("blop.engine.regression.run_flows", side_effect=Exception("DB corrupted")):
         with patch("blop.storage.sqlite.update_run_status", new_callable=AsyncMock):
             with patch("blop.storage.sqlite.update_run", mock_update_run):
-                with patch("blop.storage.sqlite.save_run_health_events", new_callable=AsyncMock):
-                    await _run_and_persist(
-                        run_id="run1",
-                        flows=[make_flow("flow1")],
-                        app_url="https://example.com",
-                        storage_state=None,
-                        headless=True,
-                    )
+                with patch("blop.storage.sqlite.save_run_health_event", new_callable=AsyncMock):
+                    with patch("blop.storage.sqlite.save_run_health_events", new_callable=AsyncMock):
+                        with patch("blop.tools.regression._refresh_linked_release_brief", new_callable=AsyncMock):
+                            await _run_and_persist(
+                                run_id="run1",
+                                flows=[make_flow("flow1")],
+                                app_url="https://example.com",
+                                storage_state=None,
+                                headless=True,
+                            )
 
     mock_update_run.assert_called_once()
     call_args = mock_update_run.call_args
@@ -439,7 +449,7 @@ async def test_run_release_check_queues_run_with_release_id():
     from blop.tools.release_check import run_release_check
 
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}):
-        with patch("blop.storage.sqlite.list_flows", new_callable=AsyncMock, return_value=[]):
+        with patch("blop.storage.sqlite.list_flows_full", new_callable=AsyncMock, return_value=[]):
             result = await run_release_check(
                 app_url="https://example.com",
                 journey_ids=[],
@@ -456,7 +466,7 @@ async def test_run_release_check_no_flows_returns_structured_error():
     from blop.tools.release_check import run_release_check
 
     with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}):
-        with patch("blop.storage.sqlite.list_flows", new_callable=AsyncMock, return_value=[]):
+        with patch("blop.storage.sqlite.list_flows_full", new_callable=AsyncMock, return_value=[]):
             result = await run_release_check(
                 app_url="https://example.com",
                 mode="replay",

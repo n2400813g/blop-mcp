@@ -381,6 +381,13 @@ async def run_release_check(
             request.app_url, effective_flow_ids, request.profile_name, release_id, request.headless
         )
     else:
+        # Fail-fast URL check before touching the DB.
+        # Mobile replay uses bare package IDs (no "://") so skip validation for those;
+        # empty strings and scheme-bearing URLs always go through validate_app_url.
+        if not request.app_url or "://" in request.app_url:
+            url_err = validate_app_url(request.app_url)
+            if url_err:
+                return tool_error(url_err, BLOP_URL_VALIDATION_FAILED, release_id=release_id)
         resolved_ids, selected_flows = await _resolve_replay_selection(
             request.app_url,
             effective_flow_ids,

@@ -31,7 +31,7 @@ async def test_record_flow_happy_path():
         patch("blop.tools.record.recording.record_flow", mock_record_flow),
         patch("blop.tools.record.sqlite.save_flow", mock_save_flow),
         patch("blop.tools.record.sqlite.get_auth_profile", mock_get_auth_profile),
-        patch("blop.tools.record.sqlite.list_flows", new_callable=AsyncMock, return_value=[]),
+        patch("blop.tools.record.sqlite.find_flow_by_url_and_name", new_callable=AsyncMock, return_value=None),
         patch("blop.tools.record.file_store.artifacts_dir", return_value=mock_artifacts_dir),
         patch("blop.engine.context_graph.detect_app_archetype", return_value="saas_app"),
         patch("blop.engine.context_graph.editor_hints_from_archetype", return_value={}),
@@ -80,7 +80,9 @@ async def test_record_flow_with_business_criticality():
     with patch("blop.tools.record.recording.record_flow", mock_record_flow):
         with patch("blop.tools.record.sqlite.save_flow", mock_save_flow):
             with patch("blop.tools.record.sqlite.get_auth_profile", AsyncMock(return_value=None)):
-                with patch("blop.tools.record.sqlite.list_flows", new_callable=AsyncMock, return_value=[]):
+                with patch(
+                    "blop.tools.record.sqlite.find_flow_by_url_and_name", new_callable=AsyncMock, return_value=None
+                ):
                     with patch("blop.tools.record.file_store.artifacts_dir", return_value="/tmp/runs/f1"):
                         with patch("blop.engine.context_graph.detect_app_archetype", return_value="saas_app"):
                             with patch("blop.engine.context_graph.editor_hints_from_archetype", return_value={}):
@@ -204,7 +206,9 @@ async def test_record_flow_uses_goal_url_as_entry_url_and_plan_anchor():
     with patch("blop.tools.record.recording.record_flow", AsyncMock(return_value=mock_steps)):
         with patch("blop.tools.record.sqlite.save_flow", mock_save_flow):
             with patch("blop.tools.record.sqlite.get_auth_profile", AsyncMock(return_value=None)):
-                with patch("blop.tools.record.sqlite.list_flows", new_callable=AsyncMock, return_value=[]):
+                with patch(
+                    "blop.tools.record.sqlite.find_flow_by_url_and_name", new_callable=AsyncMock, return_value=None
+                ):
                     with patch("blop.tools.record.file_store.artifacts_dir", return_value="/tmp/runs/f1"):
                         with patch("blop.engine.context_graph.detect_app_archetype", return_value="saas_app"):
                             with patch("blop.engine.context_graph.editor_hints_from_archetype", return_value={}):
