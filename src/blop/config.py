@@ -248,6 +248,7 @@ BLOP_ALLOW_SCREENSHOT_LLM: bool = _env_bool("BLOP_ALLOW_SCREENSHOT_LLM", False)
 # Auto-heal confidence thresholds for regression replay
 BLOP_AUTO_HEAL_MIN_CONFIDENCE: float = float(os.getenv("BLOP_AUTO_HEAL_MIN_CONFIDENCE", "0.78"))
 BLOP_AUTO_HEAL_MAX_BEHAVIOR_RISK: float = float(os.getenv("BLOP_AUTO_HEAL_MAX_BEHAVIOR_RISK", "0.25"))
+BLOP_VISUAL_DIFF_THRESHOLD: float = float(os.getenv("BLOP_VISUAL_DIFF_THRESHOLD", "0.02"))
 
 # Prompt overrides directory
 BLOP_PROMPTS_DIR: str = os.getenv("BLOP_PROMPTS_DIR", "")
