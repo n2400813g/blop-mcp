@@ -52,7 +52,12 @@ def _buffer_lock() -> asyncio.Lock:
 
 
 def _db_path() -> str:
-    return os.environ.get("BLOP_DB_PATH", BLOP_DB_PATH)
+    raw = os.environ.get("BLOP_DB_PATH", BLOP_DB_PATH)
+    if not os.path.isabs(raw):
+        from pathlib import Path
+
+        return str(Path(__file__).parent.parent.parent / raw)
+    return raw
 
 
 def _parse_run_duration_seconds(started_at: str | None, completed_at: str | None) -> float | None:
