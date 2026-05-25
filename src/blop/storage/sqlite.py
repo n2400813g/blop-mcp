@@ -56,7 +56,8 @@ def _db_path() -> str:
     if not os.path.isabs(raw):
         from pathlib import Path
 
-        return str(Path(__file__).parent.parent.parent / raw)
+        # sqlite.py is at src/blop/storage/; need 4 parents to reach repo root
+        return str(Path(__file__).parent.parent.parent.parent / raw)
     return raw
 
 
