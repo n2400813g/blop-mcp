@@ -287,6 +287,12 @@ BLOP_ARTIFACT_BUFFER_LIMIT: int = max(1, int(os.getenv("BLOP_ARTIFACT_BUFFER_LIM
 # Exploration profile name (preset key for get_exploration_tuning)
 BLOP_EXPLORATION_PROFILE: str = os.getenv("BLOP_EXPLORATION_PROFILE", "default").strip().lower()
 
+# Secrets masking file path
+BLOP_SECRETS_FILE: str = os.getenv("BLOP_SECRETS_FILE", "")
+
+# OpenTelemetry tracing toggle
+BLOP_OTEL_TRACING_ENABLED: bool = os.getenv("BLOP_OTEL_TRACING", "").strip().lower() in ("1", "true", "yes", "on")
+
 
 def hosted_sync_config_snapshot() -> dict:
     """Describe optional hosted sync posture without forcing cloud usage."""
