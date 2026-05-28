@@ -273,6 +273,13 @@ BLOP_HTTP_PORT: int = int(os.getenv("BLOP_HTTP_PORT", "8765"))
 # Debug mode — enables verbose traceback in run_failed events and debug file logging
 BLOP_DEBUG: bool = _env_bool("BLOP_DEBUG", False)
 
+# Optional OpenTelemetry span emission (requires blop-mcp[otel])
+BLOP_OTEL_TRACING: bool = _env_bool("BLOP_OTEL_TRACING", False)
+
+# Path to secrets masking file (default: .blop/secrets.env); read at call time so runtime overrides work
+def get_secrets_file() -> str:
+    return os.getenv("BLOP_SECRETS_FILE", "")
+
 # Targeted evaluation max agent steps
 BLOP_TARGETED_MAX_STEPS: int = int(os.getenv("BLOP_TARGETED_MAX_STEPS", "40"))
 
