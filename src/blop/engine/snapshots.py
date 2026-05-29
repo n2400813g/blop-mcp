@@ -1,8 +1,8 @@
 """Incremental snapshot mode — send only DOM deltas to the LLM for token efficiency.
 
-Controlled by BLOP_SNAPSHOT_MODE env var:
-  - "full"        : send the complete ARIA tree every time (default, current behaviour)
-  - "incremental" : diff against the previous snapshot and send only changed nodes
+Controlled by BLOP_SNAPSHOT_MODE env var (also accepts BLOP_COMPAT_SNAPSHOT_MODE):
+  - "full"        : send the complete ARIA tree every time
+  - "incremental" : diff against the previous snapshot and send only changed nodes (default)
   - "none"        : skip snapshot entirely (fastest, least context)
 """
 
@@ -13,8 +13,9 @@ import json
 import os
 from typing import Optional
 
+
 def get_snapshot_mode() -> str:
-    return os.getenv("BLOP_SNAPSHOT_MODE", "full").lower()
+    return (os.getenv("BLOP_COMPAT_SNAPSHOT_MODE") or os.getenv("BLOP_SNAPSHOT_MODE") or "incremental").lower()
 
 
 class SnapshotTracker:
