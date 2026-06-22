@@ -9,16 +9,17 @@ this module only spikes console export for local debugging.
 
 from __future__ import annotations
 
-import os
 from contextlib import contextmanager
 from typing import Any, Iterator
+
+from blop.config import BLOP_OTEL_TRACING
 
 _INIT_ATTEMPTED = False
 _SDK_AVAILABLE = False
 
 
 def _otel_tracing_enabled() -> bool:
-    return os.getenv("BLOP_OTEL_TRACING", "").strip().lower() in ("1", "true", "yes", "on")
+    return BLOP_OTEL_TRACING.strip().lower() in ("1", "true", "yes", "on")
 
 
 def _ensure_tracer_provider() -> None:
