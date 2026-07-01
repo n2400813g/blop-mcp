@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -93,7 +92,7 @@ def test_planning_llm_role_specific_override():
         patch.object(llm_factory, "BLOP_LLM_PROVIDER", "google"),
         patch.object(llm_factory, "GOOGLE_API_KEY", "key"),
         patch.object(llm_factory, "BLOP_LLM_MODEL", "generic-model"),
-        patch.dict(os.environ, {"BLOP_PLANNER_LLM_MODEL": "planner-model"}),
+        patch.dict(llm_factory._ROLE_CONFIG_MAP, {"planner": "planner-model"}),
         patch("browser_use.llm.ChatGoogle", mock_chat_google),
     ):
         llm_factory.make_planning_llm(role="planner", temperature=0.1, max_output_tokens=256)
@@ -107,7 +106,7 @@ def test_agent_llm_role_specific_override():
     with (
         patch.object(llm_factory, "BLOP_LLM_PROVIDER", "google"),
         patch.object(llm_factory, "GOOGLE_API_KEY", "key"),
-        patch.dict(os.environ, {"BLOP_AGENT_LLM_MODEL": "agent-model"}),
+        patch.dict(llm_factory._ROLE_CONFIG_MAP, {"agent": "agent-model"}),
         patch("browser_use.llm.ChatGoogle", mock_chat_google),
     ):
         llm_factory.make_agent_llm(role="agent")

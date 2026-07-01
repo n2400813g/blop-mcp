@@ -13,19 +13,29 @@ and ``blop-mcp[otel]`` is installed (see ``llm_tracing``).
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
-from blop.config import ANTHROPIC_API_KEY, BLOP_LLM_MODEL, BLOP_LLM_PROVIDER, GOOGLE_API_KEY, OPENAI_API_KEY
+from blop.config import (
+    ANTHROPIC_API_KEY,
+    BLOP_AGENT_LLM_MODEL,
+    BLOP_CLASSIFIER_LLM_MODEL,
+    BLOP_LLM_MODEL,
+    BLOP_LLM_PROVIDER,
+    BLOP_PLANNER_LLM_MODEL,
+    BLOP_REPAIR_LLM_MODEL,
+    BLOP_VISION_LLM_MODEL,
+    GOOGLE_API_KEY,
+    OPENAI_API_KEY,
+)
 
-_ROLE_ENV_MAP = {
-    "agent": "BLOP_AGENT_LLM_MODEL",
-    "planner": "BLOP_PLANNER_LLM_MODEL",
-    "repair": "BLOP_REPAIR_LLM_MODEL",
-    "classifier": "BLOP_CLASSIFIER_LLM_MODEL",
-    "summary": "BLOP_CLASSIFIER_LLM_MODEL",
-    "vision": "BLOP_VISION_LLM_MODEL",
-    "assertion": "BLOP_VISION_LLM_MODEL",
+_ROLE_CONFIG_MAP: dict[str, str] = {
+    "agent": BLOP_AGENT_LLM_MODEL,
+    "planner": BLOP_PLANNER_LLM_MODEL,
+    "repair": BLOP_REPAIR_LLM_MODEL,
+    "classifier": BLOP_CLASSIFIER_LLM_MODEL,
+    "summary": BLOP_CLASSIFIER_LLM_MODEL,
+    "vision": BLOP_VISION_LLM_MODEL,
+    "assertion": BLOP_VISION_LLM_MODEL,
 }
 
 _DEFAULT_MODELS = {
@@ -62,9 +72,9 @@ _DEFAULT_MODELS = {
 def resolve_llm_model(role: str, provider: str | None = None) -> str:
     provider_name = (provider or BLOP_LLM_PROVIDER).lower()
     role_name = (role or "planner").strip().lower()
-    env_name = _ROLE_ENV_MAP.get(role_name)
-    if env_name and os.getenv(env_name):
-        return os.getenv(env_name, "")
+    role_override = _ROLE_CONFIG_MAP.get(role_name, "")
+    if role_override:
+        return role_override
     if BLOP_LLM_MODEL:
         return BLOP_LLM_MODEL
     return _DEFAULT_MODELS.get(provider_name, _DEFAULT_MODELS["google"]).get(
