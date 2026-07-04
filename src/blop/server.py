@@ -2730,33 +2730,36 @@ async def get_mcp_capabilities() -> dict:
     from blop.config import BLOP_ENABLE_COMPAT_TOOLS, BLOP_ENABLE_LEGACY_MCP_TOOLS
 
     try:
-        pkg_version = metadata.version("blop-mcp")
-    except metadata.PackageNotFoundError:
-        pkg_version = "unknown"
-    tm = mcp._tool_manager
-    reg = getattr(tm, "_tools", {}) or {}
-    data = {
-        "package_version": pkg_version,
-        "registered_tool_count": len(reg),
-        "legacy_mcp_tools_enabled": BLOP_ENABLE_LEGACY_MCP_TOOLS,
-        "compat_tools_enabled": BLOP_ENABLE_COMPAT_TOOLS,
-        "health_resource_uri": "blop://health",
-        "canonical_release_tools": [
-            "validate_release_setup",
-            "discover_critical_journeys",
-            "record_test_flow",
-            "run_release_check",
-            "triage_release_blocker",
-            "get_qa_recommendations",
-        ],
-        "context_tools": [
-            "get_workspace_context",
-            "get_release_context",
-            "get_release_and_journeys",
-            "get_journeys_for_release",
-        ],
-    }
-    return _ok_tool_response(data).model_dump()
+        try:
+            pkg_version = metadata.version("blop-mcp")
+        except metadata.PackageNotFoundError:
+            pkg_version = "unknown"
+        tm = mcp._tool_manager
+        reg = getattr(tm, "_tools", {}) or {}
+        data = {
+            "package_version": pkg_version,
+            "registered_tool_count": len(reg),
+            "legacy_mcp_tools_enabled": BLOP_ENABLE_LEGACY_MCP_TOOLS,
+            "compat_tools_enabled": BLOP_ENABLE_COMPAT_TOOLS,
+            "health_resource_uri": "blop://health",
+            "canonical_release_tools": [
+                "validate_release_setup",
+                "discover_critical_journeys",
+                "record_test_flow",
+                "run_release_check",
+                "triage_release_blocker",
+                "get_qa_recommendations",
+            ],
+            "context_tools": [
+                "get_workspace_context",
+                "get_release_context",
+                "get_release_and_journeys",
+                "get_journeys_for_release",
+            ],
+        }
+        return _ok_tool_response(data).model_dump()
+    except Exception as exc:
+        return {"ok": False, "error": {"code": "BLOP_MCP_INTERNAL_TOOL_ERROR", "message": str(exc)}}
 
 
 @mcp.tool()
