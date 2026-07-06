@@ -244,8 +244,9 @@ async def test_migration_adds_platform_column(tmp_path, monkeypatch):
     db_path = str(tmp_path / "test.db")
     monkeypatch.setenv("BLOP_DB_PATH", db_path)
 
-    from blop.storage.sqlite import init_db
+    from blop.storage.sqlite import init_db, reset_db_connection
 
+    await reset_db_connection()
     await init_db()
 
     import aiosqlite
