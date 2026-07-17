@@ -297,6 +297,12 @@ BLOP_ARTIFACT_BUFFER_LIMIT: int = max(1, int(os.getenv("BLOP_ARTIFACT_BUFFER_LIM
 # Exploration profile name (preset key for get_exploration_tuning)
 BLOP_EXPLORATION_PROFILE: str = os.getenv("BLOP_EXPLORATION_PROFILE", "default").strip().lower()
 
+# Capability gating for compat browser_* tool surface
+# BLOP_CAPABILITIES_PROFILE: named profile (production_minimal / production_debug / full)
+# BLOP_CAPABILITIES: explicit comma-separated capability list (overrides profile)
+BLOP_CAPABILITIES_PROFILE: str = os.getenv("BLOP_CAPABILITIES_PROFILE", "").strip().lower()
+BLOP_CAPABILITIES: str = os.getenv("BLOP_CAPABILITIES", "")
+
 
 def hosted_sync_config_snapshot() -> dict:
     """Describe optional hosted sync posture without forcing cloud usage."""

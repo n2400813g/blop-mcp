@@ -42,8 +42,7 @@ Groups (for **compat_browser** gating and documentation):
 
 from __future__ import annotations
 
-import os
-
+import blop.config as _cfg
 from blop.config import BLOP_ENV
 
 # Names gated by BLOP_ENABLE_LEGACY_MCP_TOOLS in server.py (documentation / tooling).
@@ -159,13 +158,13 @@ CAPABILITY_PROFILES: dict[str, str] = {
 
 
 def get_enabled_capabilities() -> list[str]:
-    profile = os.getenv("BLOP_CAPABILITIES_PROFILE", "").strip().lower()
+    profile = _cfg.BLOP_CAPABILITIES_PROFILE
     if profile:
         raw = CAPABILITY_PROFILES.get(profile, "")
         if not raw:
-            raw = os.getenv("BLOP_CAPABILITIES", DEFAULT_CAPABILITIES)
+            raw = _cfg.BLOP_CAPABILITIES or DEFAULT_CAPABILITIES
     else:
-        raw = os.getenv("BLOP_CAPABILITIES", DEFAULT_CAPABILITIES)
+        raw = _cfg.BLOP_CAPABILITIES or DEFAULT_CAPABILITIES
     return [c.strip().lower() for c in raw.split(",") if c.strip()]
 
 
