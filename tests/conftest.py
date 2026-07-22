@@ -76,6 +76,25 @@ def reset_module_state_between_tests():
         pass
 
 
+@pytest.fixture(autouse=True)
+async def reset_sqlite_connection_between_tests():
+    """Close any shared SQLite connection after each test.
+
+    Tests that inadvertently open a real aiosqlite connection (e.g. via an
+    unpatched helper like _refresh_linked_release_brief) leave the connection
+    open, keeping an aiosqlite background thread alive.  When pytest-asyncio
+    then closes the test's event loop, it waits indefinitely for the thread.
+    Resetting the shared connection here ensures clean teardown every time.
+    """
+    yield
+    try:
+        from blop.storage.sqlite import reset_db_connection
+
+        await reset_db_connection()
+    except Exception:
+        pass
+
+
 @pytest.fixture
 def tmp_db(tmp_path):
     """Isolated SQLite DB fixture.
