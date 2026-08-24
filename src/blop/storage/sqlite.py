@@ -10,7 +10,12 @@ from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
-from blop.config import BLOP_ARTIFACT_BUFFER_LIMIT, BLOP_DB_PATH, BLOP_EVENT_BUFFER_MAX, BLOP_RUN_HEALTH_BUFFER_LIMIT
+from blop.config import (
+    BLOP_ARTIFACT_BUFFER_LIMIT,
+    BLOP_EVENT_BUFFER_MAX,
+    BLOP_RUN_HEALTH_BUFFER_LIMIT,
+    get_db_path,
+)
 from blop.engine.errors import BLOP_STORAGE_DB_OPEN_FAILED, BLOP_STORAGE_MIGRATION_FAILED, BlopError
 from blop.engine.logger import get_logger
 from blop.schemas import (
@@ -52,13 +57,7 @@ def _buffer_lock() -> asyncio.Lock:
 
 
 def _db_path() -> str:
-    raw = os.environ.get("BLOP_DB_PATH", BLOP_DB_PATH)
-    if not os.path.isabs(raw):
-        from pathlib import Path
-
-        # sqlite.py is at src/blop/storage/; need 4 parents to reach repo root
-        return str(Path(__file__).parent.parent.parent.parent / raw)
-    return raw
+    return get_db_path()
 
 
 def _parse_run_duration_seconds(started_at: str | None, completed_at: str | None) -> float | None:

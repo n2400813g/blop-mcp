@@ -172,12 +172,20 @@ def get_durability_mode() -> str:
 
 
 # Resolve DB path: if relative, anchor to repo root so the server works from any CWD
+_REPO_ROOT = Path(__file__).parent.parent.parent
 _RAW_BLOP_DB_PATH = os.getenv("BLOP_DB_PATH", ".blop/runs.db")
 if not os.path.isabs(_RAW_BLOP_DB_PATH):
-    _REPO_ROOT = Path(__file__).parent.parent.parent
     BLOP_DB_PATH: str = str(_REPO_ROOT / _RAW_BLOP_DB_PATH)
 else:
     BLOP_DB_PATH: str = _RAW_BLOP_DB_PATH
+
+
+def get_db_path() -> str:
+    """Resolve BLOP_DB_PATH dynamically, anchoring relative paths at the repo root."""
+    raw = os.environ.get("BLOP_DB_PATH", BLOP_DB_PATH)
+    if not os.path.isabs(raw):
+        return str(_REPO_ROOT / raw)
+    return raw
 BLOP_HEADLESS: bool = os.getenv("BLOP_HEADLESS", "true").lower() == "true"
 BLOP_MAX_STEPS: int = int(os.getenv("BLOP_MAX_STEPS", "50"))
 BLOP_DISCOVERY_CONCURRENCY: int = int(os.getenv("BLOP_DISCOVERY_CONCURRENCY", "0"))
