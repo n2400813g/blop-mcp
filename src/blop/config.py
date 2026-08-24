@@ -251,6 +251,11 @@ BLOP_COMPAT_SNAPSHOT_MODE: str = (
     os.getenv("BLOP_COMPAT_SNAPSHOT_MODE") or os.getenv("BLOP_SNAPSHOT_MODE") or "incremental"
 ).lower()
 
+
+def get_snapshot_mode() -> str:
+    """Resolve snapshot mode dynamically so runtime env overrides are honored."""
+    return (os.getenv("BLOP_COMPAT_SNAPSHOT_MODE") or os.getenv("BLOP_SNAPSHOT_MODE") or "incremental").lower()
+
 # Privacy guard for screenshot-to-LLM visual triage uploads.
 # Keep this disabled unless your screenshots are safe to send externally.
 BLOP_ALLOW_SCREENSHOT_LLM: bool = _env_bool("BLOP_ALLOW_SCREENSHOT_LLM", False)

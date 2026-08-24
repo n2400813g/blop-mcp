@@ -10,12 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from typing import Optional
 
+from blop.config import get_snapshot_mode
 
-def get_snapshot_mode() -> str:
-    return (os.getenv("BLOP_COMPAT_SNAPSHOT_MODE") or os.getenv("BLOP_SNAPSHOT_MODE") or "incremental").lower()
+__all__ = ["SnapshotTracker", "format_snapshot_for_llm", "get_snapshot_mode"]
 
 
 class SnapshotTracker:
