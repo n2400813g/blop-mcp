@@ -218,6 +218,16 @@ BLOP_OTEL_TRACING: str = os.getenv("BLOP_OTEL_TRACING", "")
 # Secrets masking file (default: .blop/secrets.env); read at call-time in engine/secrets.py
 BLOP_SECRETS_FILE: str = os.getenv("BLOP_SECRETS_FILE", "")
 
+
+def get_secrets_file_path() -> str:
+    """Return the secrets file path, re-reading from the environment each call.
+
+    Secrets module calls this instead of os.getenv directly so the env-var
+    name is defined in one place while still supporting runtime env changes
+    (needed by reload_secrets()).
+    """
+    return os.getenv("BLOP_SECRETS_FILE", "")
+
 # Extended thinking budget (0 = disabled)
 BLOP_THINKING_BUDGET: int = int(os.getenv("BLOP_THINKING_BUDGET", "0"))
 

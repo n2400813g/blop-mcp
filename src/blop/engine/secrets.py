@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from blop.config import get_secrets_file_path
+
 _secrets_cache: list[str] | None = None
 
 
@@ -20,7 +22,7 @@ def _load_secrets() -> list[str]:
         return _secrets_cache
 
     # Read path dynamically so reload_secrets() picks up runtime env changes.
-    secrets_file = os.getenv("BLOP_SECRETS_FILE", "")
+    secrets_file = get_secrets_file_path()
     if not secrets_file:
         repo_root = Path(__file__).parent.parent.parent
         secrets_file = str(repo_root / ".blop" / "secrets.env")
