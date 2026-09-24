@@ -62,7 +62,7 @@ class BlopError(Exception):
 
     def to_merged_response(self, **extra: Any) -> dict[str, Any]:
         """Flat-ish MCP payload: top-level ``error`` string plus structured ``blop_error``."""
-        out: dict[str, Any] = {**extra, "error": self.message, "blop_error": self.to_dict()["error"]}
+        out: dict[str, Any] = {**extra, "ok": False, "error": self.message, "blop_error": self.to_dict()["error"]}
         return out
 
 
@@ -94,7 +94,7 @@ def tool_error(
 
 def merge_tool_error(src: dict[str, Any], **extra: Any) -> dict[str, Any]:
     """Copy ``error`` / ``blop_error`` from a nested tool result into a new payload."""
-    out: dict[str, Any] = {**extra}
+    out: dict[str, Any] = {**extra, "ok": False}
     err = src.get("error")
     if isinstance(err, dict) and "code" in err:
         out["error"] = err.get("message", str(err))
