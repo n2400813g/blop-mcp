@@ -599,3 +599,11 @@ BLOP_CAPTURE_FINAL_SCREENSHOT: bool = _CAPTURE_POLICY["final_screenshot"]
 BLOP_SCREENSHOT_INTERVAL_SECS: float = _CAPTURE_POLICY["screenshot_interval_secs"]
 BLOP_MAX_SCREENSHOTS: int = _CAPTURE_POLICY["max_screenshots"]
 BLOP_MAX_EVIDENCE_ARTIFACTS: int = _CAPTURE_POLICY["artifact_cap"]
+
+
+def get_runtime_credential(env_var: str) -> str | None:
+    """Read a credential from a runtime-determined env var name (e.g. from an AuthProfile).
+
+    Centralises dynamic os.getenv calls so all env reads trace back to config.py.
+    """
+    return os.getenv(env_var) or None

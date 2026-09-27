@@ -21,6 +21,7 @@ from blop.config import (
     STORAGE_STATE_PATH,
     TEST_PASSWORD_SELECTOR,
     TEST_USERNAME_SELECTOR,
+    get_runtime_credential,
 )
 from blop.engine.logger import get_logger
 from blop.engine.path_safety import resolve_within_base, sanitize_component
@@ -145,8 +146,8 @@ async def _env_login(profile: AuthProfile) -> Optional[str]:
 
         username_env = profile.username_env or "TEST_USERNAME"
         password_env = profile.password_env or "TEST_PASSWORD"
-        username = os.getenv(username_env)
-        password = os.getenv(password_env)
+        username = get_runtime_credential(username_env)
+        password = get_runtime_credential(password_env)
         from blop.config import LOGIN_URL, TEST_AUTH_URL
 
         login_url = profile.login_url or LOGIN_URL or TEST_AUTH_URL
