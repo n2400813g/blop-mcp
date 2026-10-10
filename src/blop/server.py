@@ -33,8 +33,6 @@ from urllib.parse import unquote
 
 # Must happen before any other imports to prevent JSON-RPC interference
 logging.disable(logging.CRITICAL)
-os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
-os.environ.setdefault("BROWSER_USE_LOGGING_LEVEL", "CRITICAL")
 
 # blop logger bypasses logging.disable via explicit _logger.disabled = False
 from blop.engine.logger import get_logger as _get_blop_logger  # noqa: E402
