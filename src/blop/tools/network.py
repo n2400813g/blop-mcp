@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 def _route_error(message: str, **details) -> dict:
-    payload = {"error": message}
+    payload = {"ok": False, "error": message}
     payload.update(details)
     return payload
 

@@ -142,10 +142,11 @@ async def record_test_flow(
         profile = await sqlite.get_auth_profile(profile_name)
         if profile is None:
             return {
+                "ok": False,
                 "error": (
                     f"Auth profile '{profile_name}' was not found. "
                     "Provide a valid profile_name, run save_auth_profile, or use capture_auth_session."
-                )
+                ),
             }
 
     storage_state: Optional[str] = None
@@ -155,7 +156,8 @@ async def record_test_flow(
         except Exception:
             _log.error("auth_resolve_failed profile=%s", profile_name, exc_info=True)
             return {
-                "error": (f"Auth profile '{profile_name}' could not be resolved. Run capture_auth_session to refresh.")
+                "ok": False,
+                "error": (f"Auth profile '{profile_name}' could not be resolved. Run capture_auth_session to refresh."),
             }
     if storage_state is None:
         storage_state = await auth_engine.auto_storage_state_from_env()

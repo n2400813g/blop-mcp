@@ -41,7 +41,7 @@ def _storage_state_path_for_profile(profile_name: Optional[str]) -> str:
 
 
 def _storage_error(message: str, **details: Any) -> dict:
-    payload = {"error": message}
+    payload = {"ok": False, "error": message}
     payload.update(details)
     return payload
 
